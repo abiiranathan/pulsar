@@ -1,56 +1,58 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/epoll.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <time.h>
-#include <pthread.h>
+#include <stdio.h>       //Standard I/O functions
+#include <stdlib.h>      //Memory allocation and utility functions
+#include <string.h>      // String manipulation functions
+#include <unistd.h>      // POSIX API for system calls
+#include <sys/socket.h>  //Socket programming interfaces
+#include <netinet/in.h>  // Internet protocol family definitions
+#include <arpa/inet.h>   // Internet address manipulation
+#include <sys/epoll.h>   // Epoll I/O event notification interface
+#include <fcntl.h>       // File control options
+#include <errno.h>       // Error number definitions
+#include <time.h>        // Time/date utilities
+#include <pthread.h>     // POSIX threads
 
-#define MAX_EVENTS         1024
-#define BUFFER_SIZE        4096
-#define PORT               8080
-#define CONNECTION_TIMEOUT 30         // seconds
+#define MAX_EVENTS         1024       // Maximum number of events epoll can return at once
+#define BUFFER_SIZE        4096       //  Size of read buffer (4096 bytes)
+#define PORT               8080       // Server listening port (8080)
+#define CONNECTION_TIMEOUT 30         //  Inactive connection timeout in seconds (30)
 #define NUM_WORKERS        8          // Number of worker threads
 #define MAX_BODY_SIZE      (2 << 20)  // 2 MB
 
 // Connection states
-typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } connection_state;
+typedef enum {
+    STATE_READING_REQUEST,   // Connection is reading HTTP request
+    STATE_WRITING_RESPONSE,  // Connection is writing HTTP response
+    STATE_CLOSING            // Connection is being closed
+} connection_state;
 
 // Connection data structure
 typedef struct {
-    int fd;
-    connection_state state;
+    int fd;                  // Client socket file descriptor
+    connection_state state;  // Current connection state
 
-    char read_buf[BUFFER_SIZE];
-    size_t read_bytes;
+    char read_buf[BUFFER_SIZE];  // Buffer for incoming data
+    size_t read_bytes;           // Bytes currently in read buffer
 
-    char* write_buf;
-    size_t write_bytes;
-    size_t write_sent;
-    size_t write_alloc;
+    char* write_buf;     // Buffer for outgoing data
+    size_t write_bytes;  // Total bytes to write
+    size_t write_sent;   // Bytes already sent
+    size_t write_alloc;  // Bytes allocated for write buffer
 
-    // Request line data
-    char method[8];
-    char* path;
+    char method[8];         // HTTP method (GET, POST etc.)
+    char* path;             // Pointer to dynamically allocated requested path
+    size_t content_length;  // Content-Length header value
+    char* request_body;     // Pointer to dynamically allocated request body
+    size_t headers_len;     // Length of headers section
+    size_t body_received;   // Bytes of body received
 
-    size_t content_length;
-    char* request_body;
-    size_t headers_len;
-    size_t body_received;
-
-    time_t last_activity;
-    int keep_alive;
+    time_t last_activity;  // Timestamp of last I/O activity
+    int keep_alive;        // Keep-alive flag
 } connection_t;
 
 // Worker thread data
 typedef struct {
-    int epoll_fd;
-    int worker_id;
+    int epoll_fd;   // Worker's epoll file descriptor
+    int worker_id;  // Worker thread identifier
 } worker_data_t;
 
 // Global server socket
@@ -63,6 +65,7 @@ void set_nonblocking(int fd) {
         perror("fcntl F_GETFL");
         exit(EXIT_FAILURE);
     }
+
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
         perror("fcntl F_SETFL");
         exit(EXIT_FAILURE);
@@ -75,25 +78,29 @@ int create_server_socket(int port) {
     struct sockaddr_in address;
     int opt = 1;
 
+    // Create an Internet socket.
     if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
+    // set port reuse option.
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt");
         exit(EXIT_FAILURE);
     }
 
-    address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port        = htons(port);
+    address.sin_family      = AF_INET;      // TCP internet Ipv4 address
+    address.sin_addr.s_addr = INADDR_ANY;   // Bind on any interface
+    address.sin_port        = htons(port);  // Set port (host-network)
 
+    // Bind the socket.
     if (bind(fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
 
+    // Listen for connections with backlog of SOMAXCONN
     if (listen(fd, SOMAXCONN) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
