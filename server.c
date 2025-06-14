@@ -11,11 +11,12 @@
 #include <time.h>
 #include <pthread.h>
 
-#define MAX_EVENTS         SOMAXCONN
+#define MAX_EVENTS         1024
 #define BUFFER_SIZE        4096
 #define PORT               8080
-#define CONNECTION_TIMEOUT 30  // seconds
-#define NUM_WORKERS        8   // Number of worker threads
+#define CONNECTION_TIMEOUT 30         // seconds
+#define NUM_WORKERS        8          // Number of worker threads
+#define MAX_BODY_SIZE      (2 << 20)  // 2 MB
 
 // Connection states
 typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } connection_state;
@@ -24,11 +25,24 @@ typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } co
 typedef struct {
     int fd;
     connection_state state;
+
     char read_buf[BUFFER_SIZE];
     size_t read_bytes;
-    char write_buf[BUFFER_SIZE];
+
+    char* write_buf;
     size_t write_bytes;
     size_t write_sent;
+    size_t write_alloc;
+
+    // Request line data
+    char method[8];
+    char* path;
+
+    size_t content_length;
+    char* request_body;
+    size_t headers_len;
+    size_t body_received;
+
     time_t last_activity;
     int keep_alive;
 } connection_t;
@@ -90,12 +104,33 @@ int create_server_socket(int port) {
 
 // Reset connection for new request
 void reset_connection(connection_t* conn) {
-    conn->state         = STATE_READING_REQUEST;
-    conn->read_bytes    = 0;
-    conn->write_bytes   = 0;
-    conn->write_sent    = 0;
-    conn->last_activity = time(NULL);
+    conn->state          = STATE_READING_REQUEST;
+    conn->read_bytes     = 0;
+    conn->write_bytes    = 0;
+    conn->write_sent     = 0;
+    conn->write_alloc    = 0;
+    conn->last_activity  = time(NULL);
+    conn->content_length = 0;
+    conn->body_received  = 0;
+    conn->headers_len    = 0;
+    conn->keep_alive     = 1;
     memset(conn->read_buf, 0, BUFFER_SIZE);
+    memset(conn->method, 0, sizeof(conn->method));
+
+    if (conn->write_buf) {
+        free(conn->write_buf);
+        conn->write_buf = NULL;
+    }
+
+    if (conn->request_body) {
+        free(conn->request_body);
+        conn->request_body = NULL;
+    }
+
+    if (conn->path) {
+        free(conn->path);
+        conn->path = NULL;
+    }
 }
 
 // Check if connection should be kept alive
@@ -136,8 +171,10 @@ int safe_accept(int worker_id) {
 
     set_nonblocking(client_fd);
 
-    printf("Worker %d accepted new connection from %s:%d (fd: %d)\n", worker_id, inet_ntoa(client_addr.sin_addr),
-           ntohs(client_addr.sin_port), client_fd);
+    (void)worker_id;
+
+    // printf("Worker %d accepted new connection from %s:%d (fd: %d)\n", worker_id, inet_ntoa(client_addr.sin_addr),
+    //        ntohs(client_addr.sin_port), client_fd);
 
     return client_fd;
 }
@@ -169,32 +206,89 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
 
 // Process HTTP request and prepare response
 void process_request(connection_t* conn) {
-    // Check for complete headers
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
-    if (!end_of_headers) {
-        // Incomplete request, keep reading
-        return;
-    }
+    if (!end_of_headers) return;
 
-    // Check if we should keep the connection alive
-    conn->keep_alive = should_keep_alive(conn->read_buf);
+    size_t headers_len = end_of_headers - conn->read_buf + 4;
+    conn->headers_len  = headers_len;
 
-    // Prepare HTTP response
-    const char* response_fmt =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Connection: %s\r\n"
-        "Content-Length: 13\r\n"
-        "\r\n"
-        "Hello, World!";
-
-    conn->write_bytes = snprintf(conn->write_buf, BUFFER_SIZE, response_fmt, conn->keep_alive ? "keep-alive" : "close");
-
-    if (conn->write_bytes >= BUFFER_SIZE) {
-        fprintf(stderr, "Response too large\n");
+    // Read http method and path.
+    char path[1024];
+    if (sscanf(conn->read_buf, "%7s %1023s", conn->method, path) != 2) {
+        fprintf(stderr, "Failed to parse method and path\n");
         conn->state = STATE_CLOSING;
         return;
     }
+
+    // Copy the path
+    conn->path = strdup(path);
+    if (!conn->path) {
+        perror("strdup");
+        conn->state = STATE_CLOSING;
+        return;
+    }
+
+    // Log method and path
+    // printf("%s %s\n", conn->method, conn->path);
+
+    conn->keep_alive = should_keep_alive(conn->read_buf);
+
+    // Parse Content-Length
+    char* cl = strcasestr(conn->read_buf, "Content-Length:");
+    if (cl) {
+        cl += strlen("Content-Length:");
+        while (*cl == ' ' || *cl == '\t')
+            cl++;
+        conn->content_length = strtoul(cl, NULL, 10);
+
+        if (conn->content_length > MAX_BODY_SIZE) {
+            fprintf(stderr, "Body exceeds maximum allowed size: %lu bytes", (size_t)MAX_BODY_SIZE);
+            conn->state = STATE_CLOSING;
+            return;
+        }
+    }
+
+    size_t body_available = conn->read_bytes - headers_len;
+    if (conn->content_length > 0) {
+        conn->request_body = malloc(conn->content_length + 1);
+        if (!conn->request_body) {
+            perror("malloc body");
+            conn->state = STATE_CLOSING;
+            return;
+        }
+
+        size_t copy_len = (body_available > conn->content_length) ? conn->content_length : body_available;
+        memcpy(conn->request_body, conn->read_buf + headers_len, copy_len);
+        conn->body_received          = copy_len;
+        conn->request_body[copy_len] = '\0';
+
+        // Wait for remaining body
+        if (conn->body_received < conn->content_length) return;
+    }
+
+    // TODO: Add routing here
+
+    // Prepare a dynamic response
+    const char* body    = "Hello, Dynamic World!";
+    size_t body_len     = strlen(body);
+    size_t response_len = 128 + body_len;
+
+    conn->write_buf = malloc(response_len);
+    if (!conn->write_buf) {
+        perror("malloc response");
+        conn->state = STATE_CLOSING;
+        return;
+    }
+
+    conn->write_alloc = response_len;
+    conn->write_bytes = snprintf(conn->write_buf, response_len,
+                                 "HTTP/1.1 200 OK\r\n"
+                                 "Content-Type: text/plain\r\n"
+                                 "Connection: %s\r\n"
+                                 "Content-Length: %zu\r\n"
+                                 "\r\n"
+                                 "%s",
+                                 conn->keep_alive ? "keep-alive" : "close", body_len, body);
 
     conn->write_sent    = 0;
     conn->state         = STATE_WRITING_RESPONSE;
@@ -203,36 +297,52 @@ void process_request(connection_t* conn) {
 
 // Handle read event
 void handle_read(int epoll_fd, connection_t* conn) {
-    ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, BUFFER_SIZE - conn->read_bytes - 1);
-
-    if (count == -1) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            perror("read");
+    while (1) {
+        ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, BUFFER_SIZE - conn->read_bytes - 1);
+        if (count == -1) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                perror("read");
+                conn->state = STATE_CLOSING;
+            }
+            break;
+        } else if (count == 0) {
             conn->state = STATE_CLOSING;
+            break;
         }
-        return;
-    } else if (count == 0) {
-        // Connection closed by client
-        conn->state = STATE_CLOSING;
-        return;
-    }
 
-    conn->read_bytes += count;
-    conn->read_buf[conn->read_bytes] = '\0';
-    conn->last_activity              = time(NULL);
+        conn->last_activity = time(NULL);
+        conn->read_bytes += count;
+        conn->read_buf[conn->read_bytes] = '\0';
 
-    // Process the request if we have complete headers
-    process_request(conn);
+        // If we are expecting body
+        if (conn->state == STATE_READING_REQUEST && conn->request_body && conn->body_received < conn->content_length &&
+            conn->headers_len > 0) {
+            size_t new_body = conn->read_bytes - conn->headers_len - conn->body_received;
+            if (new_body > 0) {
+                size_t copy_len = ((conn->body_received + new_body) > conn->content_length)
+                                      ? conn->content_length - conn->body_received
+                                      : new_body;
 
-    // If we're now in writing state, modify epoll events
-    if (conn->state == STATE_WRITING_RESPONSE) {
-        struct epoll_event event;
-        event.events   = EPOLLOUT | EPOLLET | EPOLLRDHUP;
-        event.data.ptr = conn;
+                memcpy(conn->request_body + conn->body_received,
+                       conn->read_buf + conn->headers_len + conn->body_received, copy_len);
+                conn->body_received += copy_len;
+                conn->request_body[conn->body_received] = '\0';
+            }
 
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
-            perror("epoll_ctl mod to EPOLLOUT");
-            conn->state = STATE_CLOSING;
+            if (conn->body_received < conn->content_length) return;
+        }
+
+        process_request(conn);
+
+        if (conn->state == STATE_WRITING_RESPONSE) {
+            struct epoll_event event;
+            event.events   = EPOLLOUT | EPOLLET | EPOLLRDHUP;
+            event.data.ptr = conn;
+            if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
+                perror("epoll_ctl mod to EPOLLOUT");
+                conn->state = STATE_CLOSING;
+            }
+            return;
         }
     }
 }
@@ -276,9 +386,14 @@ void handle_write(int epoll_fd, connection_t* conn) {
 
 // Close connection and clean up
 void close_connection(int epoll_fd, connection_t* conn, int worker_id) {
-    printf("Worker %d closing connection on fd %d\n", worker_id, conn->fd);
+    // printf("Worker %d closing connection on fd %d\n", worker_id, conn->fd);
+    (void)worker_id;
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     close(conn->fd);
+
+    if (conn->path) free(conn->path);
+    if (conn->write_buf) free(conn->write_buf);
+    if (conn->request_body) free(conn->request_body);
     free(conn);
 }
 
