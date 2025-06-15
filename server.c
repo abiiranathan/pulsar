@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,8 @@
 #define CONNECTION_TIMEOUT 30
 #define NUM_WORKERS        8
 #define MAX_BODY_SIZE      (2 << 20)
+#define MAX_HEADERS        32
+#define MAX_HEADER_LEN     512
 
 // Connection states
 typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } connection_state;
@@ -37,7 +40,27 @@ typedef struct {
     size_t bytes_to_send;  // Total bytes to write
     size_t bytes_sent;     // Bytes already sent
     size_t buffer_size;    // Bytes allocated for buffer
+
+    // New fields for simplified API
+    int status_code;                            // HTTP status code
+    char status_message[64];                    // HTTP status message
+    char headers[MAX_HEADERS][MAX_HEADER_LEN];  // Custom headers
+    size_t header_count;                        // Number of custom headers
+    char* body_data;                            // Response body data
+    size_t body_size;                           // Current body size
+    size_t body_capacity;                       // Body buffer capacity
+    int headers_written;                        // Flag to track if headers are written
 } response_t;
+
+typedef enum {
+    HTTP_INVALID = -1,
+    HTTP_OPTIONS,
+    HTTP_GET,
+    HTTP_POST,
+    HTTP_PUT,
+    HTTP_PATCH,
+    HTTP_DELETE,
+} HttpMethod;
 
 // Connection structure
 typedef struct {
@@ -51,6 +74,14 @@ typedef struct {
     response_t* response;        // HTTP response data
 } connection_t;
 
+typedef bool (*HttpHandler)(connection_t* conn);  // Changed to return int (bool)
+
+typedef struct {
+    const char* pattern;
+    HttpMethod method;
+    HttpHandler handler;
+} route_t;
+
 // Worker thread data
 typedef struct {
     int epoll_fd;
@@ -59,7 +90,174 @@ typedef struct {
 
 int server_fd;
 
-// Set socket to non-blocking mode
+#define MAX_ROUTES 64
+static route_t global_routes[MAX_ROUTES];
+static size_t global_count = 0;
+
+// =================== New API Functions ========================
+
+// Set HTTP status code and message
+void conn_set_status(connection_t* conn, int code, const char* message) {
+    if (!conn || !conn->response) return;
+
+    conn->response->status_code = code;
+    strlcpy(conn->response->status_message, message ? message : "", sizeof(conn->response->status_message));
+}
+
+// Add a custom header
+void conn_writeheader(connection_t* conn, const char* header_text) {
+    if (!conn || !conn->response || !header_text) return;
+
+    if (conn->response->header_count < MAX_HEADERS) {
+        strlcpy(conn->response->headers[conn->response->header_count], header_text, MAX_HEADER_LEN);
+        conn->response->header_count++;
+    }
+}
+
+// Write data to response body
+int conn_write(connection_t* conn, const void* data, size_t len) {
+    if (!conn || !conn->response || !data || len == 0) return 0;
+
+    response_t* resp = conn->response;
+
+    // Ensure we have enough capacity
+    size_t required_size = resp->body_size + len;
+    if (required_size > resp->body_capacity) {
+        size_t new_capacity = resp->body_capacity == 0 ? 1024 : resp->body_capacity;
+        while (new_capacity < required_size) {
+            new_capacity *= 2;
+        }
+
+        char* new_buffer = realloc(resp->body_data, new_capacity);
+        if (!new_buffer) {
+            return 0;  // Failed to allocate memory
+        }
+
+        resp->body_data     = new_buffer;
+        resp->body_capacity = new_capacity;
+    }
+
+    // Copy data to body buffer
+    memcpy(resp->body_data + resp->body_size, data, len);
+    resp->body_size += len;
+
+    return len;
+}
+
+// Build the complete HTTP response
+void finalize_response(connection_t* conn) {
+    response_t* resp = conn->response;
+    if (!resp || resp->headers_written) return;
+
+    // Set default status if not set
+    if (resp->status_code == 0) {
+        resp->status_code = 200;
+        strcpy(resp->status_message, "OK");
+    }
+
+    // Calculate total response size
+    size_t header_size = 512;  // Base headers
+    for (size_t i = 0; i < resp->header_count; i++) {
+        header_size += strlen(resp->headers[i]) + 2;  // +2 for \r\n
+    }
+
+    size_t total_size = header_size + resp->body_size;
+    resp->buffer      = malloc(total_size);
+    if (!resp->buffer) {
+        perror("malloc");
+        conn->state = STATE_CLOSING;
+        return;
+    }
+
+    resp->buffer_size = total_size;
+
+    // Build headers
+    int offset =
+        snprintf(resp->buffer, header_size,
+                 "HTTP/1.1 %d %s\r\n"
+                 "Connection: %s\r\n"
+                 "Content-Length: %zu\r\n",
+                 resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close", resp->body_size);
+
+    // Add custom headers
+    for (size_t i = 0; i < resp->header_count; i++) {
+        offset += snprintf(resp->buffer + offset, header_size - offset, "%s\r\n", resp->headers[i]);
+    }
+
+    // End headers
+    offset += snprintf(resp->buffer + offset, header_size - offset, "\r\n");
+
+    // Add body if present
+    if (resp->body_size > 0 && resp->body_data) {
+        memcpy(resp->buffer + offset, resp->body_data, resp->body_size);
+        offset += resp->body_size;
+    }
+
+    resp->bytes_to_send   = offset;
+    resp->bytes_sent      = 0;
+    resp->headers_written = 1;
+}
+
+// =================== Routing ========================
+bool http_method_valid(HttpMethod method) {
+    return method > HTTP_INVALID && method <= HTTP_DELETE;
+}
+
+const char* http_method_to_string(const HttpMethod method) {
+    switch (method) {
+        case HTTP_GET:
+            return "GET";
+        case HTTP_POST:
+            return "POST";
+        case HTTP_PUT:
+            return "PUT";
+        case HTTP_PATCH:
+            return "PATCH";
+        case HTTP_OPTIONS:
+            return "OPTIONS";
+        case HTTP_DELETE:
+            return "DELETE";
+        default:
+            return "";
+    }
+}
+
+HttpMethod http_method_from_string(const char* method) {
+    if (!method) return HTTP_INVALID;
+    if (strcmp(method, "GET") == 0) return HTTP_GET;
+    if (strcmp(method, "POST") == 0) return HTTP_POST;
+    if (strcmp(method, "PUT") == 0) return HTTP_PUT;
+    if (strcmp(method, "PATCH") == 0) return HTTP_PATCH;
+    if (strcmp(method, "DELETE") == 0) return HTTP_DELETE;
+    if (strcmp(method, "OPTIONS") == 0) return HTTP_OPTIONS;
+    return HTTP_INVALID;
+}
+
+void route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
+    assert(global_count < MAX_ROUTES);
+    assert(http_method_valid(method));
+    assert(pattern);
+    assert(handler);
+
+    route_t* r = &global_routes[global_count++];
+    r->pattern = strdup(pattern);
+    assert(r->pattern);
+    r->method  = method;
+    r->handler = handler;
+}
+
+route_t* route_match(const char* url, HttpMethod method) {
+    for (size_t i = 0; i < global_count; i++) {
+        route_t* r = &global_routes[i];
+        if (r->method == method && strcmp(url, r->pattern) == 0) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+// ====================================================
+
 void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -73,7 +271,6 @@ void set_nonblocking(int fd) {
     }
 }
 
-// Create and bind server socket
 int create_server_socket(int port) {
     int fd;
     struct sockaddr_in address;
@@ -106,7 +303,6 @@ int create_server_socket(int port) {
     return fd;
 }
 
-// Initialize a new request structure
 request_t* create_request() {
     request_t* req = malloc(sizeof(request_t));
     if (!req) return NULL;
@@ -115,7 +311,6 @@ request_t* create_request() {
     return req;
 }
 
-// Initialize a new response structure
 response_t* create_response() {
     response_t* resp = malloc(sizeof(response_t));
     if (!resp) return NULL;
@@ -124,7 +319,6 @@ response_t* create_response() {
     return resp;
 }
 
-// Free request resources
 void free_request(request_t* req) {
     if (!req) return;
 
@@ -133,15 +327,14 @@ void free_request(request_t* req) {
     free(req);
 }
 
-// Free response resources
 void free_response(response_t* resp) {
     if (!resp) return;
 
     if (resp->buffer) free(resp->buffer);
+    if (resp->body_data) free(resp->body_data);
     free(resp);
 }
 
-// Reset connection for new request
 void reset_connection(connection_t* conn) {
     conn->state         = STATE_READING_REQUEST;
     conn->read_bytes    = 0;
@@ -149,7 +342,6 @@ void reset_connection(connection_t* conn) {
     conn->keep_alive    = 1;
     memset(conn->read_buf, 0, BUFFER_SIZE);
 
-    // Reset or recreate request and response
     if (conn->request) {
         free_request(conn->request);
     }
@@ -161,11 +353,10 @@ void reset_connection(connection_t* conn) {
     conn->response = create_response();
 }
 
-// Check if connection should be kept alive
 int should_keep_alive(const char* request) {
     char* connection_hdr = strstr(request, "Connection:");
     if (!connection_hdr) {
-        return 1;  // HTTP/1.1 defaults to keep-alive
+        return 1;
     }
 
     char* value = connection_hdr + strlen("Connection:");
@@ -179,8 +370,7 @@ int should_keep_alive(const char* request) {
     return 1;
 }
 
-// Handle new connection with thread-safe accept
-int safe_accept(int worker_id) {
+int conn_accept(int worker_id) {
     int client_fd;
     struct sockaddr_in client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
@@ -198,7 +388,6 @@ int safe_accept(int worker_id) {
     return client_fd;
 }
 
-// Add new connection to worker's epoll instance
 void add_connection_to_worker(int epoll_fd, int client_fd) {
     connection_t* conn = malloc(sizeof(connection_t));
     if (!conn) {
@@ -208,9 +397,7 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
     }
 
     memset(conn, 0, sizeof(connection_t));
-    conn->fd       = client_fd;
-    conn->request  = create_request();
-    conn->response = create_response();
+    conn->fd = client_fd;
     reset_connection(conn);
 
     struct epoll_event event;
@@ -226,15 +413,31 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
     }
 }
 
-// Process HTTP request and prepare response
+static void copy_bodyfrom_buf(connection_t* conn) {
+    if (conn->state == STATE_READING_REQUEST && conn->request->body &&
+        conn->request->body_received < conn->request->content_length && conn->request->headers_len > 0) {
+        size_t new_body = conn->read_bytes - conn->request->headers_len - conn->request->body_received;
+        if (new_body > 0) {
+            size_t copy_len = ((conn->request->body_received + new_body) > conn->request->content_length)
+                                  ? conn->request->content_length - conn->request->body_received
+                                  : new_body;
+
+            // Copy partial body read in initial recv.
+            memcpy(conn->request->body + conn->request->body_received,
+                   conn->read_buf + conn->request->headers_len + conn->request->body_received, copy_len);
+            conn->request->body_received += copy_len;
+            conn->request->body[conn->request->body_received] = '\0';
+        }
+    }
+}
+
 void process_request(connection_t* conn) {
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
-    if (!end_of_headers) return;
+    if (!end_of_headers) return;  // still reading headers
 
     size_t headers_len         = end_of_headers - conn->read_buf + 4;
     conn->request->headers_len = headers_len;
 
-    // Parse method and path
     char path[1024];
     if (sscanf(conn->read_buf, "%7s %1023s", conn->request->method, path) != 2) {
         fprintf(stderr, "Failed to parse method and path\n");
@@ -251,7 +454,6 @@ void process_request(connection_t* conn) {
 
     conn->keep_alive = should_keep_alive(conn->read_buf);
 
-    // Parse Content-Length
     char* cl = strcasestr(conn->read_buf, "Content-Length:");
     if (cl) {
         cl += strlen("Content-Length:");
@@ -281,92 +483,94 @@ void process_request(connection_t* conn) {
         conn->request->body_received  = copy_len;
         conn->request->body[copy_len] = '\0';
 
-        // Wait for remaining body
-        if (conn->request->body_received < conn->request->content_length) return;
+        // copy part of body read with headers.
+        copy_bodyfrom_buf(conn);
+
+        // Read complete body.
+        while (conn->request->body_received < conn->request->content_length) {
+            size_t remaining = conn->request->content_length - conn->request->body_received;
+            ssize_t count    = read(conn->fd, conn->request->body + conn->request->body_received, remaining);
+            if (count == -1) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    continue;  // try again
+                } else {
+                    perror("read");
+                    conn->state = STATE_CLOSING;
+                    return;
+                }
+            } else if (count == 0) {
+                perror("read");
+                conn->state = STATE_CLOSING;
+                return;
+            }
+            conn->request->body_received += count;
+        }
     }
 
-    // TODO: Add routing here
+    HttpMethod method = http_method_from_string(conn->request->method);
+    route_t* route    = route_match(conn->request->path, method);
 
-    // Prepare response
-    const char* body    = "Hello, Dynamic World!";
-    size_t body_len     = strlen(body);
-    size_t response_len = 128 + body_len;
+    bool handler_success = true;
+    if (route) {
+        handler_success = route->handler(conn);
+    }
 
-    conn->response->buffer = malloc(response_len);
-    if (!conn->response->buffer) {
-        perror("malloc response");
+    if (!handler_success || !route) {
+        // Handle error or 404
+        if (!route) {
+            conn_set_status(conn, 404, "Not Found");
+            conn_writeheader(conn, "Content-Type: text/plain");
+            conn_write(conn, "404 Not Found", 13);
+        } else {
+            // Handler returned error
+            conn_set_status(conn, 500, "Internal Server Error");
+            conn_writeheader(conn, "Content-Type: text/plain");
+            conn_write(conn, "500 Internal Server Error", 25);
+        }
+    }
+
+    // Finalize response after handler completes
+    finalize_response(conn);
+
+    if (conn->response->buffer) {
+        conn->state         = STATE_WRITING_RESPONSE;
+        conn->last_activity = time(NULL);
+    } else {
+        conn->state = STATE_CLOSING;
+    }
+}
+
+void handle_read(int epoll_fd, connection_t* conn) {
+    ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, BUFFER_SIZE - conn->read_bytes - 1);
+    if (count == -1) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            perror("read");
+            conn->state = STATE_CLOSING;
+        }
+        return;
+    } else if (count == 0) {
         conn->state = STATE_CLOSING;
         return;
     }
 
-    conn->response->buffer_size   = response_len;
-    conn->response->bytes_to_send = snprintf(conn->response->buffer, response_len,
-                                             "HTTP/1.1 200 OK\r\n"
-                                             "Content-Type: text/plain\r\n"
-                                             "Connection: %s\r\n"
-                                             "Content-Length: %zu\r\n"
-                                             "\r\n"
-                                             "%s",
-                                             conn->keep_alive ? "keep-alive" : "close", body_len, body);
+    conn->last_activity = time(NULL);
+    conn->read_bytes += count;
+    conn->read_buf[conn->read_bytes] = '\0';
 
-    conn->response->bytes_sent = 0;
-    conn->state                = STATE_WRITING_RESPONSE;
-    conn->last_activity        = time(NULL);
-}
+    process_request(conn);
 
-// Handle read event
-void handle_read(int epoll_fd, connection_t* conn) {
-    while (1) {
-        ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, BUFFER_SIZE - conn->read_bytes - 1);
-        if (count == -1) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                perror("read");
-                conn->state = STATE_CLOSING;
-            }
-            break;
-        } else if (count == 0) {
+    if (conn->state == STATE_WRITING_RESPONSE) {
+        struct epoll_event event;
+        event.events   = EPOLLOUT | EPOLLET | EPOLLRDHUP;
+        event.data.ptr = conn;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
+            perror("epoll_ctl mod to EPOLLOUT");
             conn->state = STATE_CLOSING;
-            break;
         }
-
-        conn->last_activity = time(NULL);
-        conn->read_bytes += count;
-        conn->read_buf[conn->read_bytes] = '\0';
-
-        // If we are expecting body
-        if (conn->state == STATE_READING_REQUEST && conn->request->body &&
-            conn->request->body_received < conn->request->content_length && conn->request->headers_len > 0) {
-            size_t new_body = conn->read_bytes - conn->request->headers_len - conn->request->body_received;
-            if (new_body > 0) {
-                size_t copy_len = ((conn->request->body_received + new_body) > conn->request->content_length)
-                                      ? conn->request->content_length - conn->request->body_received
-                                      : new_body;
-
-                memcpy(conn->request->body + conn->request->body_received,
-                       conn->read_buf + conn->request->headers_len + conn->request->body_received, copy_len);
-                conn->request->body_received += copy_len;
-                conn->request->body[conn->request->body_received] = '\0';
-            }
-
-            if (conn->request->body_received < conn->request->content_length) return;
-        }
-
-        process_request(conn);
-
-        if (conn->state == STATE_WRITING_RESPONSE) {
-            struct epoll_event event;
-            event.events   = EPOLLOUT | EPOLLET | EPOLLRDHUP;
-            event.data.ptr = conn;
-            if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
-                perror("epoll_ctl mod to EPOLLOUT");
-                conn->state = STATE_CLOSING;
-            }
-            return;
-        }
+        return;
     }
 }
 
-// Handle write event
 void handle_write(int epoll_fd, connection_t* conn) {
     ssize_t count = write(conn->fd, conn->response->buffer + conn->response->bytes_sent,
                           conn->response->bytes_to_send - conn->response->bytes_sent);
@@ -382,13 +586,10 @@ void handle_write(int epoll_fd, connection_t* conn) {
     conn->response->bytes_sent += count;
     conn->last_activity = time(NULL);
 
-    // If we've sent the entire response
     if (conn->response->bytes_sent >= conn->response->bytes_to_send) {
         if (conn->keep_alive) {
-            // Reset connection for next request
             reset_connection(conn);
 
-            // Modify epoll events back to reading
             struct epoll_event event;
             event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
             event.data.ptr = conn;
@@ -398,13 +599,11 @@ void handle_write(int epoll_fd, connection_t* conn) {
                 conn->state = STATE_CLOSING;
             }
         } else {
-            // Client requested connection close
             conn->state = STATE_CLOSING;
         }
     }
 }
 
-// Close connection and clean up
 void close_connection(int epoll_fd, connection_t* conn, int worker_id) {
     (void)worker_id;
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
@@ -415,7 +614,6 @@ void close_connection(int epoll_fd, connection_t* conn, int worker_id) {
     free(conn);
 }
 
-// Check for timed out connections
 void check_timeouts(connection_t* conn, int worker_id) {
     time_t now = time(NULL);
     if (now - conn->last_activity > CONNECTION_TIMEOUT) {
@@ -424,15 +622,11 @@ void check_timeouts(connection_t* conn, int worker_id) {
     }
 }
 
-// Worker thread function
 void* worker_thread(void* arg) {
     worker_data_t* worker = (worker_data_t*)arg;
     int epoll_fd          = worker->epoll_fd;
     int worker_id         = worker->worker_id;
 
-    printf("Worker %d starting\n", worker_id);
-
-    // Add server socket to epoll with EPOLLEXCLUSIVE
     struct epoll_event server_event;
     server_event.events  = EPOLLIN | EPOLLEXCLUSIVE;
     server_event.data.fd = server_fd;
@@ -451,7 +645,7 @@ void* worker_thread(void* arg) {
 
         for (int i = 0; i < num_events; i++) {
             if (events[i].data.fd == server_fd) {
-                int client_fd = safe_accept(worker_id);
+                int client_fd = conn_accept(worker_id);
                 if (client_fd >= 0) {
                     add_connection_to_worker(epoll_fd, client_fd);
                 }
@@ -489,14 +683,13 @@ void* worker_thread(void* arg) {
     return NULL;
 }
 
-int main() {
+int run() {
     server_fd = create_server_socket(PORT);
     set_nonblocking(server_fd);
 
     pthread_t workers[NUM_WORKERS];
     worker_data_t worker_data[NUM_WORKERS];
 
-    // Create worker threads
     for (int i = 0; i < NUM_WORKERS; i++) {
         int epoll_fd = epoll_create1(0);
         if (epoll_fd == -1) {
@@ -515,11 +708,58 @@ int main() {
 
     printf("Server with %d workers listening on port %d\n", NUM_WORKERS, PORT);
 
-    // Wait for all worker threads
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }
 
     close(server_fd);
     return 0;
+}
+
+// =================== Example Handlers Using New API ========================
+
+bool hello_world_handler(connection_t* conn) {
+    conn_set_status(conn, 200, "OK");
+    conn_writeheader(conn, "Content-Type: text/plain");
+    conn_write(conn, "Hello, World!", 13);
+    return true;
+}
+
+bool json_handler(connection_t* conn) {
+    conn_set_status(conn, 200, "OK");
+    conn_writeheader(conn, "Content-Type: application/json");
+
+    const char* json = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
+    conn_write(conn, json, strlen(json));
+    return true;
+}
+
+bool echo_handler(connection_t* conn) {
+    conn_set_status(conn, 200, "OK");
+    conn_writeheader(conn, "Content-Type: text/plain");
+
+    // Echo request method and path
+    conn_write(conn, "Method: ", 8);
+    conn_write(conn, conn->request->method, strlen(conn->request->method));
+    conn_write(conn, "\nPath: ", 7);
+    conn_write(conn, conn->request->path, strlen(conn->request->path));
+
+    // Echo body if present
+    if (conn->request->body && conn->request->body_received > 0) {
+        conn_write(conn, "\nBody: ", 7);
+        conn_write(conn, conn->request->body, conn->request->body_received);
+    }
+
+    return true;
+}
+
+int main() {
+    // Register routes using the new API
+    route_register("/", HTTP_GET, hello_world_handler);
+    route_register("/hello", HTTP_GET, hello_world_handler);
+    route_register("/json", HTTP_GET, json_handler);
+    route_register("/echo", HTTP_GET, echo_handler);
+    route_register("/echo", HTTP_POST, echo_handler);
+
+    return run();
 }
