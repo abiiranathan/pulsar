@@ -20,6 +20,7 @@
 #define MAX_BODY_SIZE      (2 << 20)
 #define MAX_HEADERS        32
 #define MAX_HEADER_LEN     512
+#define CONN_ARENA_MEM     8 * 1024
 
 // Connection states
 typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } connection_state;
@@ -62,6 +63,12 @@ typedef enum {
     HTTP_DELETE,
 } HttpMethod;
 
+typedef struct {
+    uint8_t* memory;   // Arena memory
+    size_t allocated;  // Allocated memory
+    size_t capacity;   // Capacity of the arena
+} Arena;
+
 // Connection structure
 typedef struct {
     int fd;                      // Client socket file descriptor
@@ -72,6 +79,7 @@ typedef struct {
     size_t read_bytes;           // Bytes currently in read buffer
     request_t* request;          // HTTP request data
     response_t* response;        // HTTP response data
+    Arena* arena;                // Connection arena.
 } connection_t;
 
 typedef bool (*HttpHandler)(connection_t* conn);  // Changed to return int (bool)
@@ -93,6 +101,60 @@ int server_fd;
 #define MAX_ROUTES 64
 static route_t global_routes[MAX_ROUTES];
 static size_t global_count = 0;
+
+// =================== Arena functions   ========================
+Arena* arena_create(size_t capacity) {
+    assert(capacity > 0);
+    Arena* arena = malloc(sizeof(Arena));
+    if (!arena) {
+        return NULL;
+    }
+
+    arena->memory = calloc(1, capacity);
+    if (!arena->memory) {
+        free(arena);
+        return NULL;
+    }
+    arena->allocated = 0;
+    arena->capacity  = capacity;
+    return arena;
+}
+
+void arena_destroy(Arena* arena) {
+    if (!arena) return;
+    free(arena->memory);
+    free(arena);
+}
+
+void* arena_alloc(Arena* arena, size_t size) {
+    if (arena->allocated + size > arena->capacity) {
+        fprintf(stderr, "Arena out of memory\n");
+        return NULL;
+    }
+
+    void* ptr = &arena->memory[arena->allocated];
+    arena->allocated += size;
+    return ptr;
+}
+
+char* arena_strdup(Arena* arena, const char* str) {
+    size_t cap = strlen(str) + 1;
+    char* dst  = arena_alloc(arena, cap);
+    if (!dst) {
+        return NULL;
+    }
+
+    // copy string including NULL terminator.
+    (void)strlcpy(dst, str, cap);
+    return dst;
+}
+
+static inline void arena_reset(Arena* arena) {
+    assert(arena->capacity > 0);
+
+    arena->allocated = 0;
+    memset(arena->memory, 0, arena->capacity);
+}
 
 // =================== New API Functions ========================
 
@@ -342,15 +404,27 @@ void reset_connection(connection_t* conn) {
     conn->keep_alive    = 1;
     memset(conn->read_buf, 0, BUFFER_SIZE);
 
+    // If we have an arena, reset the memory.
+    if (conn->arena) {
+        arena_reset(conn->arena);
+    } else {
+        // Create the and initialize arena.
+        conn->arena = arena_create(CONN_ARENA_MEM);
+        assert(conn->arena);
+    }
+
     if (conn->request) {
         free_request(conn->request);
     }
+
     conn->request = create_request();
+    assert(conn->request);
 
     if (conn->response) {
         free_response(conn->response);
     }
     conn->response = create_response();
+    assert(conn->response);
 }
 
 int should_keep_alive(const char* request) {
@@ -397,7 +471,9 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
     }
 
     memset(conn, 0, sizeof(connection_t));
-    conn->fd = client_fd;
+    conn->fd    = client_fd;
+    conn->arena = NULL;  // reset_connection will initialize it.
+
     reset_connection(conn);
 
     struct epoll_event event;
@@ -611,6 +687,7 @@ void close_connection(int epoll_fd, connection_t* conn, int worker_id) {
 
     if (conn->request) free_request(conn->request);
     if (conn->response) free_response(conn->response);
+    if (conn->arena) arena_destroy(conn->arena);
     free(conn);
 }
 
