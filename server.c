@@ -1,8 +1,11 @@
 #include <assert.h>
+#include <ctype.h>
+#include <linux/limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -12,6 +15,10 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+#include <pwd.h>
+
+// Include status codes
+#include "status_code.h"
 
 #define MAX_EVENTS         2048
 #define BUFFER_SIZE        4096
@@ -21,6 +28,9 @@
 #define MAX_BODY_SIZE      (2 << 20)
 #define MAX_HEADERS        64
 #define CONN_ARENA_MEM     8 * 1024
+
+// Enable directory browsing for static assets.
+#define DIRECTRORY_BROWSING_ON 1
 
 // Connection states
 typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } connection_state;
@@ -35,16 +45,16 @@ typedef struct {
     size_t count;
 } headers_t;
 
-// HTTP Request structure
 typedef struct {
-    char method[8];         // HTTP method (GET, POST etc.)
-    char* path;             // Requested path
-    size_t content_length;  // Content-Length header value
-    char* body;             // Request body
-    size_t body_received;   // Bytes of body received
-    size_t headers_len;     // Length of headers text in connection buffer. ie offset
-    headers_t* headers;     // Request headers
-} request_t;
+    char* name;   // Parameter name
+    char* value;  // Parameter value from the URL
+} PathParam;
+
+typedef struct PathParams {
+    PathParam* params;    // Array of matched parameters
+    size_t match_count;   // Number of matched parameters from request path.
+    size_t total_params;  // Total parameters counted at startup.
+} PathParams;
 
 // HTTP Response structure
 typedef struct {
@@ -54,8 +64,8 @@ typedef struct {
     size_t buffer_size;    // Bytes allocated for buffer
 
     // New fields for simplified API
-    int status_code;          // HTTP status code
-    char status_message[64];  // HTTP status message
+    http_status status_code;  // HTTP status code
+    char status_message[40];  // HTTP status message
     headers_t* headers;       // Custom headers
     char* body_data;          // Response body data
     size_t body_size;         // Current body size
@@ -80,24 +90,39 @@ typedef struct {
 } Arena;
 
 // Connection structure
-typedef struct {
+typedef struct connection_t {
     int fd;                      // Client socket file descriptor
     connection_state state;      // Current connection state
     time_t last_activity;        // Timestamp of last I/O activity
     int keep_alive;              // Keep-alive flag
     char read_buf[BUFFER_SIZE];  // Buffer for incoming data
     size_t read_bytes;           // Bytes currently in read buffer
-    request_t* request;          // HTTP request data
+    struct request_t* request;   // HTTP request data
     response_t* response;        // HTTP response data
     Arena* arena;                // Connection arena.
 } connection_t;
 
+// HTTP Request structure
+typedef struct request_t {
+    char method[8];         // HTTP method (GET, POST etc.)
+    char* path;             // Requested path
+    char* body;             // Request body
+    size_t content_length;  // Content-Length header value
+    size_t body_received;   // Bytes of body received
+    size_t headers_len;     // Length of headers text in connection buffer. ie offset
+    headers_t* headers;     // Request headers
+    struct route_t* route;  // Matched route.
+} request_t;
+
 typedef bool (*HttpHandler)(connection_t* conn);
 
-typedef struct {
-    char* pattern;        // dynamically allocated route pattern
-    HttpMethod method;    // Http method.
-    HttpHandler handler;  // Handler function pointer
+typedef struct route_t {
+    int flags;                // Bit mask for route type. NormalRoute | StaticRoute
+    char* pattern;            // dynamically allocated route pattern
+    char* dirname;            // Directory name (for static routes)
+    HttpMethod method;        // Http method.
+    HttpHandler handler;      // Handler function pointer
+    PathParams* path_params;  // Path parameters
 } route_t;
 
 // Worker thread data
@@ -232,17 +257,22 @@ bool headers_append(Arena* arena, headers_t* headers, const char* name, const ch
 // =================== New API Functions ========================
 
 // Set HTTP status code and message
-void conn_set_status(connection_t* conn, int code, const char* message) {
-    if (!conn || !conn->response) return;
+void conn_set_status(connection_t* conn, http_status code) {
+    if (!conn || !conn->response) return;         // Sanity check
+    if (conn->response->status_code > 0) return;  // Status already set( Makes it Indempotent)
 
     conn->response->status_code = code;
-    strlcpy(conn->response->status_message, message ? message : "", sizeof(conn->response->status_message));
+    strlcpy(conn->response->status_message, http_status_text(code), sizeof(conn->response->status_message));
 }
 
 // Add a custom header
 bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
     if (!conn || !name || !value) return false;
     return headers_append(conn->arena, conn->response->headers, name, value);
+}
+
+bool conn_set_content_type(connection_t* conn, const char* content_type) {
+    return conn_writeheader(conn, "Content-Type", content_type);
 }
 
 // Write data to response body
@@ -275,6 +305,74 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
     return len;
 }
 
+// Send a 404 response.
+int serve_404(connection_t* conn) {
+    conn_set_status(conn, StatusNotFound);
+    conn_set_content_type(conn, "text/plain");
+    return conn_write(conn, "404 Not Found", 13);
+}
+
+// Write a NULL terminated string.
+int conn_write_string(connection_t* conn, const char* str) {
+    if (!str) return -1;
+    return conn_write(conn, str, strlen(str));
+}
+
+// Simple file serving.
+// Proper file serving implementation
+bool conn_servefile(connection_t* conn, const char* filename) {
+    FILE* f = fopen(filename, "rb");  // Use binary mode
+    if (!f) {
+        perror("fopen");
+        return false;
+    }
+
+    // Get file size properly
+    if (fseek(f, 0, SEEK_END) != 0) {
+        perror("fseek");
+        fclose(f);
+        return false;
+    }
+
+    long size = ftell(f);
+    if (size == -1) {
+        perror("ftell");
+        fclose(f);
+        return false;
+    }
+
+    rewind(f);  // Return to start of file
+
+    // Allocate buffer (+1 for null terminator if needed)
+    char* contents = malloc(size + 1);
+    if (!contents) {
+        perror("malloc");
+        fclose(f);
+        return false;
+    }
+
+    // Read entire file
+    size_t n = fread(contents, 1, size, f);  // Note parameter order change
+    if (n != (size_t)size) {
+        if (ferror(f)) {
+            perror("fread");
+        }
+        free(contents);
+        fclose(f);
+        return false;
+    }
+
+    // Optional: null-terminate if needed for text processing
+    contents[n] = '\0';
+
+    bool success = conn_write(conn, contents, n) > 0;
+
+    free(contents);
+    fclose(f);
+
+    return success;
+}
+
 // Build the complete HTTP response
 void finalize_response(connection_t* conn) {
     response_t* resp = conn->response;
@@ -282,7 +380,7 @@ void finalize_response(connection_t* conn) {
 
     // Set default status if not set
     if (resp->status_code == 0) {
-        resp->status_code = 200;
+        resp->status_code = StatusOK;
         strcpy(resp->status_message, "OK");
     }
 
@@ -366,28 +464,727 @@ HttpMethod http_method_from_string(const char* method) {
     return HTTP_INVALID;
 }
 
-void route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
+// Count the number of path parameters in pattern.
+// If there is an invalid (unterminated) parameter, valid is updated to false.
+static inline size_t count_path_params(const char* pattern, bool* valid) {
+    assert(valid != NULL);
+    assert(pattern != NULL);
+
+    const char* ptr = pattern;
+    size_t count    = 0;
+    *valid          = true;
+
+    while (*ptr) {
+        if (*ptr == '{') {
+            // Check for nested/unmatched '{'
+            const char* end = ptr + 1;
+            while (*end && *end != '}') {
+                if (*end == '{') {
+                    *valid = false;  // Nested braces
+                    return 0;
+                }
+                end++;
+            }
+
+            if (*end == '}') {
+                count++;
+                ptr = end + 1;  // Skip past '}'
+            } else {
+                *valid = false;  // Unterminated brace
+                return 0;
+            }
+        } else if (*ptr == '}') {
+            *valid = false;  // Unmatched closing brace
+            return 0;
+        } else {
+            ptr++;
+        }
+    }
+    return count;
+}
+
+#define STATIC_ROUTE_FLAG 0x01  // 1 << 0
+#define NORMAL_ROUTE_FLAG 0x02  // 1 << 2
+
+route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
     assert(global_count < MAX_ROUTES && http_method_valid(method) && pattern && handler);
 
-    route_t* r = &global_routes[global_count++];
+    route_t* r = &global_routes[global_count];
     r->pattern = strdup(pattern);
+    assert(r->pattern);
+
     r->method  = method;
     r->handler = handler;
 
-    assert(r->pattern);
+    r->path_params = malloc(sizeof(PathParams));
+    assert(r->path_params);
+
+    bool valid;
+    size_t nparams = count_path_params(pattern, &valid);
+    if (!valid) {
+        fprintf(stderr, "Invalid path parameter in pattern: %s\n", pattern);
+    }
+    assert(valid);
+
+    r->path_params->match_count  = 0;        // Init the match count
+    r->path_params->total_params = nparams;  // Set the expected path parameters
+    r->path_params->params       = NULL;
+    if (nparams > 0) {
+        r->path_params->params = calloc(nparams, sizeof(PathParam));
+        assert(r->path_params->params);
+    }
+
+    // default to normal route.
+    r->flags   = NORMAL_ROUTE_FLAG;
+    r->dirname = NULL;
+
+    // Increment global count
+    global_count++;
+    return r;
 }
 
-route_t* route_match(const char* url, HttpMethod method) {
-    for (size_t i = 0; i < global_count; i++) {
-        route_t* r = &global_routes[i];
-        if (r->method == method && strcmp(url, r->pattern) == 0) {
-            return r;
+/**
+ * Check if path is a directory
+ * Returns true if path exists AND is a directory, false otherwise
+ */
+static inline bool is_dir(const char* path) {
+    if (!path || !*path) {  // Handle NULL or empty string
+        errno = EINVAL;
+        return false;
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return false;  // stat failed (errno is set)
+    }
+    return S_ISDIR(st.st_mode);
+}
+
+/**
+ * Check if a path exists (file or directory)
+ * Returns true if path exists, false otherwise (and sets errno)
+ */
+static inline bool path_exists(const char* path) {
+    if (!path || !*path) {  // Handle NULL or empty string
+        errno = EINVAL;
+        return false;
+    }
+    return access(path, F_OK) == 0;
+}
+
+static inline void url_percent_decode(const char* src, char* dst, size_t dst_size) {
+    char a, b;
+    size_t written = 0;
+    size_t src_len = strlen(src);
+
+    while (*src && written + 1 < dst_size) {
+        if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+            written++;
+        } else if ((*src == '%') && (src_len >= 2) && ((a = src[1]) && (b = src[2])) && (isxdigit(a) && isxdigit(b))) {
+            if (a >= 'a') a -= 'a' - 'A';
+            if (a >= 'A') a -= 'A' - 10;
+            else a -= '0';
+            if (b >= 'a') b -= 'a' - 'A';
+            if (b >= 'A') b -= 'A' - 10;
+            else b -= '0';
+            *dst++ = 16 * a + b;
+            src += 3;
+            written++;
+        } else {
+            *dst++ = *src++;
+            written++;
+        }
+    }
+
+    // Null-terminate the destination buffer
+    *dst = '\0';
+}
+
+static void serve_directory_listing(connection_t* conn, const char* filepath, const char* prefix) {
+    (void)conn;
+    (void)filepath;
+    (void)prefix;
+    conn_write_string(conn, "<h1>Directory Listsing Not Supported</h1>");
+}
+
+// ============= Mime types ===========================
+// The hashmap entry for each mime type.
+typedef struct {
+    const char* ext;
+    const char* mimetype;
+} MimeEntry;
+
+static MimeEntry mime_entries[] = {
+    // Text mime types
+    {.ext = "html", .mimetype = "text/html"},
+    {.ext = "htm", .mimetype = "text/html"},
+    {.ext = "xhtml", .mimetype = "application/xhtml+xml"},
+    {.ext = "php", .mimetype = "application/x-httpd-php"},
+    {.ext = "asp", .mimetype = "application/x-asp"},
+    {.ext = "jsp", .mimetype = "application/x-jsp"},
+    {.ext = "xml", .mimetype = "application/xml"},
+
+    {.ext = "css", .mimetype = "text/css"},
+    {.ext = "js", .mimetype = "application/javascript"},
+    {.ext = "txt", .mimetype = "text/plain"},
+    {.ext = "json", .mimetype = "application/json"},
+    {.ext = "csv", .mimetype = "text/csv"},
+    {.ext = "md", .mimetype = "text/markdown"},
+    {.ext = "webmanifest", .mimetype = "application/manifest+json"},
+
+    // Images
+    {.ext = "jpg", .mimetype = "image/jpeg"},
+    {.ext = "jpeg", .mimetype = "image/jpeg"},
+    {.ext = "png", .mimetype = "image/png"},
+    {.ext = "gif", .mimetype = "image/gif"},
+    {.ext = "ico", .mimetype = "image/x-icon"},
+    {.ext = "svg", .mimetype = "image/svg+xml"},
+    {.ext = "bmp", .mimetype = "image/bmp"},
+    {.ext = "tiff", .mimetype = "image/tiff"},
+    {.ext = "webp", .mimetype = "image/webp"},
+
+    // Documents
+    {.ext = "pdf", .mimetype = "application/pdf"},
+    {.ext = "doc", .mimetype = "application/msword"},
+    {.ext = "docx", .mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    {.ext = "pptx", .mimetype = "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+    {.ext = "xls", .mimetype = "application/vnd.ms-excel"},
+    {.ext = "xlsx", .mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    {.ext = "odt", .mimetype = "application/vnd.oasis.opendocument.text"},
+    {.ext = "ods", .mimetype = "application/vnd.oasis.opendocument.spreadsheet"},
+    {.ext = "odp", .mimetype = "application/vnd.oasis.opendocument.presentation"},
+    {.ext = "latex", .mimetype = "application/x-latex"},
+
+    // Programming language source files
+    {.ext = "c", .mimetype = "text/x-c"},
+    {.ext = "cc", .mimetype = "text/x-c++"},
+    {.ext = "cpp", .mimetype = "text/x-c++"},
+    {.ext = "c++", .mimetype = "text/x-c++"},
+    {.ext = "rs", .mimetype = "text/x-rust"},
+    {.ext = "h", .mimetype = "text/x-c"},
+    {.ext = "hh", .mimetype = "text/x-c++"},
+    {.ext = "hpp", .mimetype = "text/x-c++"},
+    {.ext = "h++", .mimetype = "text/x-c++"},
+    {.ext = "cs", .mimetype = "text/x-csharp"},
+    {.ext = "java", .mimetype = "text/x-java-source"},
+    {.ext = "py", .mimetype = "text/x-python"},
+    {.ext = "sh", .mimetype = "application/x-shellscript"},
+    {.ext = "bat", .mimetype = "application/x-bat"},
+    {.ext = "pl", .mimetype = "application/x-perl"},
+    {.ext = "rb", .mimetype = "application/x-ruby"},
+    {.ext = "php", .mimetype = "application/x-php"},
+    {.ext = "go", .mimetype = "text/x-go"},
+    {.ext = "swift", .mimetype = "text/x-swift"},
+    {.ext = "lua", .mimetype = "text/x-lua"},
+    {.ext = "r", .mimetype = "text/x-r"},
+    {.ext = "sql", .mimetype = "application/sql"},
+    {.ext = "asm", .mimetype = "text/x-asm"},
+    {.ext = "s", .mimetype = "text/x-asm"},
+    {.ext = "clj", .mimetype = "text/x-clojure"},
+    {.ext = "lisp", .mimetype = "text/x-lisp"},
+    {.ext = "scm", .mimetype = "text/x-scheme"},
+    {.ext = "ss", .mimetype = "text/x-scheme"},
+    {.ext = "rkt", .mimetype = "text/x-scheme"},
+    {.ext = "jl", .mimetype = "text/x-julia"},
+    {.ext = "kt", .mimetype = "text/x-kotlin"},
+    {.ext = "dart", .mimetype = "text/x-dart"},
+    {.ext = "scala", .mimetype = "text/x-scala"},
+    {.ext = "groovy", .mimetype = "text/x-groovy"},
+    {.ext = "ts", .mimetype = "text/typescript"},
+    {.ext = "tsx", .mimetype = "text/typescript"},
+    {.ext = "jsx", .mimetype = "text/jsx"},
+    {.ext = "elm", .mimetype = "text/x-elm"},
+    {.ext = "erl", .mimetype = "text/x-erlang"},
+    {.ext = "hrl", .mimetype = "text/x-erlang"},
+    {.ext = "ex", .mimetype = "text/x-elixir"},
+    {.ext = "exs", .mimetype = "text/x-elixir"},
+    {.ext = "cl", .mimetype = "text/x-common-lisp"},
+    {.ext = "lsp", .mimetype = "text/x-common-lisp"},
+    {.ext = "f", .mimetype = "text/x-fortran"},
+    {.ext = "f77", .mimetype = "text/x-fortran"},
+    {.ext = "f90", .mimetype = "text/x-fortran"},
+    {.ext = "for", .mimetype = "text/x-fortran"},
+    {.ext = "nim", .mimetype = "text/x-nim"},
+    {.ext = "v", .mimetype = "text/x-verilog"},
+    {.ext = "sv", .mimetype = "text/x-systemverilog"},
+    {.ext = "vhd", .mimetype = "text/x-vhdl"},
+    {.ext = "dic", .mimetype = "text/x-c"},
+    {.ext = "h", .mimetype = "text/x-c"},
+    {.ext = "hh", .mimetype = "text/x-c"},
+    {.ext = "f", .mimetype = "text/x-fortran"},
+    {.ext = "f77", .mimetype = "text/x-fortran"},
+    {.ext = "f90", .mimetype = "text/x-fortran"},
+    {.ext = "for", .mimetype = "text/x-fortran"},
+    {.ext = "java", .mimetype = "text/x-java-source"},
+    {.ext = "p", .mimetype = "text/x-pascal"},
+    {.ext = "pas", .mimetype = "text/x-pascal"},
+    {.ext = "pp", .mimetype = "text/x-pascal"},
+    {.ext = "inc", .mimetype = "text/x-pascal"},
+    {.ext = "py", .mimetype = "text/x-python"},
+
+    // Other
+    {.ext = "etx", .mimetype = "text/x-setext"},
+    {.ext = "uu", .mimetype = "text/x-uuencode"},
+    {.ext = "vcs", .mimetype = "text/x-vcalendar"},
+    {.ext = "vcf", .mimetype = "text/x-vcard"},
+
+    // Video
+    {.ext = "mp4", .mimetype = "video/mp4"},
+    {.ext = "avi", .mimetype = "video/avi"},
+    {.ext = "mkv", .mimetype = "video/x-matroska"},
+    {.ext = "mov", .mimetype = "video/quicktime"},
+    {.ext = "wmv", .mimetype = "video/x-ms-wmv"},
+    {.ext = "flv", .mimetype = "video/x-flv"},
+    {.ext = "mpeg", .mimetype = "video/mpeg"},
+    {.ext = "webm", .mimetype = "video/webm"},
+
+    // Audio
+    {.ext = "mp3", .mimetype = "audio/mpeg"},
+    {.ext = "wav", .mimetype = "audio/wav"},
+    {.ext = "flac", .mimetype = "audio/flac"},
+    {.ext = "aac", .mimetype = "audio/aac"},
+    {.ext = "ogg", .mimetype = "audio/ogg"},
+    {.ext = "wma", .mimetype = "audio/x-ms-wma"},
+    {.ext = "m4a", .mimetype = "audio/m4a"},
+    {.ext = "mid", .mimetype = "audio/midi"},
+
+    // Archives
+    {.ext = "zip", .mimetype = "application/zip"},
+    {.ext = "rar", .mimetype = "application/x-rar-compressed"},
+    {.ext = "tar", .mimetype = "application/x-tar"},
+    {.ext = "7z", .mimetype = "application/x-7z-compressed"},
+    {.ext = "gz", .mimetype = "application/gzip"},
+    {.ext = "bz2", .mimetype = "application/x-bzip2"},
+    {.ext = "xz", .mimetype = "application/x-xz"},
+
+    // Spreadsheets
+    {.ext = "ods", .mimetype = "application/vnd.oasis.opendocument.spreadsheet"},
+    {.ext = "csv", .mimetype = "text/csv"},
+    {.ext = "tsv", .mimetype = "text/tab-separated-values"},
+
+    // Applications
+    {.ext = "exe", .mimetype = "application/x-msdownload"},
+    {.ext = "apk", .mimetype = "application/vnd.android.package-archive"},
+    {.ext = "dmg", .mimetype = "application/x-apple-diskimage"},
+
+    // Fonts
+    {.ext = "ttf", .mimetype = "font/ttf"},
+    {.ext = "otf", .mimetype = "font/otf"},
+    {.ext = "woff", .mimetype = "font/woff"},
+    {.ext = "woff2", .mimetype = "font/woff2"},
+
+    // 3D Models
+    {.ext = "obj", .mimetype = "model/obj"},
+    {.ext = "stl", .mimetype = "model/stl"},
+    {.ext = "gltf", .mimetype = "model/gltf+json"},
+
+    // GIS
+    {.ext = "kml", .mimetype = "application/vnd.google-earth.kml+xml"},
+    {.ext = "kmz", .mimetype = "application/vnd.google-earth.kmz"},
+
+    // Other
+    {.ext = "rss", .mimetype = "application/rss+xml"},
+    {.ext = "yaml", .mimetype = "application/x-yaml"},
+    {.ext = "ini", .mimetype = "text/plain"},
+    {.ext = "cfg", .mimetype = "text/plain"},
+    {.ext = "log", .mimetype = "text/plain"},
+
+    // Database Formats
+    {.ext = "sqlite", .mimetype = "application/x-sqlite3"},
+    {.ext = "sql", .mimetype = "application/sql"},
+
+    // Ebooks
+    {.ext = "epub", .mimetype = "application/epub+zip"},
+    {.ext = "mobi", .mimetype = "application/x-mobipocket-ebook"},
+    {.ext = "azw", .mimetype = "application/vnd.amazon.ebook"},
+    {.ext = "prc", .mimetype = "application/x-mobipocket-ebook"},
+
+    // Microsoft Windows Applications
+    {.ext = "wmd", .mimetype = "application/x-ms-wmd"},
+    {.ext = "wmz", .mimetype = "application/x-ms-wmz"},
+    {.ext = "xbap", .mimetype = "application/x-ms-xbap"},
+    {.ext = "mdb", .mimetype = "application/x-msaccess"},
+    {.ext = "obd", .mimetype = "application/x-msbinder"},
+    {.ext = "crd", .mimetype = "application/x-mscardfile"},
+    {.ext = "clp", .mimetype = "application/x-msclip"},
+    {.ext = "bat", .mimetype = "application/x-msdownload"},
+    {.ext = "com", .mimetype = "application/x-msdownload"},
+    {.ext = "dll", .mimetype = "application/x-msdownload"},
+    {.ext = "exe", .mimetype = "application/x-msdownload"},
+    {.ext = "msi", .mimetype = "application/x-msdownload"},
+    {.ext = "m13", .mimetype = "application/x-msmediaview"},
+    {.ext = "m14", .mimetype = "application/x-msmediaview"},
+    {.ext = "mvb", .mimetype = "application/x-msmediaview"},
+
+    // Virtual Reality (VR) and Augmented Reality (AR)
+    {.ext = "vrml", .mimetype = "model/vrml"},
+    {.ext = "glb", .mimetype = "model/gltf-binary"},
+    {.ext = "usdz", .mimetype = "model/vnd.usdz+zip"},
+
+    // CAD Files
+    {.ext = "dwg", .mimetype = "application/dwg"},
+    {.ext = "dxf", .mimetype = "application/dxf"},
+
+    // Geospatial Data
+    {.ext = "shp", .mimetype = "application/x-qgis"},
+    {.ext = "geojson", .mimetype = "application/geo+json"},
+
+    // configuration
+    {.ext = "jsonld", .mimetype = "application/ld+json"},
+
+    // Mathematical Data
+    {.ext = "m", .mimetype = "text/x-matlab"},
+    {.ext = "r", .mimetype = "application/R"},
+    {.ext = "csv", .mimetype = "text/csv"},
+
+    // Chemical Data
+    {.ext = "mol", .mimetype = "chemical/x-mdl-molfile"},
+
+    // Medical Imaging
+    {.ext = "dicom", .mimetype = "application/dicom"},
+
+    // Configuration Files
+    {.ext = "yml", .mimetype = "application/x-yaml"},
+    {.ext = "yaml", .mimetype = "application/x-yaml"},
+    {.ext = "jsonld", .mimetype = "application/ld+json"},
+
+    // Scientific Data
+    {.ext = "netcdf", .mimetype = "application/x-netcdf"},
+    {.ext = "fits", .mimetype = "application/fits"},
+};
+
+#define DEFAULT_CONTENT_TYPE "application/octet-stream"
+#define MIME_MAPPING_SIZE    (sizeof(mime_entries) / sizeof(mime_entries[0]))
+
+const char* get_mimetype(char* filename) {
+    if (!filename) {
+        return DEFAULT_CONTENT_TYPE;
+    }
+
+    // Get the file extension.
+    char *ptr, *start = filename, *last = NULL;
+    while ((ptr = strstr(start, "."))) {
+        last = ptr;
+        start++;
+    }
+
+    // No extension.
+    if (last == NULL) {
+        return DEFAULT_CONTENT_TYPE;
+    }
+
+    char* extension = last + 1;  // skip "."
+
+    // Convert to lowercase
+    for (char* p = extension; *p; ++p) {
+        *p = tolower((unsigned char)*p);
+    }
+
+    for (size_t i = 0; i < MIME_MAPPING_SIZE; i++) {
+        if (strcmp(extension, mime_entries[i].ext) == 0) {
+            return mime_entries[i].mimetype;
+        }
+    }
+    return DEFAULT_CONTENT_TYPE;
+}
+
+// Helper function to detect directory traversal attempts
+static bool is_directory_traversal_attempt(const char* filepath, const char* base_dir) {
+    // Check for obvious patterns
+    if (strstr(filepath, "/../") || strstr(filepath, "../")) {
+        return true;
+    }
+
+    // Resolve the full canonical path
+    char resolved_path[PATH_MAX];
+    if (realpath(filepath, resolved_path) == NULL) {
+        return true;  // Path doesn't exist or can't be resolved
+    }
+
+    // Resolve the base directory canonical path
+    char resolved_base[PATH_MAX];
+    if (realpath(base_dir, resolved_base) == NULL) {
+        return true;  // Base directory doesn't exist or can't be resolved
+    }
+
+    // Ensure the resolved path is within the base directory
+    size_t base_len = strlen(resolved_base);
+    if (strncmp(resolved_path, resolved_base, base_len) != 0) {
+        return true;  // Path is outside the base directory
+    }
+
+    // Additional check for symlinks pointing outside the base directory
+    struct stat stat_buf;
+    if (lstat(filepath, &stat_buf) == 0 && S_ISLNK(stat_buf.st_mode)) {
+        char link_target[PATH_MAX];
+        ssize_t len = readlink(filepath, link_target, sizeof(link_target) - 1);
+        if (len > 0) {
+            link_target[len] = '\0';
+            if (is_directory_traversal_attempt(link_target, base_dir)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool static_file_handler(connection_t* conn) {
+    route_t* route = conn->request->route;
+    assert((route->flags & STATIC_ROUTE_FLAG) != 0);
+
+    const char* dirname = route->dirname;
+
+    size_t dirlen    = strlen(dirname);
+    const char* path = conn->request->path;
+
+    // Build the request static path
+    const char* static_path = path + strlen(route->pattern);
+    size_t static_path_len  = strlen(static_path);
+
+    // Validate path lengths before processing
+    if (dirlen >= PATH_MAX || static_path_len >= PATH_MAX || (dirlen + static_path_len + 2) >= PATH_MAX) {
+        goto path_toolong;
+    }
+
+    // Concatenate the dirname and the static path
+    char undecoded_path[PATH_MAX] = {0};
+    int n = snprintf(undecoded_path, PATH_MAX, "%.*s%.*s", (int)dirlen, dirname, (int)static_path_len, static_path);
+    if (n < 0 || n >= PATH_MAX) {
+        goto path_toolong;
+    }
+
+    // percent-decode the path
+    char filepath[PATH_MAX] = {0};
+    url_percent_decode(undecoded_path, filepath, sizeof(filepath));
+
+    // Enhanced directory traversal protection
+    if (is_directory_traversal_attempt(filepath, dirname)) {
+        conn_set_status(conn, StatusForbidden);
+        conn_set_content_type(conn, "text/html");
+        conn_write_string(conn, "<h1>Directory traversal not allowed</h1>");
+        return true;
+    }
+
+    if (is_dir(filepath)) {
+        size_t filepath_len = strlen(filepath);
+        // remove the trailing slash if present
+        if (filepath_len > 1 && filepath[filepath_len - 1] == '/') {
+            filepath[filepath_len - 1] = '\0';
+            filepath_len--;
+        }
+
+        char index_file[PATH_MAX] = {0};
+
+        n = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
+        if (n < 0 || n >= PATH_MAX) {
+            goto path_toolong;
+        }
+
+        if (!path_exists(index_file)) {
+            if (DIRECTRORY_BROWSING_ON) {
+                char prefix[PATH_MAX] = {0};
+                snprintf(prefix, sizeof(prefix), "%s%s", route->pattern, static_path);
+                serve_directory_listing(conn, filepath, prefix);
+            } else {
+                conn_set_content_type(conn, "text/html");
+                conn_set_status(conn, StatusForbidden);
+                conn_write_string(conn, "<h1>Directory listing is disabled</h1>");
+            }
+            return true;
+        } else {
+            // Check we have enough space for "/index.html" (11 chars + null)
+            if (filepath_len + 11 >= PATH_MAX) {
+                goto path_toolong;
+            }
+            strlcat(filepath, "/index.html", sizeof(filepath));
+        }
+    }
+
+    if (path_exists(filepath)) {
+        const char* web_ct = get_mimetype(filepath);
+        conn_set_content_type(conn, web_ct);
+        return conn_servefile(conn, filepath);
+    }
+    return serve_404(conn);
+
+path_toolong:
+    conn_set_status(conn, StatusRequestURITooLong);
+    conn_set_content_type(conn, "text/html");
+    conn_write_string(conn, "<h1>Path too long</h1>");
+    return true;
+}
+
+route_t* register_static_route(const char* pattern, const char* dir) {
+    assert(pattern && dir);  // validate inputs
+
+    if (strcmp(".", dir) == 0) {
+        dir = "./";
+    }
+
+    if (strcmp("..", dir) == 0) {
+        dir = "../";
+    }
+
+    size_t dirlen = strlen(dir);
+    assert(dirlen + 1 < PATH_MAX);
+
+    // Expand user home dir.
+    char* dirname = NULL;
+    if ((dirname = realpath(dir, NULL)) == NULL) {
+        fprintf(stderr, "Unable to resolve path: %s\n", dir);
+        exit(1);
+    }
+
+    assert(is_dir(dirname));
+
+    // Todo: Detect directory traversal here...
+
+    if (dirname[dirlen - 1] == '/') {
+        dirname[dirlen - 1] = '\0';  // Remove trailing slash
+    }
+
+    route_t* r = route_register(pattern, HTTP_GET, static_file_handler);
+    r->flags   = STATIC_ROUTE_FLAG;
+    r->dirname = dirname;
+    printf("Registering directory: %s\n", dirname);
+    return r;
+}
+
+/**
+ * match_path_parameters compares the pattern with the URL and extracts the parameters.
+ * The pattern can contain parameters in the form of {name}.
+ * 
+ * @param pattern: The pattern to match
+ * @param url_path: The URL path to match
+ * @param pathParams: The PathParams struct to store the matched parameters
+ * @return true if the pattern and URL match, false otherwise
+ */
+bool match_path_parameters(Arena* arena, const char* pattern, const char* url_path, PathParams* path_params) {
+    if (!path_params || !pattern || !url_path) return false;
+
+    const char* pat          = pattern;
+    const char* url          = url_path;
+    size_t nparams           = 0;
+    path_params->match_count = 0;
+
+    // Fast path: exact match when no parameters were allocated.
+    if (path_params->params == NULL) {
+        while (*pat && *url && *pat == *url) {
+            pat++;
+            url++;
+        }
+        // Skip trailing slashes
+        while (*pat == '/')
+            pat++;
+        while (*url == '/')
+            url++;
+        return (*pat == '\0' && *url == '\0');
+    }
+
+    // Now, we have parameters
+    while (*pat && *url && nparams < path_params->total_params) {
+        if (*pat == '{') {
+            // Bounds check
+            PathParam* param = &path_params->params[nparams++];
+
+            // Extract parameter name
+            pat++;  // Skip '{'
+            const char* name_start = pat;
+            while (*pat && *pat != '}')
+                pat++;
+            if (*pat != '}') return false;
+
+            size_t name_len = pat - name_start;
+
+            param->name = arena_alloc(arena, name_len + 1);
+            if (param->name == NULL) {
+                fprintf(stderr, "arena_alloc failed to allocate path parameter name\n");
+                return false;
+            }
+            memcpy(param->name, name_start, name_len);
+            param->name[name_len] = '\0';
+            pat++;  // Skip '}'
+
+            // Extract parameter value
+            const char* val_start = url;
+            while (*url && *url != '/' && *url != *pat)
+                url++;
+            size_t val_len = url - val_start;
+
+            param->value = arena_alloc(arena, val_len + 1);
+            if (param->value == NULL) {
+                fprintf(stderr, "arena_alloc failed to allocate path parameter value\n");
+                return false;
+            }
+            memcpy(param->value, val_start, val_len);
+            param->value[val_len] = '\0';
+        } else {
+            if (*pat != *url) return false;
+            pat++;
+            url++;
+        }
+    }
+
+    // Skip trailing slashes
+    while (*pat == '/')
+        pat++;
+    while (*url == '/')
+        url++;
+
+    path_params->match_count = nparams;
+    return (*pat == '\0' && *url == '\0' && path_params->total_params == path_params->match_count);
+}
+
+const char* get_path_param(const PathParams* params, const char* name) {
+    if (!params || !name) return NULL;
+
+    for (size_t i = 0; i < params->match_count; i++) {
+        if (strcmp(params->params[i].name, name) == 0) {
+            return params->params[i].value;
         }
     }
     return NULL;
 }
 
-// ====================================================
+route_t* route_match(connection_t* conn, HttpMethod method) {
+    route_t* current  = global_routes;
+    route_t* end      = global_routes + global_count;
+    const char* url   = conn->request->path;
+    size_t url_length = strlen(url);
+
+    // TODO: Handle MethodNotAllowed
+    // TODO: Optimize this with pre-sorted routes by method so we can have early exit.
+    // TODO: Optionally implement a Bloom Filter.
+
+    while (current < end) {
+        __builtin_prefetch(current + 4, 0, 1);
+
+        if (method == current->method) {
+            if ((current->flags & NORMAL_ROUTE_FLAG) != 0) {
+                if (match_path_parameters(conn->arena, current->pattern, url, current->path_params)) {
+                    return current;
+                }
+            } else if ((current->flags & STATIC_ROUTE_FLAG) != 0) {
+                size_t pat_length = strlen(current->pattern);
+
+                // Compare only the prefix, for the static files
+                if (pat_length <= url_length) {
+                    if (memcmp(current->pattern, url, pat_length) == 0) {
+                        return current;
+                    }
+                }
+            }
+        }
+        current++;
+    }
+
+    return NULL;
+}
+
+// ====================================================================
 
 void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -715,28 +1512,32 @@ void process_request(connection_t* conn) {
         return;
     }
 
-    if (!parse_request_headers(conn)) {
-        fprintf(stderr, "error parsing request headers\n");
-        conn->state = STATE_CLOSING;
-        return;
-    };
-
     conn->keep_alive = should_keep_alive(conn->read_buf);
 
-    if (!parse_content_length(conn)) {
-        fprintf(stderr, "error parsing content length\n");
-        conn->state = STATE_CLOSING;
-        return;
-    }
-
-    if (!parse_request_body(conn, headers_len)) {
-        fprintf(stderr, "error parsing request body\n");
-        conn->state = STATE_CLOSING;
-        return;
-    }
-
+    // try to first match request before even parsing headers, query params
+    // content-length and reading the body.
     HttpMethod method = http_method_from_string(conn->request->method);
-    route_t* route    = route_match(conn->request->path, method);
+    route_t* route    = route_match(conn, method);
+    if (route) {
+        conn->request->route = route;
+        if (!parse_request_headers(conn)) {
+            fprintf(stderr, "error parsing request headers\n");
+            conn->state = STATE_CLOSING;
+            return;
+        };
+
+        if (!parse_content_length(conn)) {
+            fprintf(stderr, "error parsing content length\n");
+            conn->state = STATE_CLOSING;
+            return;
+        }
+
+        if (!parse_request_body(conn, headers_len)) {
+            fprintf(stderr, "error parsing request body\n");
+            conn->state = STATE_CLOSING;
+            return;
+        }
+    }
 
     bool handler_success = true;
     if (route) {
@@ -746,14 +1547,17 @@ void process_request(connection_t* conn) {
     if (!handler_success || !route) {
         // Handle error or 404
         if (!route) {
-            conn_set_status(conn, 404, "Not Found");
-            conn_writeheader(conn, "Content-Type", "text/plain");
-            conn_write(conn, "404 Not Found", 13);
+            serve_404(conn);
         } else {
-            // Handler returned error
-            conn_set_status(conn, 500, "Internal Server Error");
-            conn_writeheader(conn, "Content-Type", "text/plain");
-            conn_write(conn, "500 Internal Server Error", 25);
+            // Set 500 status code if not already set inside handler.
+            conn_set_status(conn, StatusInternalServerError);
+
+            // TODO: Only add content-type header if not already set.
+            conn_set_content_type(conn, "text/plain");
+
+            if (conn->response->body_size == 0) {
+                conn_write(conn, "500 Internal Server Error", 25);
+            }
         }
     }
 
@@ -954,15 +1758,15 @@ int run() {
 // =================== Example Handlers Using New API ========================
 
 bool hello_world_handler(connection_t* conn) {
-    conn_set_status(conn, 200, "OK");
-    conn_writeheader(conn, "Content-Type", "text/plain");
+    conn_set_status(conn, StatusOK);
+    conn_set_content_type(conn, "text/plain");
     conn_write(conn, "Hello, World!", 13);
     return true;
 }
 
 bool json_handler(connection_t* conn) {
-    conn_set_status(conn, 200, "OK");
-    conn_writeheader(conn, "Content-Type", "application/json");
+    conn_set_status(conn, StatusOK);
+    conn_set_content_type(conn, "application/json");
 
     const char* json = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
     conn_write(conn, json, strlen(json));
@@ -970,8 +1774,8 @@ bool json_handler(connection_t* conn) {
 }
 
 bool echo_handler(connection_t* conn) {
-    conn_set_status(conn, 200, "OK");
-    conn_writeheader(conn, "Content-Type", "text/plain");
+    conn_set_status(conn, StatusOK);
+    conn_set_content_type(conn, "text/plain");
 
     // Echo request method and path
     conn_write(conn, "Method: ", 8);
@@ -990,7 +1794,11 @@ bool echo_handler(connection_t* conn) {
 
 __attribute__((destructor())) void cleanup(void) {
     for (size_t i = 0; i < global_count; i++) {
-        free(global_routes[i].pattern);
+        route_t* r = &global_routes[i];
+        free(r->pattern);
+        if (r->dirname) {
+            free(r->dirname);
+        }
     }
 }
 
@@ -1001,6 +1809,8 @@ int main() {
     route_register("/json", HTTP_GET, json_handler);
     route_register("/echo", HTTP_GET, echo_handler);
     route_register("/echo", HTTP_POST, echo_handler);
+
+    register_static_route("/static", "./");
 
     return run();
 }
