@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -19,15 +20,16 @@
 
 // Include status codes
 #include "status_code.h"
+#include "mimetype.h"
 
-#define MAX_EVENTS         2048
-#define BUFFER_SIZE        4096
-#define PORT               8080
-#define CONNECTION_TIMEOUT 30
-#define NUM_WORKERS        8
-#define MAX_BODY_SIZE      (2 << 20)
-#define MAX_HEADERS        64
-#define CONN_ARENA_MEM     8 * 1024
+#define NUM_WORKERS        8          // Number of workers.
+#define MAX_EVENTS         2048       // Maximum events for epoll->ready queue.
+#define READ_BUFFER_SIZE   4096       // Buffer size for incoming data.
+#define CONNECTION_TIMEOUT 30         // Keep-Alive connection timeout in seconds
+#define MAX_BODY_SIZE      (2 << 20)  // Max Request body allowed.
+#define ARENA_CAPACITY     8 * 1024   // Memory per connection.
+#define MAX_ROUTES         64         // Maximum number of routes
+#define MAX_HEADERS        32         // Maximum req/res headers.
 
 // Enable directory browsing for static assets.
 #define DIRECTRORY_BROWSING_ON 1
@@ -63,14 +65,20 @@ typedef struct {
     size_t bytes_sent;     // Bytes already sent
     size_t buffer_size;    // Bytes allocated for buffer
 
-    // New fields for simplified API
     http_status status_code;  // HTTP status code
     char status_message[40];  // HTTP status message
     headers_t* headers;       // Custom headers
-    char* body_data;          // Response body data
-    size_t body_size;         // Current body size
-    size_t body_capacity;     // Body buffer capacity
-    int headers_written;      // Flag to track if headers are written
+
+    char* body_data;       // Response body data
+    size_t body_size;      // Current body size
+    size_t body_capacity;  // Body buffer capacity
+
+    bool headers_written;   // Flag to track if headers are written
+    bool content_type_set;  // Track whether content-type has been set
+
+    // File serving with sendfile.
+    int file_fd;       // If a file_fd != -1, we are serving a file.
+    size_t file_size;  // The size of the file being sent.
 } response_t;
 
 typedef enum {
@@ -91,15 +99,15 @@ typedef struct {
 
 // Connection structure
 typedef struct connection_t {
-    int fd;                      // Client socket file descriptor
-    connection_state state;      // Current connection state
-    time_t last_activity;        // Timestamp of last I/O activity
-    int keep_alive;              // Keep-alive flag
-    char read_buf[BUFFER_SIZE];  // Buffer for incoming data
-    size_t read_bytes;           // Bytes currently in read buffer
-    struct request_t* request;   // HTTP request data
-    response_t* response;        // HTTP response data
-    Arena* arena;                // Connection arena.
+    int fd;                           // Client socket file descriptor
+    connection_state state;           // Current connection state
+    time_t last_activity;             // Timestamp of last I/O activity
+    int keep_alive;                   // Keep-alive flag
+    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data
+    size_t read_bytes;                // Bytes currently in read buffer
+    struct request_t* request;        // HTTP request data
+    response_t* response;             // HTTP response data
+    Arena* arena;                     // Connection arena.
 } connection_t;
 
 // HTTP Request structure
@@ -135,7 +143,6 @@ typedef struct {
 // Global flag to keep all workers running.
 static volatile sig_atomic_t server_running = 1;
 
-#define MAX_ROUTES 64
 static route_t global_routes[MAX_ROUTES];
 static size_t global_count = 0;
 
@@ -210,9 +217,7 @@ char* arena_strdup(Arena* arena, const char* str) {
 
 static inline void arena_reset(Arena* arena) {
     assert(arena->capacity > 0);
-
     arena->allocated = 0;
-    memset(arena->memory, 0, arena->capacity);
 }
 
 // ==================== Header API functions ===================
@@ -220,7 +225,6 @@ headers_t* headers_new(Arena* arena) {
     headers_t* headers = arena_alloc(arena, sizeof(headers_t));
     if (!headers) return NULL;
     headers->count = 0;
-    memset(headers->items, 0, sizeof(headers->items));
     return headers;
 }
 
@@ -258,7 +262,6 @@ bool headers_append(Arena* arena, headers_t* headers, const char* name, const ch
 
 // Set HTTP status code and message
 void conn_set_status(connection_t* conn, http_status code) {
-    if (!conn || !conn->response) return;         // Sanity check
     if (conn->response->status_code > 0) return;  // Status already set( Makes it Indempotent)
 
     conn->response->status_code = code;
@@ -267,17 +270,19 @@ void conn_set_status(connection_t* conn, http_status code) {
 
 // Add a custom header
 bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
-    if (!conn || !name || !value) return false;
+    if (!name || !value) return false;
     return headers_append(conn->arena, conn->response->headers, name, value);
 }
 
 bool conn_set_content_type(connection_t* conn, const char* content_type) {
-    return conn_writeheader(conn, "Content-Type", content_type);
+    if (conn->response->content_type_set) return true;
+    conn->response->content_type_set = conn_writeheader(conn, "Content-Type", content_type);
+    return conn->response->content_type_set;
 }
 
 // Write data to response body
 int conn_write(connection_t* conn, const void* data, size_t len) {
-    if (!conn || !conn->response || !data || len == 0) return 0;
+    if (!data || len == 0) return 0;
 
     response_t* resp = conn->response;
 
@@ -321,62 +326,33 @@ int conn_write_string(connection_t* conn, const char* str) {
 // Simple file serving.
 // Proper file serving implementation
 bool conn_servefile(connection_t* conn, const char* filename) {
-    FILE* f = fopen(filename, "rb");  // Use binary mode
-    if (!f) {
-        perror("fopen");
+    if (!filename) return false;
+
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        perror("open");
         return false;
     }
 
-    // Get file size properly
-    if (fseek(f, 0, SEEK_END) != 0) {
-        perror("fseek");
-        fclose(f);
+    struct stat stat_buf;
+    if (fstat(fd, &stat_buf) != 0) {
+        perror("fstat");
+        close(fd);
         return false;
     }
 
-    long size = ftell(f);
-    if (size == -1) {
-        perror("ftell");
-        fclose(f);
-        return false;
-    }
-
-    rewind(f);  // Return to start of file
-
-    // Allocate buffer (+1 for null terminator if needed)
-    char* contents = malloc(size + 1);
-    if (!contents) {
-        perror("malloc");
-        fclose(f);
-        return false;
-    }
-
-    // Read entire file
-    size_t n = fread(contents, 1, size, f);  // Note parameter order change
-    if (n != (size_t)size) {
-        if (ferror(f)) {
-            perror("fread");
-        }
-        free(contents);
-        fclose(f);
-        return false;
-    }
-
-    // Optional: null-terminate if needed for text processing
-    contents[n] = '\0';
-
-    bool success = conn_write(conn, contents, n) > 0;
-
-    free(contents);
-    fclose(f);
-
-    return success;
+    conn->response->file_fd   = fd;
+    conn->response->file_size = stat_buf.st_size;
+    return true;
 }
 
 // Build the complete HTTP response
 void finalize_response(connection_t* conn) {
-    response_t* resp = conn->response;
-    if (!resp || resp->headers_written) return;
+    response_t* resp    = conn->response;
+    header_t* headers   = (header_t*)&resp->headers->items;
+    size_t header_count = resp->headers->count;
+
+    if (resp->headers_written) return;
 
     // Set default status if not set
     if (resp->status_code == 0) {
@@ -386,20 +362,27 @@ void finalize_response(connection_t* conn) {
 
     // Calculate total response size
     size_t header_size = 512;  // Base headers
-    for (size_t i = 0; i < resp->headers->count; i++) {
+    for (size_t i = 0; i < header_count; i++) {
         // +4, reserve for \r\n and colon and space.
-        header_size += strlen(resp->headers->items[i].name) + strlen(resp->headers->items[i].value) + 4;
+        header_size += strlen(headers[i].name) + strlen(headers[i].value) + 4;
     }
 
-    size_t total_size = header_size + resp->body_size;
-    resp->buffer      = malloc(total_size);
+    size_t content_length = resp->body_size;               // Conent-Length
+    size_t buffer_size    = header_size + content_length;  // Memory to malloc for buffer.
+    bool sending_file     = conn->response->file_fd > 0 && conn->response->file_size > 0;
+
+    if (sending_file) {
+        content_length = conn->response->file_size;
+        buffer_size    = header_size;
+    }
+
+    resp->buffer = malloc(buffer_size);
     if (!resp->buffer) {
         perror("malloc");
         conn->state = STATE_CLOSING;
         return;
     }
-
-    resp->buffer_size = total_size;
+    resp->buffer_size = buffer_size;
 
     // Build headers
     int offset =
@@ -407,26 +390,26 @@ void finalize_response(connection_t* conn) {
                  "HTTP/1.1 %d %s\r\n"
                  "Connection: %s\r\n"
                  "Content-Length: %zu\r\n",
-                 resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close", resp->body_size);
+                 resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close", content_length);
 
     // Add custom headers
-    for (size_t i = 0; i < resp->headers->count; i++) {
-        offset += snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", resp->headers->items[i].name,
-                           resp->headers->items[i].value);
+    for (size_t i = 0; i < header_count; i++) {
+        offset +=
+            snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", headers[i].name, headers[i].value);
     }
 
     // End headers
     offset += snprintf(resp->buffer + offset, header_size - offset, "\r\n");
 
-    // Add body if present
-    if (resp->body_size > 0 && resp->body_data) {
+    // Add body if present and not a file.
+    if (!sending_file && resp->body_size > 0 && resp->body_data) {
         memcpy(resp->buffer + offset, resp->body_data, resp->body_size);
-        offset += resp->body_size;
+        offset += content_length;
     }
 
-    resp->bytes_to_send   = offset;
+    resp->bytes_to_send   = offset;  // includes not file contents
     resp->bytes_sent      = 0;
-    resp->headers_written = 1;
+    resp->headers_written = true;
 }
 
 // =================== Routing ========================
@@ -609,328 +592,6 @@ static void serve_directory_listing(connection_t* conn, const char* filepath, co
     conn_write_string(conn, "<h1>Directory Listsing Not Supported</h1>");
 }
 
-// ============= Mime types ===========================
-// The hashmap entry for each mime type.
-typedef struct {
-    const char* ext;
-    const char* mimetype;
-} MimeEntry;
-
-static MimeEntry mime_entries[] = {
-    // Text mime types
-    {.ext = "html", .mimetype = "text/html"},
-    {.ext = "htm", .mimetype = "text/html"},
-    {.ext = "xhtml", .mimetype = "application/xhtml+xml"},
-    {.ext = "php", .mimetype = "application/x-httpd-php"},
-    {.ext = "asp", .mimetype = "application/x-asp"},
-    {.ext = "jsp", .mimetype = "application/x-jsp"},
-    {.ext = "xml", .mimetype = "application/xml"},
-
-    {.ext = "css", .mimetype = "text/css"},
-    {.ext = "js", .mimetype = "application/javascript"},
-    {.ext = "txt", .mimetype = "text/plain"},
-    {.ext = "json", .mimetype = "application/json"},
-    {.ext = "csv", .mimetype = "text/csv"},
-    {.ext = "md", .mimetype = "text/markdown"},
-    {.ext = "webmanifest", .mimetype = "application/manifest+json"},
-
-    // Images
-    {.ext = "jpg", .mimetype = "image/jpeg"},
-    {.ext = "jpeg", .mimetype = "image/jpeg"},
-    {.ext = "png", .mimetype = "image/png"},
-    {.ext = "gif", .mimetype = "image/gif"},
-    {.ext = "ico", .mimetype = "image/x-icon"},
-    {.ext = "svg", .mimetype = "image/svg+xml"},
-    {.ext = "bmp", .mimetype = "image/bmp"},
-    {.ext = "tiff", .mimetype = "image/tiff"},
-    {.ext = "webp", .mimetype = "image/webp"},
-
-    // Documents
-    {.ext = "pdf", .mimetype = "application/pdf"},
-    {.ext = "doc", .mimetype = "application/msword"},
-    {.ext = "docx", .mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-    {.ext = "pptx", .mimetype = "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
-    {.ext = "xls", .mimetype = "application/vnd.ms-excel"},
-    {.ext = "xlsx", .mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-    {.ext = "odt", .mimetype = "application/vnd.oasis.opendocument.text"},
-    {.ext = "ods", .mimetype = "application/vnd.oasis.opendocument.spreadsheet"},
-    {.ext = "odp", .mimetype = "application/vnd.oasis.opendocument.presentation"},
-    {.ext = "latex", .mimetype = "application/x-latex"},
-
-    // Programming language source files
-    {.ext = "c", .mimetype = "text/x-c"},
-    {.ext = "cc", .mimetype = "text/x-c++"},
-    {.ext = "cpp", .mimetype = "text/x-c++"},
-    {.ext = "c++", .mimetype = "text/x-c++"},
-    {.ext = "rs", .mimetype = "text/x-rust"},
-    {.ext = "h", .mimetype = "text/x-c"},
-    {.ext = "hh", .mimetype = "text/x-c++"},
-    {.ext = "hpp", .mimetype = "text/x-c++"},
-    {.ext = "h++", .mimetype = "text/x-c++"},
-    {.ext = "cs", .mimetype = "text/x-csharp"},
-    {.ext = "java", .mimetype = "text/x-java-source"},
-    {.ext = "py", .mimetype = "text/x-python"},
-    {.ext = "sh", .mimetype = "application/x-shellscript"},
-    {.ext = "bat", .mimetype = "application/x-bat"},
-    {.ext = "pl", .mimetype = "application/x-perl"},
-    {.ext = "rb", .mimetype = "application/x-ruby"},
-    {.ext = "php", .mimetype = "application/x-php"},
-    {.ext = "go", .mimetype = "text/x-go"},
-    {.ext = "swift", .mimetype = "text/x-swift"},
-    {.ext = "lua", .mimetype = "text/x-lua"},
-    {.ext = "r", .mimetype = "text/x-r"},
-    {.ext = "sql", .mimetype = "application/sql"},
-    {.ext = "asm", .mimetype = "text/x-asm"},
-    {.ext = "s", .mimetype = "text/x-asm"},
-    {.ext = "clj", .mimetype = "text/x-clojure"},
-    {.ext = "lisp", .mimetype = "text/x-lisp"},
-    {.ext = "scm", .mimetype = "text/x-scheme"},
-    {.ext = "ss", .mimetype = "text/x-scheme"},
-    {.ext = "rkt", .mimetype = "text/x-scheme"},
-    {.ext = "jl", .mimetype = "text/x-julia"},
-    {.ext = "kt", .mimetype = "text/x-kotlin"},
-    {.ext = "dart", .mimetype = "text/x-dart"},
-    {.ext = "scala", .mimetype = "text/x-scala"},
-    {.ext = "groovy", .mimetype = "text/x-groovy"},
-    {.ext = "ts", .mimetype = "text/typescript"},
-    {.ext = "tsx", .mimetype = "text/typescript"},
-    {.ext = "jsx", .mimetype = "text/jsx"},
-    {.ext = "elm", .mimetype = "text/x-elm"},
-    {.ext = "erl", .mimetype = "text/x-erlang"},
-    {.ext = "hrl", .mimetype = "text/x-erlang"},
-    {.ext = "ex", .mimetype = "text/x-elixir"},
-    {.ext = "exs", .mimetype = "text/x-elixir"},
-    {.ext = "cl", .mimetype = "text/x-common-lisp"},
-    {.ext = "lsp", .mimetype = "text/x-common-lisp"},
-    {.ext = "f", .mimetype = "text/x-fortran"},
-    {.ext = "f77", .mimetype = "text/x-fortran"},
-    {.ext = "f90", .mimetype = "text/x-fortran"},
-    {.ext = "for", .mimetype = "text/x-fortran"},
-    {.ext = "nim", .mimetype = "text/x-nim"},
-    {.ext = "v", .mimetype = "text/x-verilog"},
-    {.ext = "sv", .mimetype = "text/x-systemverilog"},
-    {.ext = "vhd", .mimetype = "text/x-vhdl"},
-    {.ext = "dic", .mimetype = "text/x-c"},
-    {.ext = "h", .mimetype = "text/x-c"},
-    {.ext = "hh", .mimetype = "text/x-c"},
-    {.ext = "f", .mimetype = "text/x-fortran"},
-    {.ext = "f77", .mimetype = "text/x-fortran"},
-    {.ext = "f90", .mimetype = "text/x-fortran"},
-    {.ext = "for", .mimetype = "text/x-fortran"},
-    {.ext = "java", .mimetype = "text/x-java-source"},
-    {.ext = "p", .mimetype = "text/x-pascal"},
-    {.ext = "pas", .mimetype = "text/x-pascal"},
-    {.ext = "pp", .mimetype = "text/x-pascal"},
-    {.ext = "inc", .mimetype = "text/x-pascal"},
-    {.ext = "py", .mimetype = "text/x-python"},
-
-    // Other
-    {.ext = "etx", .mimetype = "text/x-setext"},
-    {.ext = "uu", .mimetype = "text/x-uuencode"},
-    {.ext = "vcs", .mimetype = "text/x-vcalendar"},
-    {.ext = "vcf", .mimetype = "text/x-vcard"},
-
-    // Video
-    {.ext = "mp4", .mimetype = "video/mp4"},
-    {.ext = "avi", .mimetype = "video/avi"},
-    {.ext = "mkv", .mimetype = "video/x-matroska"},
-    {.ext = "mov", .mimetype = "video/quicktime"},
-    {.ext = "wmv", .mimetype = "video/x-ms-wmv"},
-    {.ext = "flv", .mimetype = "video/x-flv"},
-    {.ext = "mpeg", .mimetype = "video/mpeg"},
-    {.ext = "webm", .mimetype = "video/webm"},
-
-    // Audio
-    {.ext = "mp3", .mimetype = "audio/mpeg"},
-    {.ext = "wav", .mimetype = "audio/wav"},
-    {.ext = "flac", .mimetype = "audio/flac"},
-    {.ext = "aac", .mimetype = "audio/aac"},
-    {.ext = "ogg", .mimetype = "audio/ogg"},
-    {.ext = "wma", .mimetype = "audio/x-ms-wma"},
-    {.ext = "m4a", .mimetype = "audio/m4a"},
-    {.ext = "mid", .mimetype = "audio/midi"},
-
-    // Archives
-    {.ext = "zip", .mimetype = "application/zip"},
-    {.ext = "rar", .mimetype = "application/x-rar-compressed"},
-    {.ext = "tar", .mimetype = "application/x-tar"},
-    {.ext = "7z", .mimetype = "application/x-7z-compressed"},
-    {.ext = "gz", .mimetype = "application/gzip"},
-    {.ext = "bz2", .mimetype = "application/x-bzip2"},
-    {.ext = "xz", .mimetype = "application/x-xz"},
-
-    // Spreadsheets
-    {.ext = "ods", .mimetype = "application/vnd.oasis.opendocument.spreadsheet"},
-    {.ext = "csv", .mimetype = "text/csv"},
-    {.ext = "tsv", .mimetype = "text/tab-separated-values"},
-
-    // Applications
-    {.ext = "exe", .mimetype = "application/x-msdownload"},
-    {.ext = "apk", .mimetype = "application/vnd.android.package-archive"},
-    {.ext = "dmg", .mimetype = "application/x-apple-diskimage"},
-
-    // Fonts
-    {.ext = "ttf", .mimetype = "font/ttf"},
-    {.ext = "otf", .mimetype = "font/otf"},
-    {.ext = "woff", .mimetype = "font/woff"},
-    {.ext = "woff2", .mimetype = "font/woff2"},
-
-    // 3D Models
-    {.ext = "obj", .mimetype = "model/obj"},
-    {.ext = "stl", .mimetype = "model/stl"},
-    {.ext = "gltf", .mimetype = "model/gltf+json"},
-
-    // GIS
-    {.ext = "kml", .mimetype = "application/vnd.google-earth.kml+xml"},
-    {.ext = "kmz", .mimetype = "application/vnd.google-earth.kmz"},
-
-    // Other
-    {.ext = "rss", .mimetype = "application/rss+xml"},
-    {.ext = "yaml", .mimetype = "application/x-yaml"},
-    {.ext = "ini", .mimetype = "text/plain"},
-    {.ext = "cfg", .mimetype = "text/plain"},
-    {.ext = "log", .mimetype = "text/plain"},
-
-    // Database Formats
-    {.ext = "sqlite", .mimetype = "application/x-sqlite3"},
-    {.ext = "sql", .mimetype = "application/sql"},
-
-    // Ebooks
-    {.ext = "epub", .mimetype = "application/epub+zip"},
-    {.ext = "mobi", .mimetype = "application/x-mobipocket-ebook"},
-    {.ext = "azw", .mimetype = "application/vnd.amazon.ebook"},
-    {.ext = "prc", .mimetype = "application/x-mobipocket-ebook"},
-
-    // Microsoft Windows Applications
-    {.ext = "wmd", .mimetype = "application/x-ms-wmd"},
-    {.ext = "wmz", .mimetype = "application/x-ms-wmz"},
-    {.ext = "xbap", .mimetype = "application/x-ms-xbap"},
-    {.ext = "mdb", .mimetype = "application/x-msaccess"},
-    {.ext = "obd", .mimetype = "application/x-msbinder"},
-    {.ext = "crd", .mimetype = "application/x-mscardfile"},
-    {.ext = "clp", .mimetype = "application/x-msclip"},
-    {.ext = "bat", .mimetype = "application/x-msdownload"},
-    {.ext = "com", .mimetype = "application/x-msdownload"},
-    {.ext = "dll", .mimetype = "application/x-msdownload"},
-    {.ext = "exe", .mimetype = "application/x-msdownload"},
-    {.ext = "msi", .mimetype = "application/x-msdownload"},
-    {.ext = "m13", .mimetype = "application/x-msmediaview"},
-    {.ext = "m14", .mimetype = "application/x-msmediaview"},
-    {.ext = "mvb", .mimetype = "application/x-msmediaview"},
-
-    // Virtual Reality (VR) and Augmented Reality (AR)
-    {.ext = "vrml", .mimetype = "model/vrml"},
-    {.ext = "glb", .mimetype = "model/gltf-binary"},
-    {.ext = "usdz", .mimetype = "model/vnd.usdz+zip"},
-
-    // CAD Files
-    {.ext = "dwg", .mimetype = "application/dwg"},
-    {.ext = "dxf", .mimetype = "application/dxf"},
-
-    // Geospatial Data
-    {.ext = "shp", .mimetype = "application/x-qgis"},
-    {.ext = "geojson", .mimetype = "application/geo+json"},
-
-    // configuration
-    {.ext = "jsonld", .mimetype = "application/ld+json"},
-
-    // Mathematical Data
-    {.ext = "m", .mimetype = "text/x-matlab"},
-    {.ext = "r", .mimetype = "application/R"},
-    {.ext = "csv", .mimetype = "text/csv"},
-
-    // Chemical Data
-    {.ext = "mol", .mimetype = "chemical/x-mdl-molfile"},
-
-    // Medical Imaging
-    {.ext = "dicom", .mimetype = "application/dicom"},
-
-    // Configuration Files
-    {.ext = "yml", .mimetype = "application/x-yaml"},
-    {.ext = "yaml", .mimetype = "application/x-yaml"},
-    {.ext = "jsonld", .mimetype = "application/ld+json"},
-
-    // Scientific Data
-    {.ext = "netcdf", .mimetype = "application/x-netcdf"},
-    {.ext = "fits", .mimetype = "application/fits"},
-};
-
-#define DEFAULT_CONTENT_TYPE "application/octet-stream"
-#define MIME_MAPPING_SIZE    (sizeof(mime_entries) / sizeof(mime_entries[0]))
-
-const char* get_mimetype(char* filename) {
-    if (!filename) {
-        return DEFAULT_CONTENT_TYPE;
-    }
-
-    // Get the file extension.
-    char *ptr, *start = filename, *last = NULL;
-    while ((ptr = strstr(start, "."))) {
-        last = ptr;
-        start++;
-    }
-
-    // No extension.
-    if (last == NULL) {
-        return DEFAULT_CONTENT_TYPE;
-    }
-
-    char* extension = last + 1;  // skip "."
-
-    // Convert to lowercase
-    for (char* p = extension; *p; ++p) {
-        *p = tolower((unsigned char)*p);
-    }
-
-    for (size_t i = 0; i < MIME_MAPPING_SIZE; i++) {
-        if (strcmp(extension, mime_entries[i].ext) == 0) {
-            return mime_entries[i].mimetype;
-        }
-    }
-    return DEFAULT_CONTENT_TYPE;
-}
-
-// Helper function to detect directory traversal attempts
-static bool is_directory_traversal_attempt(const char* filepath, const char* base_dir) {
-    // Check for obvious patterns
-    if (strstr(filepath, "/../") || strstr(filepath, "../")) {
-        return true;
-    }
-
-    // Resolve the full canonical path
-    char resolved_path[PATH_MAX];
-    if (realpath(filepath, resolved_path) == NULL) {
-        return true;  // Path doesn't exist or can't be resolved
-    }
-
-    // Resolve the base directory canonical path
-    char resolved_base[PATH_MAX];
-    if (realpath(base_dir, resolved_base) == NULL) {
-        return true;  // Base directory doesn't exist or can't be resolved
-    }
-
-    // Ensure the resolved path is within the base directory
-    size_t base_len = strlen(resolved_base);
-    if (strncmp(resolved_path, resolved_base, base_len) != 0) {
-        return true;  // Path is outside the base directory
-    }
-
-    // Additional check for symlinks pointing outside the base directory
-    struct stat stat_buf;
-    if (lstat(filepath, &stat_buf) == 0 && S_ISLNK(stat_buf.st_mode)) {
-        char link_target[PATH_MAX];
-        ssize_t len = readlink(filepath, link_target, sizeof(link_target) - 1);
-        if (len > 0) {
-            link_target[len] = '\0';
-            if (is_directory_traversal_attempt(link_target, base_dir)) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 static bool static_file_handler(connection_t* conn) {
     route_t* route = conn->request->route;
     assert((route->flags & STATIC_ROUTE_FLAG) != 0);
@@ -950,24 +611,19 @@ static bool static_file_handler(connection_t* conn) {
     }
 
     // Concatenate the dirname and the static path
-    char undecoded_path[PATH_MAX] = {0};
-    int n = snprintf(undecoded_path, PATH_MAX, "%.*s%.*s", (int)dirlen, dirname, (int)static_path_len, static_path);
+    char filepath[PATH_MAX];  // Uninitialized for performance;
+    int n = snprintf(filepath, PATH_MAX, "%.*s%.*s", (int)dirlen, dirname, (int)static_path_len, static_path);
     if (n < 0 || n >= PATH_MAX) {
         goto path_toolong;
     }
 
-    // percent-decode the path
-    char filepath[PATH_MAX] = {0};
-    url_percent_decode(undecoded_path, filepath, sizeof(filepath));
-
-    // Enhanced directory traversal protection
-    if (is_directory_traversal_attempt(filepath, dirname)) {
-        conn_set_status(conn, StatusForbidden);
-        conn_set_content_type(conn, "text/html");
-        conn_write_string(conn, "<h1>Directory traversal not allowed</h1>");
-        return true;
+    const char* src = filepath;
+    if (strstr(filepath, "%")) {
+        // percent-decode the path if required.
+        url_percent_decode(src, filepath, PATH_MAX);
     }
 
+    // TODO: Prevent directory traversal attempts
     if (is_dir(filepath)) {
         size_t filepath_len = strlen(filepath);
         // remove the trailing slash if present
@@ -976,8 +632,7 @@ static bool static_file_handler(connection_t* conn) {
             filepath_len--;
         }
 
-        char index_file[PATH_MAX] = {0};
-
+        char index_file[PATH_MAX];  // uninitialized for performance
         n = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
         if (n < 0 || n >= PATH_MAX) {
             goto path_toolong;
@@ -985,7 +640,7 @@ static bool static_file_handler(connection_t* conn) {
 
         if (!path_exists(index_file)) {
             if (DIRECTRORY_BROWSING_ON) {
-                char prefix[PATH_MAX] = {0};
+                char prefix[PATH_MAX];
                 snprintf(prefix, sizeof(prefix), "%s%s", route->pattern, static_path);
                 serve_directory_listing(conn, filepath, prefix);
             } else {
@@ -1249,6 +904,7 @@ response_t* create_response(Arena* arena) {
     if (!resp) return NULL;
 
     memset(resp, 0, sizeof(response_t));
+    resp->file_fd = -1;
 
     resp->headers = headers_new(arena);
     if (!resp->headers) {
@@ -1274,7 +930,9 @@ bool reset_connection(connection_t* conn) {
     conn->read_bytes    = 0;
     conn->last_activity = time(NULL);
     conn->keep_alive    = 1;
-    memset(conn->read_buf, 0, BUFFER_SIZE);
+
+    // Omitted for performance
+    // memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->request) {
         free_request(conn->request);
@@ -1289,13 +947,12 @@ bool reset_connection(connection_t* conn) {
         arena_reset(conn->arena);
     } else {
         // Create the and initialize arena.
-        conn->arena = arena_create(CONN_ARENA_MEM);
+        conn->arena = arena_create(ARENA_CAPACITY);
         if (!conn->arena) return false;
     }
 
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
-
     return (conn->request && conn->response);
 }
 
@@ -1476,6 +1133,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
             ssize_t count    = read(conn->fd, conn->request->body + conn->request->body_received, remaining);
             if (count == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    usleep(1000);
                     continue;  // try again
                 } else {
                     perror("read");
@@ -1555,10 +1213,7 @@ void process_request(connection_t* conn) {
         } else {
             // Set 500 status code if not already set inside handler.
             conn_set_status(conn, StatusInternalServerError);
-
-            // TODO: Only add content-type header if not already set.
             conn_set_content_type(conn, "text/plain");
-
             if (conn->response->body_size == 0) {
                 conn_write(conn, "500 Internal Server Error", 25);
             }
@@ -1577,7 +1232,7 @@ void process_request(connection_t* conn) {
 }
 
 void handle_read(int epoll_fd, connection_t* conn) {
-    ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, BUFFER_SIZE - conn->read_bytes - 1);
+    ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
     if (count == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("read");
@@ -1607,36 +1262,81 @@ void handle_read(int epoll_fd, connection_t* conn) {
     }
 }
 
-void handle_write(int epoll_fd, connection_t* conn) {
-    ssize_t count = write(conn->fd, conn->response->buffer + conn->response->bytes_sent,
-                          conn->response->bytes_to_send - conn->response->bytes_sent);
+// Use sendfile for zero-copy transfer
+ssize_t conn_sendfile(connection_t* conn) {
+    off_t size   = (off_t)conn->response->file_size;
+    off_t offset = 0;
+    ssize_t sent;
+    ssize_t total_sent = 0;
 
-    if (count == -1) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            perror("write");
-            conn->state = STATE_CLOSING;
+    while (offset < size) {
+        sent = sendfile(conn->fd, conn->response->file_fd, &offset, size - offset);
+        if (sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                usleep(1000);  // sleep a bit and retry
+                continue;
+            }
+            close(conn->response->file_fd);
+            return -1;  // Return error
+        } else if (sent == 0) {
+            // EOF reached unexpectedly
+            close(conn->response->file_fd);
+            return -1;
         }
-        return;
+        total_sent += sent;
     }
 
-    conn->response->bytes_sent += count;
-    conn->last_activity = time(NULL);
+    close(conn->response->file_fd);
+    return total_sent;
+}
 
-    if (conn->response->bytes_sent >= conn->response->bytes_to_send) {
-        if (conn->keep_alive) {
-            reset_connection(conn);
+void handle_write(int epoll_fd, connection_t* conn) {
+    response_t* res   = conn->response;
+    bool sending_file = res->file_fd > 0 && res->file_size > 0;
+    size_t remaining  = res->bytes_to_send - res->bytes_sent;
 
-            struct epoll_event event;
-            event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
-            event.data.ptr = conn;
-
-            if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
-                perror("epoll_ctl mod to EPOLLIN");
+    // Send headers and contents(except file contents)
+    while (remaining > 0) {
+        ssize_t count = write(conn->fd, res->buffer + res->bytes_sent, remaining);
+        if (count <= 1) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                perror("write");
                 conn->state = STATE_CLOSING;
+                return;
+            } else if (count == 0) {
+                perror("write");
+                conn->state = STATE_CLOSING;
+                return;
             }
-        } else {
+        }
+        res->bytes_sent += count;
+        remaining -= count;
+    }
+
+    if (sending_file) {
+        res->bytes_to_send += res->file_size;
+        size_t sent = conn_sendfile(conn);
+        if (sent <= 0) {
+            conn->state = STATE_CLOSING;
+            return;
+        }
+        res->bytes_sent += sent;
+    }
+
+    conn->last_activity = time(NULL);
+    if (conn->keep_alive) {
+        reset_connection(conn);
+
+        struct epoll_event event;
+        event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
+        event.data.ptr = conn;
+
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
+            perror("epoll_ctl mod to EPOLLIN");
             conn->state = STATE_CLOSING;
         }
+    } else {
+        conn->state = STATE_CLOSING;
     }
 }
 
@@ -1721,8 +1421,8 @@ void* worker_thread(void* arg) {
     return NULL;
 }
 
-int run() {
-    int server_fd = create_server_socket(PORT);
+int run(int port) {
+    int server_fd = create_server_socket(port);
     set_nonblocking(server_fd);
 
     pthread_t workers[NUM_WORKERS];
@@ -1747,14 +1447,13 @@ int run() {
         }
     }
 
-    printf("Server with %d workers listening on port %d\n", NUM_WORKERS, PORT);
+    printf("Server with %d workers listening on port %d\n", NUM_WORKERS, port);
 
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }
 
     close(server_fd);
-
     printf("Terminated server gracefully\n");
     return 0;
 }
@@ -1800,6 +1499,7 @@ __attribute__((destructor())) void cleanup(void) {
     for (size_t i = 0; i < global_count; i++) {
         route_t* r = &global_routes[i];
         free(r->pattern);
+
         if (r->dirname) {
             free(r->dirname);
         }
@@ -1816,5 +1516,5 @@ int main() {
 
     register_static_route("/static", "./");
 
-    return run();
+    return run(8080);
 }
