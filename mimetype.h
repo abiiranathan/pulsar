@@ -11,9 +11,6 @@ typedef struct MimeEntry {
     struct MimeEntry* next;  // For chaining
 } MimeEntry;
 
-// Macro to compute the next power of two for a given number
-#define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
-
 static MimeEntry mime_entries[] = {
     // Text mime types
     {.ext = "html", .mimetype = "text/html"},
@@ -252,6 +249,9 @@ static MimeEntry mime_entries[] = {
 
 #define DEFAULT_CONTENT_TYPE "application/octet-stream"
 #define MIME_MAPPING_SIZE    (sizeof(mime_entries) / sizeof(mime_entries[0]))
+
+// Macro to compute the next power of two for a given number
+#define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
 #define HASH_TABLE_SIZE      NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
 
 // Power of two check macro

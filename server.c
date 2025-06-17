@@ -47,11 +47,13 @@ typedef struct {
     size_t count;
 } headers_t;
 
+// Path parameter.
 typedef struct {
     char* name;   // Parameter name
     char* value;  // Parameter value from the URL
 } PathParam;
 
+// Array structure for path parameters.
 typedef struct PathParams {
     PathParam* params;    // Array of matched parameters
     size_t match_count;   // Number of matched parameters from request path.
@@ -228,6 +230,7 @@ headers_t* headers_new(Arena* arena) {
     return headers;
 }
 
+// TODO: Make this O(1) by using a hashmap.
 bool headers_append(Arena* arena, headers_t* headers, const char* name, const char* value) {
     // Check if header already exists.
     int index = -1;
@@ -238,7 +241,7 @@ bool headers_append(Arena* arena, headers_t* headers, const char* name, const ch
         }
     }
 
-    // if its a new header and no space for it, bail
+    // If its a new header and no space for it, bail
     if (headers->count >= MAX_HEADERS && index == -1) return false;
 
     header_t hdr = {
@@ -248,14 +251,26 @@ bool headers_append(Arena* arena, headers_t* headers, const char* name, const ch
 
     if (!hdr.name || !hdr.value) return false;
 
-    // Insert in correct position
-    size_t pos = (index != -1) ? index : headers->count;
+    // Use correct slot for header.
+    size_t pos = (index > -1) ? (size_t)index : headers->count;  // If already exists, we replace it.
 
     // Increment counter if new header.
     if (index == -1) headers->count++;
 
+    // Insert in correct position
     headers->items[pos] = hdr;
     return true;
+}
+
+// Get a header by name.
+// TODO: Make this O(1) by using a hashmap.
+const char* headers_get(headers_t* headers, const char* name) {
+    for (size_t i = 0; i < headers->count; i++) {
+        if (strcasecmp(name, headers->items[i].name) == 0) {
+            return headers->items[i].value;
+        }
+    }
+    return NULL;
 }
 
 // =================== New API Functions ========================
