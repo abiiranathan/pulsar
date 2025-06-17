@@ -1507,7 +1507,6 @@ void process_request(connection_t* conn) {
 
     conn->request->path = arena_strdup(conn->arena, path);
     if (!conn->request->path) {
-        perror("strdup");
         conn->state = STATE_CLOSING;
         return;
     }
@@ -1519,19 +1518,24 @@ void process_request(connection_t* conn) {
     HttpMethod method = http_method_from_string(conn->request->method);
     route_t* route    = route_match(conn, method);
     if (route) {
+        // Set the route to request.
         conn->request->route = route;
+
+        // Parse headers.
         if (!parse_request_headers(conn)) {
             fprintf(stderr, "error parsing request headers\n");
             conn->state = STATE_CLOSING;
             return;
         };
 
+        // Parse content length.
         if (!parse_content_length(conn)) {
             fprintf(stderr, "error parsing content length\n");
             conn->state = STATE_CLOSING;
             return;
         }
 
+        // Read request body.
         if (!parse_request_body(conn, headers_len)) {
             fprintf(stderr, "error parsing request body\n");
             conn->state = STATE_CLOSING;
