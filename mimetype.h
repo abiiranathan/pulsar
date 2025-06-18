@@ -280,7 +280,7 @@ static inline void init_mime_table() {
     }
 }
 
-const char* get_mimetype(char* filename) {
+static inline const char* get_mimetype(char* filename) {
     static int initialized = 0;
     if (!initialized) {
         init_mime_table();

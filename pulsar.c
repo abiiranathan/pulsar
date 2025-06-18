@@ -1,121 +1,4 @@
-#include <linux/limits.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <sys/sendfile.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/epoll.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <time.h>
-#include <pthread.h>
-
-// Internal libs.
-#include "arena.h"
-#include "status_code.h"
-#include "mimetype.h"
-#include "headers.h"
-
-#define NUM_WORKERS        8          // Number of workers.
-#define MAX_EVENTS         2048       // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE   2048       // Buffer size for incoming data.
-#define CONNECTION_TIMEOUT 30         // Keep-Alive connection timeout in seconds
-#define MAX_BODY_SIZE      (2 << 20)  // Max Request body allowed.
-#define ARENA_CAPACITY     8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
-#define MAX_ROUTES         64         // Maximum number of routes
-
-// Connection states
-typedef enum {
-    STATE_READING_REQUEST,
-    STATE_WRITING_RESPONSE,
-    STATE_CLOSING,
-} connection_state;
-
-// Path parameter.
-typedef struct {
-    char* name;   // Parameter name
-    char* value;  // Parameter value from the URL
-} PathParam;
-
-// Array structure for path parameters.
-typedef struct PathParams {
-    PathParam* params;    // Array of matched parameters
-    size_t match_count;   // Number of matched parameters from request path.
-    size_t total_params;  // Total parameters counted at startup.
-} PathParams;
-
-// HTTP Response structure
-typedef struct {
-    char* buffer;          // Buffer for outgoing data
-    size_t bytes_to_send;  // Total bytes to write
-    size_t bytes_sent;     // Bytes already sent
-    size_t buffer_size;    // Bytes allocated for buffer
-
-    http_status status_code;  // HTTP status code
-    char status_message[40];  // HTTP status message
-    headers_t* headers;       // Custom headers
-
-    char* body_data;       // Response body data
-    size_t body_size;      // Current body size
-    size_t body_capacity;  // Body buffer capacity
-
-    bool headers_written;   // Flag to track if headers are written
-    bool content_type_set;  // Track whether content-type has been set
-
-    // File serving with sendfile.
-    int file_fd;       // If a file_fd != -1, we are serving a file.
-    size_t file_size;  // The size of the file being sent.
-} response_t;
-
-typedef enum {
-    HTTP_INVALID = -1,
-    HTTP_OPTIONS,
-    HTTP_GET,
-    HTTP_POST,
-    HTTP_PUT,
-    HTTP_PATCH,
-    HTTP_DELETE,
-} HttpMethod;
-
-// Connection structure
-typedef struct connection_t {
-    int fd;                           // Client socket file descriptor
-    connection_state state;           // Current connection state
-    time_t last_activity;             // Timestamp of last I/O activity
-    int keep_alive;                   // Keep-alive flag
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data
-    size_t read_bytes;                // Bytes currently in read buffer
-    struct request_t* request;        // HTTP request data
-    response_t* response;             // HTTP response data
-    Arena* arena;                     // Connection arena.
-} connection_t;
-
-// HTTP Request structure
-typedef struct request_t {
-    char method[8];           // HTTP method (GET, POST etc.)
-    char* path;               // Requested path
-    char* body;               // Request body
-    size_t content_length;    // Content-Length header value
-    size_t body_received;     // Bytes of body received
-    size_t headers_len;       // Length of headers text in connection buffer. ie offset
-    headers_t* headers;       // Request headers
-    headers_t* query_params;  // Query parameters
-    struct route_t* route;    // Matched route.
-} request_t;
-
-typedef bool (*HttpHandler)(connection_t* conn);
-
-typedef struct route_t {
-    int flags;                // Bit mask for route type. NormalRoute | StaticRoute
-    char* pattern;            // dynamically allocated route pattern
-    char* dirname;            // Directory name (for static routes)
-    HttpMethod method;        // Http method.
-    HttpHandler handler;      // Handler function pointer
-    PathParams* path_params;  // Path parameters
-} route_t;
+#include "pulsar.h"
 
 // Worker thread data
 typedef struct {
@@ -165,6 +48,11 @@ void conn_set_status(connection_t* conn, http_status code) {
 // Add a custom header
 bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
     if (!name || !value) return false;
+
+    if (strcasecmp(name, "content-type")) {
+        return conn_set_content_type(conn, value);
+    }
+
     char* name_ptr  = arena_strdup(conn->arena, name);
     char* value_ptr = arena_strdup(conn->arena, value);
     if (!name_ptr || !value_ptr) {
@@ -222,7 +110,7 @@ int conn_write_string(connection_t* conn, const char* str) {
     return conn_write(conn, str, strlen(str));
 }
 
-__attribute__((format(printf, 2, 3))) ssize_t conn_write_string_f(connection_t* conn, const char* fmt, ...) {
+__attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     char* buffer = NULL;
@@ -254,8 +142,6 @@ __attribute__((format(printf, 2, 3))) ssize_t conn_write_string_f(connection_t* 
     return result;
 }
 
-// Simple file serving.
-// Proper file serving implementation
 bool conn_servefile(connection_t* conn, const char* filename) {
     if (!filename) return false;
 
@@ -278,7 +164,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 }
 
 // Build the complete HTTP response
-void finalize_response(connection_t* conn) {
+static void finalize_response(connection_t* conn) {
     response_t* resp = conn->response;
     if (resp->headers_written) return;
 
@@ -343,7 +229,7 @@ void finalize_response(connection_t* conn) {
 }
 
 // =================== Routing ========================
-bool http_method_valid(HttpMethod method) {
+static inline bool http_method_valid(HttpMethod method) {
     return method > HTTP_INVALID && method <= HTTP_DELETE;
 }
 
@@ -671,7 +557,7 @@ route_t* register_static_route(const char* pattern, const char* dir) {
  * @param pathParams: The PathParams struct to store the matched parameters
  * @return true if the pattern and URL match, false otherwise
  */
-bool match_path_parameters(Arena* arena, const char* pattern, const char* url_path, PathParams* path_params) {
+static bool match_path_parameters(Arena* arena, const char* pattern, const char* url_path, PathParams* path_params) {
     if (!path_params || !pattern || !url_path) return false;
 
     const char* pat          = pattern;
@@ -761,7 +647,7 @@ const char* get_path_param(connection_t* conn, const char* name) {
     return NULL;
 }
 
-route_t* route_match(connection_t* conn, HttpMethod method) {
+static route_t* route_match(connection_t* conn, HttpMethod method) {
     // Binary search to find the first route with matching method
     // We can do binary search because our routes are sorted by method, then pattern
     size_t low         = 0;
@@ -824,7 +710,7 @@ route_t* route_match(connection_t* conn, HttpMethod method) {
 
 // ====================================================================
 
-void set_nonblocking(int fd) {
+static void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         perror("fcntl F_GETFL");
@@ -837,7 +723,7 @@ void set_nonblocking(int fd) {
     }
 }
 
-int create_server_socket(int port) {
+static int create_server_socket(int port) {
     int fd;
     struct sockaddr_in address;
     int opt = 1;
@@ -869,7 +755,7 @@ int create_server_socket(int port) {
     return fd;
 }
 
-request_t* create_request(Arena* arena) {
+static request_t* create_request(Arena* arena) {
     request_t* req = arena_alloc(arena, sizeof(request_t));
     if (!req) return NULL;
     memset(req, 0, sizeof(request_t));
@@ -884,7 +770,7 @@ request_t* create_request(Arena* arena) {
     return req;
 }
 
-response_t* create_response(Arena* arena) {
+static response_t* create_response(Arena* arena) {
     response_t* resp = arena_alloc(arena, sizeof(response_t));
     if (!resp) return NULL;
 
@@ -898,24 +784,23 @@ response_t* create_response(Arena* arena) {
     return resp;
 }
 
-void free_request(request_t* req) {
+static void free_request(request_t* req) {
     if (!req) return;
     if (req->body) free(req->body);
 }
 
-void free_response(response_t* resp) {
+static void free_response(response_t* resp) {
     if (!resp) return;
 
     if (resp->buffer) free(resp->buffer);
     if (resp->body_data) free(resp->body_data);
 }
 
-bool reset_connection(connection_t* conn) {
+static bool reset_connection(connection_t* conn) {
     conn->state         = STATE_READING_REQUEST;
     conn->read_bytes    = 0;
     conn->last_activity = time(NULL);
     conn->keep_alive    = 1;
-    memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->request) {
         free_request(conn->request);
@@ -934,12 +819,20 @@ bool reset_connection(connection_t* conn) {
         if (!conn->arena) return false;
     }
 
+    // Allocate a new buffer if non exists
+    if (!conn->read_buf) {
+        conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
+        if (conn->read_buf == NULL) {
+            return false;
+        }
+    }
+
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     return (conn->request && conn->response);
 }
 
-int should_keep_alive(const char* request) {
+static int should_keep_alive(const char* request) {
     char* connection_hdr = strstr(request, "Connection:");
     if (!connection_hdr) {
         return 1;
@@ -956,7 +849,7 @@ int should_keep_alive(const char* request) {
     return 1;
 }
 
-int conn_accept(int server_fd, int worker_id) {
+static int conn_accept(int server_fd, int worker_id) {
     (void)worker_id;  // might need it later for logging
 
     int client_fd;
@@ -976,14 +869,12 @@ int conn_accept(int server_fd, int worker_id) {
 }
 
 void add_connection_to_worker(int epoll_fd, int client_fd) {
-    connection_t* conn = malloc(sizeof(connection_t));
+    connection_t* conn = calloc(1, sizeof(connection_t));
     if (!conn) {
         perror("malloc");
         close(client_fd);
         return;
     }
-
-    memset(conn, 0, sizeof(connection_t));
     conn->fd = client_fd;
 
     if (!reset_connection(conn)) {
@@ -1168,7 +1059,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
     return true;
 }
 
-void process_request(connection_t* conn) {
+static void process_request(connection_t* conn) {
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
     if (!end_of_headers) return;  // still reading headers
 
@@ -1257,7 +1148,9 @@ void process_request(connection_t* conn) {
     }
 }
 
-void handle_read(int epoll_fd, connection_t* conn) {
+static void handle_read(int epoll_fd, connection_t* conn) {
+    // We are reading up to READ_BUFFER_SIZE.
+    // But the buffer is arena-allocated.
     ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
     if (count == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -1289,7 +1182,7 @@ void handle_read(int epoll_fd, connection_t* conn) {
 }
 
 // Use sendfile for zero-copy transfer
-ssize_t conn_sendfile(connection_t* conn) {
+static ssize_t conn_sendfile(connection_t* conn) {
     off_t size   = (off_t)conn->response->file_size;
     off_t offset = 0;
     ssize_t sent;
@@ -1447,7 +1340,7 @@ void* worker_thread(void* arg) {
     return NULL;
 }
 
-int run(int port) {
+int pulsar_run(int port) {
     int server_fd = create_server_socket(port);
     set_nonblocking(server_fd);
 
@@ -1485,63 +1378,6 @@ int run(int port) {
     return 0;
 }
 
-// =================== Example Handlers Using New API ========================
-
-bool hello_world_handler(connection_t* conn) {
-    conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, "text/plain");
-    conn_write(conn, "Hello, World!", 13);
-    return true;
-}
-
-bool json_handler(connection_t* conn) {
-    conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, "application/json");
-
-    const char* json = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
-    conn_write(conn, json, strlen(json));
-    return true;
-}
-
-bool echo_handler(connection_t* conn) {
-    conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, "text/plain");
-
-    // Echo request method and path
-    conn_write(conn, "Method: ", 8);
-    conn_write(conn, conn->request->method, strlen(conn->request->method));
-    conn_write(conn, "\nPath: ", 7);
-    conn_write(conn, conn->request->path, strlen(conn->request->path));
-
-    // Echo body if present
-    if (conn->request->body && conn->request->body_received > 0) {
-        conn_write(conn, "\nBody: ", 7);
-        conn_write(conn, conn->request->body, conn->request->body_received);
-    }
-
-    return true;
-}
-
-bool pathparams_query_params_handler(connection_t* conn) {
-    const char* userId   = get_path_param(conn, "user_id");
-    const char* username = get_path_param(conn, "username");
-
-    // Should exist, otherwise our router is broken
-    assert(userId && username);
-
-    printf("Path Params: \n");
-    printf("User ID: %s and username: %s\n", userId, username);
-
-    // Check for query params.
-    printf("Query Params: \n");
-    headers_foreach(conn->request->query_params, query) {
-        printf("%s = %s\n", query->name, query->value);
-    }
-
-    conn_write_string_f(conn, "Your user_id is %s and username %s\n", userId, username);
-    return true;
-}
-
 __attribute__((destructor())) void cleanup(void) {
     for (size_t i = 0; i < global_count; i++) {
         route_t* r = &global_routes[i];
@@ -1551,18 +1387,4 @@ __attribute__((destructor())) void cleanup(void) {
             free(r->dirname);
         }
     }
-}
-
-int main() {
-    // Register routes using the new API
-    route_register("/", HTTP_GET, hello_world_handler);
-    route_register("/hello", HTTP_GET, hello_world_handler);
-    route_register("/json", HTTP_GET, json_handler);
-    route_register("/echo", HTTP_GET, echo_handler);
-    route_register("/echo", HTTP_POST, echo_handler);
-    route_register("/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);
-
-    register_static_route("/static", "./");
-
-    return run(8080);
 }
