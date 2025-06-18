@@ -1,10 +1,6 @@
-#include <assert.h>
-#include <ctype.h>
 #include <linux/limits.h>
 #include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stdarg.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -16,36 +12,27 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
-#include <pwd.h>
 
-// Include status codes
+// Internal libs.
+#include "arena.h"
 #include "status_code.h"
 #include "mimetype.h"
+#include "headers.h"
 
 #define NUM_WORKERS        8          // Number of workers.
 #define MAX_EVENTS         2048       // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE   4096       // Buffer size for incoming data.
+#define READ_BUFFER_SIZE   2048       // Buffer size for incoming data.
 #define CONNECTION_TIMEOUT 30         // Keep-Alive connection timeout in seconds
 #define MAX_BODY_SIZE      (2 << 20)  // Max Request body allowed.
-#define ARENA_CAPACITY     8 * 1024   // Memory per connection.
+#define ARENA_CAPACITY     8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
 #define MAX_ROUTES         64         // Maximum number of routes
-#define MAX_HEADERS        32         // Maximum req/res headers.
-
-// Enable directory browsing for static assets.
-#define DIRECTRORY_BROWSING_ON 1
 
 // Connection states
-typedef enum { STATE_READING_REQUEST, STATE_WRITING_RESPONSE, STATE_CLOSING } connection_state;
-
-typedef struct {
-    char* name;
-    char* value;
-} header_t;
-
-typedef struct {
-    header_t items[MAX_HEADERS];
-    size_t count;
-} headers_t;
+typedef enum {
+    STATE_READING_REQUEST,
+    STATE_WRITING_RESPONSE,
+    STATE_CLOSING,
+} connection_state;
 
 // Path parameter.
 typedef struct {
@@ -93,12 +80,6 @@ typedef enum {
     HTTP_DELETE,
 } HttpMethod;
 
-typedef struct {
-    uint8_t* memory;   // Arena memory
-    size_t allocated;  // Allocated memory
-    size_t capacity;   // Capacity of the arena
-} Arena;
-
 // Connection structure
 typedef struct connection_t {
     int fd;                           // Client socket file descriptor
@@ -114,14 +95,15 @@ typedef struct connection_t {
 
 // HTTP Request structure
 typedef struct request_t {
-    char method[8];         // HTTP method (GET, POST etc.)
-    char* path;             // Requested path
-    char* body;             // Request body
-    size_t content_length;  // Content-Length header value
-    size_t body_received;   // Bytes of body received
-    size_t headers_len;     // Length of headers text in connection buffer. ie offset
-    headers_t* headers;     // Request headers
-    struct route_t* route;  // Matched route.
+    char method[8];           // HTTP method (GET, POST etc.)
+    char* path;               // Requested path
+    char* body;               // Request body
+    size_t content_length;    // Content-Length header value
+    size_t body_received;     // Bytes of body received
+    size_t headers_len;       // Length of headers text in connection buffer. ie offset
+    headers_t* headers;       // Request headers
+    headers_t* query_params;  // Query parameters
+    struct route_t* route;    // Matched route.
 } request_t;
 
 typedef bool (*HttpHandler)(connection_t* conn);
@@ -170,109 +152,6 @@ static void install_signal_handler(void) {
     signal(SIGPIPE, SIG_IGN);
 }
 
-// =================== Arena functions   ========================
-Arena* arena_create(size_t capacity) {
-    assert(capacity > 0);
-    Arena* arena = malloc(sizeof(Arena));
-    if (!arena) {
-        return NULL;
-    }
-
-    arena->memory = calloc(1, capacity);
-    if (!arena->memory) {
-        free(arena);
-        return NULL;
-    }
-    arena->allocated = 0;
-    arena->capacity  = capacity;
-    return arena;
-}
-
-void arena_destroy(Arena* arena) {
-    if (!arena) return;
-    free(arena->memory);
-    free(arena);
-}
-
-void* arena_alloc(Arena* arena, size_t size) {
-    if (arena->allocated + size > arena->capacity) {
-        fprintf(stderr, "Arena out of memory\n");
-        return NULL;
-    }
-
-    void* ptr = &arena->memory[arena->allocated];
-    arena->allocated += size;
-    return ptr;
-}
-
-char* arena_strdup(Arena* arena, const char* str) {
-    size_t cap = strlen(str) + 1;
-    char* dst  = arena_alloc(arena, cap);
-    if (!dst) {
-        return NULL;
-    }
-
-    // copy string including NULL terminator.
-    (void)strlcpy(dst, str, cap);
-    return dst;
-}
-
-static inline void arena_reset(Arena* arena) {
-    assert(arena->capacity > 0);
-    arena->allocated = 0;
-}
-
-// ==================== Header API functions ===================
-headers_t* headers_new(Arena* arena) {
-    headers_t* headers = arena_alloc(arena, sizeof(headers_t));
-    if (!headers) return NULL;
-    headers->count = 0;
-    return headers;
-}
-
-// TODO: Make this O(1) by using a hashmap.
-bool headers_append(Arena* arena, headers_t* headers, const char* name, const char* value) {
-    // Check if header already exists.
-    int index = -1;
-    for (size_t i = 0; i < headers->count; i++) {
-        if (strcasecmp(name, headers->items[i].name) == 0) {
-            index = i;
-            break;
-        }
-    }
-
-    // If its a new header and no space for it, bail
-    if (headers->count >= MAX_HEADERS && index == -1) return false;
-
-    header_t hdr = {
-        .name  = arena_strdup(arena, name),
-        .value = arena_strdup(arena, value),
-    };
-
-    if (!hdr.name || !hdr.value) return false;
-
-    // Use correct slot for header.
-    size_t pos = (index > -1) ? (size_t)index : headers->count;  // If already exists, we replace it.
-
-    // Increment counter if new header.
-    if (index == -1) headers->count++;
-
-    // Insert in correct position
-    headers->items[pos] = hdr;
-    return true;
-}
-
-// Get a header by name.
-// TODO: Make this O(1) by using a hashmap.
-const char* headers_get(headers_t* headers, const char* name) {
-    for (size_t i = 0; i < headers->count; i++) {
-        if (strcasecmp(name, headers->items[i].name) == 0) {
-            return headers->items[i].value;
-        }
-    }
-    return NULL;
-}
-
 // =================== New API Functions ========================
 
 // Set HTTP status code and message
@@ -286,7 +165,12 @@ void conn_set_status(connection_t* conn, http_status code) {
 // Add a custom header
 bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
     if (!name || !value) return false;
-    return headers_append(conn->arena, conn->response->headers, name, value);
+    char* name_ptr  = arena_strdup(conn->arena, name);
+    char* value_ptr = arena_strdup(conn->arena, value);
+    if (!name_ptr || !value_ptr) {
+        return false;
+    }
+    return headers_set(conn->arena, conn->response->headers, name_ptr, value_ptr);
 }
 
 bool conn_set_content_type(connection_t* conn, const char* content_type) {
@@ -338,6 +222,38 @@ int conn_write_string(connection_t* conn, const char* str) {
     return conn_write(conn, str, strlen(str));
 }
 
+__attribute__((format(printf, 2, 3))) ssize_t conn_write_string_f(connection_t* conn, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char* buffer = NULL;
+    int len      = vsnprintf(buffer, 0, fmt, args);  // Determine the required buffer size
+    va_end(args);
+
+    if (len <= 0) return -1;  // there was an error in formatting the string
+
+    // Allocate a buffer of the required size
+    buffer = (char*)malloc(len + 1);  // +1 for the null terminator
+    if (!buffer) {
+        perror("malloc");
+        return -1;
+    }
+
+    // Format the string into the allocated buffer
+    va_start(args, fmt);
+    len = vsnprintf(buffer, len + 1, fmt, args);
+    va_end(args);
+    if (len < 0) {
+        free(buffer);
+        perror("vsnprintf");
+        return -1;
+    }
+
+    // Send the response
+    ssize_t result = conn_write(conn, buffer, len);
+    free(buffer);
+    return result;
+}
+
 // Simple file serving.
 // Proper file serving implementation
 bool conn_servefile(connection_t* conn, const char* filename) {
@@ -363,10 +279,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 
 // Build the complete HTTP response
 void finalize_response(connection_t* conn) {
-    response_t* resp    = conn->response;
-    header_t* headers   = (header_t*)&resp->headers->items;
-    size_t header_count = resp->headers->count;
-
+    response_t* resp = conn->response;
     if (resp->headers_written) return;
 
     // Set default status if not set
@@ -377,9 +290,11 @@ void finalize_response(connection_t* conn) {
 
     // Calculate total response size
     size_t header_size = 512;  // Base headers
-    for (size_t i = 0; i < header_count; i++) {
+
+    // Iterate through all the headers.
+    headers_foreach(resp->headers, hdr) {
         // +4, reserve for \r\n and colon and space.
-        header_size += strlen(headers[i].name) + strlen(headers[i].value) + 4;
+        header_size += strlen(hdr->name) + strlen(hdr->value) + 4;
     }
 
     size_t content_length = resp->body_size;               // Conent-Length
@@ -408,9 +323,9 @@ void finalize_response(connection_t* conn) {
                  resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close", content_length);
 
     // Add custom headers
-    for (size_t i = 0; i < header_count; i++) {
-        offset +=
-            snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", headers[i].name, headers[i].value);
+    headers_foreach(resp->headers, hdr) {
+        // +4, reserve for \r\n and colon and space.
+        offset += snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", hdr->name, hdr->value);
     }
 
     // End headers
@@ -541,6 +456,33 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     return r;
 }
 
+// Comparison function for sorting by method then pattern
+static int compare_routes(const void* a, const void* b) {
+    const route_t* ra = (const route_t*)a;
+    const route_t* rb = (const route_t*)b;
+
+    // First sort by method
+    if (ra->method < rb->method) return -1;
+    if (ra->method > rb->method) return 1;
+
+    // Then sort by pattern length (longer patterns first)
+    size_t len_a = strlen(ra->pattern);
+    size_t len_b = strlen(rb->pattern);
+    if (len_a > len_b) return -1;
+    if (len_a < len_b) return 1;
+
+    // Finally sort alphabetically
+    return strcmp(ra->pattern, rb->pattern);
+}
+
+static int global_sort_state = 0;
+void routes_sort_if_needed(void) {
+    if (global_sort_state == 0 && global_count > 0) {
+        qsort(global_routes, global_count, sizeof(route_t), compare_routes);
+        global_sort_state = 1;
+    }
+}
+
 /**
  * Check if path is a directory
  * Returns true if path exists AND is a directory, false otherwise
@@ -600,11 +542,27 @@ static inline void url_percent_decode(const char* src, char* dst, size_t dst_siz
     *dst = '\0';
 }
 
-static void serve_directory_listing(connection_t* conn, const char* filepath, const char* prefix) {
-    (void)conn;
-    (void)filepath;
-    (void)prefix;
-    conn_write_string(conn, "<h1>Directory Listsing Not Supported</h1>");
+static inline bool is_malicious_path(const char* path) {
+    // List of dangerous patterns
+    const char* patterns[] = {"../",     // Directory traversal
+                              "/./",     // Current directory reference
+                              "//",      // Multiple slashes
+                              "/~",      // User home directories
+                              "%2e%2e",  // URL-encoded ..
+                              NULL};
+
+    for (int i = 0; patterns[i]; i++) {
+        if (strstr(path, patterns[i])) {
+            return true;
+        }
+    }
+
+    // Check for URL-encoded characters(\\x).
+    if (strstr(path, "\\x")) {
+        return true;
+    }
+
+    return false;
 }
 
 static bool static_file_handler(connection_t* conn) {
@@ -612,13 +570,18 @@ static bool static_file_handler(connection_t* conn) {
     assert((route->flags & STATIC_ROUTE_FLAG) != 0);
 
     const char* dirname = route->dirname;
+    size_t dirlen       = strlen(dirname);
+    const char* path    = conn->request->path;
 
-    size_t dirlen    = strlen(dirname);
-    const char* path = conn->request->path;
+    // Prevent directory traversal attacks and reject NULL byte.
+    if (is_malicious_path(path)) {
+        return serve_404(conn);
+    }
 
     // Build the request static path
     const char* static_path = path + strlen(route->pattern);
-    size_t static_path_len  = strlen(static_path);
+
+    size_t static_path_len = strlen(static_path);
 
     // Validate path lengths before processing
     if (dirlen >= PATH_MAX || static_path_len >= PATH_MAX || (dirlen + static_path_len + 2) >= PATH_MAX) {
@@ -638,46 +601,31 @@ static bool static_file_handler(connection_t* conn) {
         url_percent_decode(src, filepath, PATH_MAX);
     }
 
-    // TODO: Prevent directory traversal attempts
-    if (is_dir(filepath)) {
-        size_t filepath_len = strlen(filepath);
-        // remove the trailing slash if present
-        if (filepath_len > 1 && filepath[filepath_len - 1] == '/') {
-            filepath[filepath_len - 1] = '\0';
-            filepath_len--;
-        }
-
-        char index_file[PATH_MAX];  // uninitialized for performance
-        n = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
-        if (n < 0 || n >= PATH_MAX) {
-            goto path_toolong;
-        }
-
-        if (!path_exists(index_file)) {
-            if (DIRECTRORY_BROWSING_ON) {
-                char prefix[PATH_MAX];
-                snprintf(prefix, sizeof(prefix), "%s%s", route->pattern, static_path);
-                serve_directory_listing(conn, filepath, prefix);
-            } else {
-                conn_set_content_type(conn, "text/html");
-                conn_set_status(conn, StatusForbidden);
-                conn_write_string(conn, "<h1>Directory listing is disabled</h1>");
-            }
-            return true;
-        } else {
-            // Check we have enough space for "/index.html" (11 chars + null)
-            if (filepath_len + 11 >= PATH_MAX) {
-                goto path_toolong;
-            }
-            strlcat(filepath, "/index.html", sizeof(filepath));
-        }
-    }
-
+    // Serve file if it exists.
     if (path_exists(filepath)) {
         const char* web_ct = get_mimetype(filepath);
         conn_set_content_type(conn, web_ct);
         return conn_servefile(conn, filepath);
     }
+
+    // Check for index.html in directory.
+    if (is_dir(filepath)) {
+        char index_file[PATH_MAX];
+        n = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
+        if (n < 0 || n >= PATH_MAX) {
+            goto path_toolong;
+        }
+
+        // No index.html in directory.
+        if (path_exists(index_file)) {
+            conn_set_content_type(conn, "text/html");
+            return conn_servefile(conn, filepath);
+        } else {
+            return serve_404(conn) > 0;
+        }
+    }
+
+    // Nothing found, serve 404.
     return serve_404(conn);
 
 path_toolong:
@@ -690,27 +638,19 @@ path_toolong:
 route_t* register_static_route(const char* pattern, const char* dir) {
     assert(pattern && dir);  // validate inputs
 
-    if (strcmp(".", dir) == 0) {
-        dir = "./";
-    }
-
-    if (strcmp("..", dir) == 0) {
-        dir = "../";
-    }
-
+    if (strcmp(".", dir) == 0) dir = "./";
+    if (strcmp("..", dir) == 0) dir = "../";
     size_t dirlen = strlen(dir);
     assert(dirlen + 1 < PATH_MAX);
 
-    // Expand user home dir.
-    char* dirname = NULL;
+    char* dirname = NULL;  // will be malloc'd
     if ((dirname = realpath(dir, NULL)) == NULL) {
         fprintf(stderr, "Unable to resolve path: %s\n", dir);
         exit(1);
     }
 
+    // We must have a valid directory
     assert(is_dir(dirname));
-
-    // Todo: Detect directory traversal here...
 
     if (dirname[dirlen - 1] == '/') {
         dirname[dirlen - 1] = '\0';  // Remove trailing slash
@@ -719,7 +659,6 @@ route_t* register_static_route(const char* pattern, const char* dir) {
     route_t* r = route_register(pattern, HTTP_GET, static_file_handler);
     r->flags   = STATIC_ROUTE_FLAG;
     r->dirname = dirname;
-    printf("Registering directory: %s\n", dirname);
     return r;
 }
 
@@ -808,47 +747,76 @@ bool match_path_parameters(Arena* arena, const char* pattern, const char* url_pa
     return (*pat == '\0' && *url == '\0' && path_params->total_params == path_params->match_count);
 }
 
-const char* get_path_param(const PathParams* params, const char* name) {
-    if (!params || !name) return NULL;
+const char* get_path_param(connection_t* conn, const char* name) {
+    if (!name) return NULL;
+    route_t* route = conn->request->route;
+    if (!route) return NULL;
 
-    for (size_t i = 0; i < params->match_count; i++) {
-        if (strcmp(params->params[i].name, name) == 0) {
-            return params->params[i].value;
+    PathParams* path_params = route->path_params;
+    for (size_t i = 0; i < path_params->match_count; i++) {
+        if (strcmp(path_params->params[i].name, name) == 0) {
+            return path_params->params[i].value;
         }
     }
     return NULL;
 }
 
 route_t* route_match(connection_t* conn, HttpMethod method) {
-    route_t* current  = global_routes;
-    route_t* end      = global_routes + global_count;
+    // Binary search to find the first route with matching method
+    // We can do binary search because our routes are sorted by method, then pattern
+    size_t low         = 0;
+    size_t high        = global_count;
+    size_t first_match = global_count;  // Initialize to invalid index
+
+    while (low < high) {
+        size_t mid            = low + (high - low) / 2;
+        HttpMethod mid_method = global_routes[mid].method;
+        if (mid_method >= method) {
+            high = mid;
+            if (mid_method == method) {
+                first_match = mid;
+            }
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    // If no routes for this method, return early
+    if (first_match == global_count) {
+        return NULL;
+    }
+
+    // Linear search through routes of the matching method
     const char* url   = conn->request->path;
     size_t url_length = strlen(url);
 
-    // TODO: Handle MethodNotAllowed
-    // TODO: Optimize this with pre-sorted routes by method so we can have early exit.
-    // TODO: Optionally implement a Bloom Filter.
+    // Prefetch the first few route patterns
+    for (size_t i = first_match; i < first_match + 4 && i < global_count; i++) {
+        if (global_routes[i].method == method) {
+            __builtin_prefetch(global_routes[i].pattern, 0, 1);
+        } else {
+            break;  // Methods are sorted, so we can stop
+        }
+    }
 
-    while (current < end) {
-        __builtin_prefetch(current + 4, 0, 1);
+    for (size_t i = first_match; i < global_count && global_routes[i].method == method; i++) {
+        route_t* current = &global_routes[i];
 
-        if (method == current->method) {
-            if ((current->flags & NORMAL_ROUTE_FLAG) != 0) {
-                if (match_path_parameters(conn->arena, current->pattern, url, current->path_params)) {
-                    return current;
-                }
-            } else if ((current->flags & STATIC_ROUTE_FLAG) != 0) {
-                size_t pat_length = strlen(current->pattern);
+        // Prefetch next route's pattern
+        if (i + 4 < global_count && global_routes[i + 4].method == method) {
+            __builtin_prefetch(global_routes[i + 4].pattern, 0, 1);
+        }
 
-                // Compare only the prefix, for the static files
-                if (pat_length <= url_length) {
-                    if (memcmp(current->pattern, url, pat_length) == 0) {
-                        return current;
-                    }
-                }
+        if ((current->flags & NORMAL_ROUTE_FLAG) != 0) {
+            if (match_path_parameters(conn->arena, current->pattern, url, current->path_params)) {
+                return current;
+            }
+        } else if ((current->flags & STATIC_ROUTE_FLAG) != 0) {
+            size_t pat_length = strlen(current->pattern);
+            if (pat_length <= url_length && memcmp(current->pattern, url, pat_length) == 0) {
+                return current;
             }
         }
-        current++;
     }
 
     return NULL;
@@ -906,11 +874,13 @@ request_t* create_request(Arena* arena) {
     if (!req) return NULL;
     memset(req, 0, sizeof(request_t));
 
+    // Allocate headers
     req->headers = headers_new(arena);
     if (!req->headers) {
         return NULL;
     }
 
+    req->query_params = NULL;  // we may not have Query parameters.
     return req;
 }
 
@@ -945,9 +915,7 @@ bool reset_connection(connection_t* conn) {
     conn->read_bytes    = 0;
     conn->last_activity = time(NULL);
     conn->keep_alive    = 1;
-
-    // Omitted for performance
-    // memset(conn->read_buf, 0, READ_BUFFER_SIZE);
+    memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->request) {
         free_request(conn->request);
@@ -1089,7 +1057,7 @@ static bool parse_request_headers(connection_t* conn) {
         memcpy(value, ptr, value_len);
         value[value_len] = '\0';
 
-        if (!headers_append(conn->arena, conn->request->headers, name, value)) {
+        if (!headers_set(conn->arena, conn->request->headers, name, value)) {
             return false;
         }
 
@@ -1097,6 +1065,42 @@ static bool parse_request_headers(connection_t* conn) {
     }
 
     return true;
+}
+
+static bool parse_query_params(connection_t* conn) {
+    char* path  = conn->request->path;
+    char* query = strchr(path, '?');  // find first occurence of ?
+    if (query == NULL) return true;   // No Query parameters
+    *query = '\0';                    // Trim query from the path and NULL terminate path
+    query++;                          // move past ?
+
+    // allocate memory in arena.
+    conn->request->query_params = headers_new(conn->arena);
+    if (!conn->request->query_params) return false;
+
+    char* save_ptr1 = NULL;
+    char* save_ptr2 = NULL;
+    char* pair      = strtok_r(query, "&", &save_ptr1);
+    while (pair != NULL) {
+        // Split into key and value
+        char* key   = strtok_r(pair, "=", &save_ptr2);
+        char* value = strtok_r(NULL, "", &save_ptr2);  // Get rest of string after first '='
+
+        if (key != NULL) {
+            char* key_ptr   = arena_strdup(conn->arena, key);
+            char* value_ptr = arena_strdup(conn->arena, value ? value : "");
+            if (!key_ptr || !value_ptr) return false;
+            headers_set(conn->arena, conn->request->query_params, key_ptr, value_ptr);
+        }
+        pair = strtok_r(NULL, "&", &save_ptr1);
+    }
+    return true;
+}
+
+// Get value for a query parameter if present or NULL.
+const char* query_get(connection_t* conn, const char* name) {
+    if (!conn->request->query_params) return NULL;  // no query params.
+    return headers_get(conn->request->query_params, name);
 }
 
 static inline bool parse_content_length(connection_t* conn) {
@@ -1180,6 +1184,13 @@ void process_request(connection_t* conn) {
 
     conn->request->path = arena_strdup(conn->arena, path);
     if (!conn->request->path) {
+        conn->state = STATE_CLOSING;
+        return;
+    }
+
+    // If we have query parameters, process them and truncate the path.
+    if (!parse_query_params(conn)) {
+        fprintf(stderr, "Failed to parse query parameters\n");
         conn->state = STATE_CLOSING;
         return;
     }
@@ -1444,6 +1455,7 @@ int run(int port) {
     worker_data_t worker_data[NUM_WORKERS];
 
     install_signal_handler();
+    routes_sort_if_needed();
 
     for (int i = 0; i < NUM_WORKERS; i++) {
         int epoll_fd = epoll_create1(0);
@@ -1510,6 +1522,26 @@ bool echo_handler(connection_t* conn) {
     return true;
 }
 
+bool pathparams_query_params_handler(connection_t* conn) {
+    const char* userId   = get_path_param(conn, "user_id");
+    const char* username = get_path_param(conn, "username");
+
+    // Should exist, otherwise our router is broken
+    assert(userId && username);
+
+    printf("Path Params: \n");
+    printf("User ID: %s and username: %s\n", userId, username);
+
+    // Check for query params.
+    printf("Query Params: \n");
+    headers_foreach(conn->request->query_params, query) {
+        printf("%s = %s\n", query->name, query->value);
+    }
+
+    conn_write_string_f(conn, "Your user_id is %s and username %s\n", userId, username);
+    return true;
+}
+
 __attribute__((destructor())) void cleanup(void) {
     for (size_t i = 0; i < global_count; i++) {
         route_t* r = &global_routes[i];
@@ -1528,6 +1560,7 @@ int main() {
     route_register("/json", HTTP_GET, json_handler);
     route_register("/echo", HTTP_GET, echo_handler);
     route_register("/echo", HTTP_POST, echo_handler);
+    route_register("/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);
 
     register_static_route("/static", "./");
 
