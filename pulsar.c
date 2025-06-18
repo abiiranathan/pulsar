@@ -1,5 +1,6 @@
 #include "pulsar.h"
 #include <assert.h>
+#include <stddef.h>
 #include <strings.h>
 
 // Worker thread data
@@ -947,8 +948,8 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method) {
 
         if (!keepalive_set && strcasecmp(name, "Connection") == 0) {
             // Default to Keep-Alive, unless a client explicitly wants to close the connection.
-            conn->keep_alive = strncmp(value, "close", 5) !=0;
-            keepalive_set = true;
+            conn->keep_alive = strncmp(value, "close", 5) != 0;
+            keepalive_set    = true;
         }
 
         if (!headers_set(conn->arena, conn->request->headers, name, value)) {
@@ -1358,6 +1359,11 @@ __attribute__((destructor())) void cleanup(void) {
 
         if (r->dirname) {
             free(r->dirname);
+        }
+
+        if (r->path_params) {
+            free(r->path_params->params);
+            free(r->path_params);
         }
     }
 }
