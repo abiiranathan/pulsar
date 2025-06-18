@@ -1,7 +1,7 @@
 #ifndef PULSAR_H
 #define PULSAR_H
 
-#include <linux/limits.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <sys/sendfile.h>
@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+#include <inttypes.h>
 
 // Internal Libs.
 #include "arena.h"
@@ -24,7 +25,7 @@
 
 #define NUM_WORKERS        8          // Number of workers.
 #define MAX_EVENTS         2048       // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE   4096       // Buffer size for incoming data.
+#define READ_BUFFER_SIZE   2048       // Buffer size for incoming statusline + headers.
 #define CONNECTION_TIMEOUT 30         // Keep-Alive connection timeout in seconds
 #define MAX_BODY_SIZE      (2 << 20)  // Max Request body allowed.
 #define ARENA_CAPACITY     8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
@@ -88,11 +89,10 @@ typedef enum {
 } connection_state;
 
 typedef struct connection_t {
-    // 8-byte fields (or pointer-sized)
-    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
-    struct request_t* request;  // HTTP request data
-    response_t* response;       // HTTP response data
-    Arena* arena;               // Memory arena for allocations
+    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
+    struct request_t* request;        // HTTP request data
+    response_t* response;             // HTTP response data
+    Arena* arena;                     // Memory arena for allocations
 
     // 4-byte fields
     int fd;                // Client socket file descriptor
@@ -173,6 +173,33 @@ HttpMethod http_method_from_string(const char* method);
 
 // Convert HttpMethod enum variant to string.
 const char* http_method_to_string(const HttpMethod method);
+
+// If http method is safe. (GET / OPTIONS)
+static inline bool is_safe_method(HttpMethod method) {
+    return method == HTTP_GET || method == HTTP_OPTIONS;
+}
+
+static inline unsigned long parse_ulong(const char* value, bool* valid) {
+    assert(valid);
+
+    *valid        = false;
+    char* endptr  = NULL;
+    errno         = 0;
+    uintmax_t num = strtoumax(value, &endptr, 10);
+
+    // Overflow or underflow.
+    if ((num > ULONG_MAX) || (errno == ERANGE && (num == 0 || num == UINTMAX_MAX))) {
+        return 0;
+    }
+
+    // Invalid value.
+    if (*endptr != '\0' || endptr == value) {
+        return 0;
+    }
+
+    *valid = true;
+    return num;
+}
 
 // Set content-type header. This is indempotent.
 bool conn_set_content_type(connection_t* conn, const char* content_type);

@@ -1,4 +1,6 @@
 #include "pulsar.h"
+#include <assert.h>
+#include <strings.h>
 
 // Worker thread data
 typedef struct {
@@ -39,19 +41,16 @@ static void install_signal_handler(void) {
 
 // Set HTTP status code and message
 void conn_set_status(connection_t* conn, http_status code) {
-    if (conn->response->status_code > 0) return;  // Status already set( Makes it Indempotent)
-
-    conn->response->status_code = code;
-    strlcpy(conn->response->status_message, http_status_text(code), sizeof(conn->response->status_message));
+    response_t* res = conn->response;
+    if (res->status_code > 0) return;  // Status already set( Makes it Indempotent)
+    res->status_code = code;
+    strlcpy(res->status_message, http_status_text(code), sizeof(res->status_message));
 }
 
 // Add a custom header
 bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
-    if (!name || !value) return false;
-
-    if (strcasecmp(name, "content-type")) {
-        return conn_set_content_type(conn, value);
-    }
+    assert(name);
+    assert(value);
 
     char* name_ptr  = arena_strdup(conn->arena, name);
     char* value_ptr = arena_strdup(conn->arena, value);
@@ -62,9 +61,10 @@ bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
 }
 
 bool conn_set_content_type(connection_t* conn, const char* content_type) {
-    if (conn->response->content_type_set) return true;
-    conn->response->content_type_set = conn_writeheader(conn, "Content-Type", content_type);
-    return conn->response->content_type_set;
+    response_t* res = conn->response;
+    if (res->content_type_set) return true;
+    res->content_type_set = conn_writeheader(conn, "Content-Type", content_type);
+    return res->content_type_set;
 }
 
 // Write data to response body
@@ -186,7 +186,6 @@ static void finalize_response(connection_t* conn) {
     size_t content_length = resp->body_size;               // Conent-Length
     size_t buffer_size    = header_size + content_length;  // Memory to malloc for buffer.
     bool sending_file     = conn->response->file_fd > 0 && conn->response->file_size > 0;
-
     if (sending_file) {
         content_length = conn->response->file_size;
         buffer_size    = header_size;
@@ -758,15 +757,22 @@ static int create_server_socket(int port) {
 static request_t* create_request(Arena* arena) {
     request_t* req = arena_alloc(arena, sizeof(request_t));
     if (!req) return NULL;
-    memset(req, 0, sizeof(request_t));
+
+    req->body           = NULL;
+    req->body_received  = 0;
+    req->content_length = 0;
+    req->path           = NULL;
+    req->route          = NULL;
+    req->query_params   = NULL;
+    memset(req->method, 0, sizeof(req->method));
 
     // Allocate headers
     req->headers = headers_new(arena);
     if (!req->headers) {
         return NULL;
     }
+    req->headers_len = 0;
 
-    req->query_params = NULL;  // we may not have Query parameters.
     return req;
 }
 
@@ -784,14 +790,13 @@ static response_t* create_response(Arena* arena) {
     return resp;
 }
 
-static void free_request(request_t* req) {
+static inline void free_request(request_t* req) {
     if (!req) return;
     if (req->body) free(req->body);
 }
 
-static void free_response(response_t* resp) {
+static inline void free_response(response_t* resp) {
     if (!resp) return;
-
     if (resp->buffer) free(resp->buffer);
     if (resp->body_data) free(resp->body_data);
 }
@@ -800,7 +805,9 @@ static bool reset_connection(connection_t* conn) {
     conn->state         = STATE_READING_REQUEST;
     conn->read_bytes    = 0;
     conn->last_activity = time(NULL);
-    conn->keep_alive    = 1;
+    conn->keep_alive    = true;
+
+    memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->request) {
         free_request(conn->request);
@@ -819,34 +826,9 @@ static bool reset_connection(connection_t* conn) {
         if (!conn->arena) return false;
     }
 
-    // Allocate a new buffer if non exists
-    if (!conn->read_buf) {
-        conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
-        if (conn->read_buf == NULL) {
-            return false;
-        }
-    }
-
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     return (conn->request && conn->response);
-}
-
-static int should_keep_alive(const char* request) {
-    char* connection_hdr = strstr(request, "Connection:");
-    if (!connection_hdr) {
-        return 1;
-    }
-
-    char* value = connection_hdr + strlen("Connection:");
-    while (*value == ' ' || *value == '\t')
-        value++;
-
-    if (strncasecmp(value, "close", 5) == 0) {
-        return 0;
-    }
-
-    return 1;
 }
 
 static int conn_accept(int server_fd, int worker_id) {
@@ -916,9 +898,13 @@ static void copy_bodyfrom_buf(connection_t* conn) {
     }
 }
 
-static bool parse_request_headers(connection_t* conn) {
+static bool parse_request_headers(connection_t* conn, HttpMethod method) {
     const char* ptr = conn->read_buf;
     const char* end = ptr + conn->request->headers_len;
+
+    bool clset         = false;
+    bool keepalive_set = false;
+    bool is_safe       = (method != HTTP_GET && method != HTTP_OPTIONS && method != HTTP_INVALID);
 
     while (ptr < end) {
         // Parse header name
@@ -948,6 +934,23 @@ static bool parse_request_headers(connection_t* conn) {
         memcpy(value, ptr, value_len);
         value[value_len] = '\0';
 
+        // Set content length
+        if (!clset && !is_safe && strncasecmp(name, "Content-Length", 14) == 0) {
+            bool valid;
+            conn->request->content_length = parse_ulong(value, &valid);
+            if (!valid) {
+                fprintf(stderr, "Invalid content-length header\n");
+                return false;
+            }
+            clset = true;
+        }
+
+        if (!keepalive_set && strcasecmp(name, "Connection") == 0) {
+            // Default to Keep-Alive, unless a client explicitly wants to close the connection.
+            conn->keep_alive = strncmp(value, "close", 5) !=0;
+            keepalive_set = true;
+        }
+
         if (!headers_set(conn->arena, conn->request->headers, name, value)) {
             return false;
         }
@@ -972,6 +975,7 @@ static bool parse_query_params(connection_t* conn) {
     char* save_ptr1 = NULL;
     char* save_ptr2 = NULL;
     char* pair      = strtok_r(query, "&", &save_ptr1);
+
     while (pair != NULL) {
         // Split into key and value
         char* key   = strtok_r(pair, "=", &save_ptr2);
@@ -994,67 +998,46 @@ const char* query_get(connection_t* conn, const char* name) {
     return headers_get(conn->request->query_params, name);
 }
 
-static inline bool parse_content_length(connection_t* conn) {
-    size_t length = conn->request->headers_len;
-    char* ptr     = strcasestr(conn->read_buf, "Content-Length:");
-    if (ptr) {
-        // cl_ptr += strlen("Content-Length:");
-        ptr += 15;  // move after colon.
-
-        // Trim white space, keeping within blounds.
-        while ((*ptr == ' ' || *ptr == '\t') && ptr < conn->read_buf + length)
-            ptr++;
-
-        // Parse content length into number
-        conn->request->content_length = strtoul(ptr, NULL, 10);
-
-        // Must be within allowed body size.
-        if (conn->request->content_length > MAX_BODY_SIZE) {
-            fprintf(stderr, "Body exceeds maximum allowed size: %lu bytes", (size_t)MAX_BODY_SIZE);
-            return false;
-        }
+static bool parse_request_body(connection_t* conn, size_t headers_len) {
+    if (conn->request->content_length == 0) {
+        return true;
     }
 
-    return true;
-}
-
-static bool parse_request_body(connection_t* conn, size_t headers_len) {
+    request_t* req        = conn->request;
+    size_t content_length = req->content_length;
     size_t body_available = conn->read_bytes - headers_len;
 
-    if (conn->request->content_length > 0) {
-        conn->request->body = malloc(conn->request->content_length + 1);
-        if (!conn->request->body) {
-            perror("malloc body");
-            return false;
-        }
+    req->body = malloc(content_length + 1);
+    if (!req->body) {
+        perror("malloc body");
+        return false;
+    }
 
-        size_t copy_len =
-            (body_available > conn->request->content_length) ? conn->request->content_length : body_available;
-        memcpy(conn->request->body, conn->read_buf + headers_len, copy_len);
-        conn->request->body_received  = copy_len;
-        conn->request->body[copy_len] = '\0';
+    size_t copy_len = (body_available > content_length) ? content_length : body_available;
+    memcpy(req->body, conn->read_buf + headers_len, copy_len);
+    req->body_received  = copy_len;
+    req->body[copy_len] = '\0';
 
-        // copy part of body read with headers.
-        copy_bodyfrom_buf(conn);
+    // copy part of body read with headers.
+    copy_bodyfrom_buf(conn);
 
-        // Read complete body.
-        while (conn->request->body_received < conn->request->content_length) {
-            size_t remaining = conn->request->content_length - conn->request->body_received;
-            ssize_t count    = read(conn->fd, conn->request->body + conn->request->body_received, remaining);
-            if (count == -1) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    usleep(1000);
-                    continue;  // try again
-                } else {
-                    perror("read");
-                    return false;
-                }
-            } else if (count == 0) {
+    // Read complete body.
+    while (req->body_received < content_length) {
+        size_t remaining = content_length - req->body_received;
+        ssize_t count    = read(conn->fd, req->body + req->body_received, remaining);
+        if (count == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                usleep(1000);
+                continue;  // try again
+            } else {
                 perror("read");
                 return false;
             }
-            conn->request->body_received += count;
+        } else if (count == 0) {
+            perror("read");
+            return false;
         }
+        req->body_received += count;
     }
     return true;
 }
@@ -1086,8 +1069,6 @@ static void process_request(connection_t* conn) {
         return;
     }
 
-    conn->keep_alive = should_keep_alive(conn->read_buf);
-
     // try to first match request before even parsing headers, query params
     // content-length and reading the body.
     HttpMethod method = http_method_from_string(conn->request->method);
@@ -1097,22 +1078,14 @@ static void process_request(connection_t* conn) {
         conn->request->route = route;
 
         // Parse headers.
-        if (!parse_request_headers(conn)) {
+        if (!parse_request_headers(conn, method)) {
             fprintf(stderr, "error parsing request headers\n");
             conn->state = STATE_CLOSING;
             return;
         };
 
-        // Parse content length.
-        if (!parse_content_length(conn)) {
-            fprintf(stderr, "error parsing content length\n");
-            conn->state = STATE_CLOSING;
-            return;
-        }
-
         // Read request body.
         if (!parse_request_body(conn, headers_len)) {
-            fprintf(stderr, "error parsing request body\n");
             conn->state = STATE_CLOSING;
             return;
         }

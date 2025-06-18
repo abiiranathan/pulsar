@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Wall -Werror -Wextra -pedantic -O3 -std=c23 -D_GNU_SOURCE -fno-builtin
+CFLAGS=-Wall -Werror -Wextra -pedantic -O3 -std=c23 -D_GNU_SOURCE -fno-builtin -mtune=native -march=native
 LDFLAGS=
 TARGET=server
 SRC=main.c pulsar.c forms.c
