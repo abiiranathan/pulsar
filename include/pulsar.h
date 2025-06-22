@@ -92,7 +92,7 @@ typedef enum {
     STATE_CLOSING,
 } connection_state;
 
-typedef struct connection_t {
+typedef struct __attribute__((aligned(64))) connection_t {
     char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
     struct request_t* request;        // HTTP request data
     response_t* response;             // HTTP response data

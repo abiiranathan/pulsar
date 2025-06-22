@@ -895,10 +895,12 @@ static inline void free_response(response_t* resp) {
 }
 
 static bool reset_connection(connection_t* conn) {
-    conn->state         = STATE_READING_REQUEST;
-    conn->read_bytes    = 0;
-    conn->last_activity = time(NULL);
-    conn->keep_alive    = true;
+    conn->state               = STATE_READING_REQUEST;
+    conn->read_bytes          = 0;
+    conn->last_activity       = time(NULL);
+    conn->keep_alive          = true;
+    conn->user_data           = NULL;
+    conn->user_data_free_func = NULL;
     memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->request) free_request(conn->request);
@@ -1257,6 +1259,8 @@ static void handle_read(int epoll_fd, connection_t* conn) {
         conn->state = STATE_CLOSING;
         return;
     }
+
+    printf("Read %lu bytes\n", count);
 
     conn->last_activity = time(NULL);
     conn->read_bytes += count;
