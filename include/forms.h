@@ -168,21 +168,12 @@ const char* multipart_error(MpCode error);
 /* Utility Functions *******************************************************/
 
 /**
- * @brief Extract boundary from request body
- * @param body Request body content
- * @param boundary Output buffer
- * @param size Buffer size
- * @return true if boundary found, false otherwise
- */
-bool parse_boundary(const char* body, char* boundary, size_t size);
-
-/**
  * @brief Extract boundary from Content-Type header
  * @param content_type Header value
  * @param boundary Output buffer 
  * @param size Buffer size
  * @return true if boundary found, false otherwise
  */
-bool parse_boundary_from_header(const char* content_type, char* boundary, size_t size);
+bool parse_boundary(const char* content_type, char* boundary, size_t size);
 
 #endif /* FORMS_H */

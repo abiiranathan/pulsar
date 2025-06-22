@@ -1,4 +1,4 @@
-#include "pulsar.h"
+#include "include/pulsar.h"
 
 bool hello_world_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
@@ -55,6 +55,48 @@ bool pathparams_query_params_handler(connection_t* conn) {
     return true;
 }
 
+#include "include/forms.h"
+bool handle_form(connection_t* conn) {
+    MultipartForm form = {};
+    char boundary[128];
+    MpCode code;
+
+    code = multipart_init(&form, 1 << 20);
+    if (code != MP_OK) {
+        conn_set_status(conn, StatusBadRequest);
+        return conn_write_string(conn, multipart_error(code));
+    }
+
+    const char* ct = headers_get(conn->request->headers, "Content-Type");
+    if (!ct) {
+        conn_set_status(conn, StatusBadRequest);
+        return conn_write_string(conn, "Invalid content type header");
+    }
+
+    if (!parse_boundary(ct, boundary, sizeof(boundary))) {
+        conn_set_status(conn, StatusBadRequest);
+        return conn_write_string(conn, "Invalid content type header");
+    }
+
+    code = multipart_parse(conn->request->body, conn->request->content_length, boundary, &form);
+    if (code != MP_OK) {
+        conn_set_status(conn, StatusBadRequest);
+        return conn_write_string(conn, multipart_error(code));
+    }
+
+    FileHeader* file = multipart_file(&form, "file");
+    if (!file) return false;
+
+    char dest[1024] = {0};
+    strlcat(dest, "./test_output/", sizeof(dest));
+    strlcat(dest, file->filename, sizeof(dest) - 15);    // ignore potential truncation
+    if (!multipart_save_file(file, conn->request->body, dest)) {
+        return false;
+    }
+
+    return conn_write_string(conn, "File uploaded successfully\n") > 0;
+}
+
 int main() {
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
@@ -63,6 +105,7 @@ int main() {
     route_register("/echo", HTTP_GET, echo_handler);
     route_register("/echo", HTTP_POST, echo_handler);
     route_register("/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);
+    route_register("/form", HTTP_POST, handle_form);
 
     register_static_route("/static", "./");
 

@@ -1,7 +1,8 @@
-#include "pulsar.h"
 #include <assert.h>
 #include <stddef.h>
 #include <strings.h>
+
+#include "../include/pulsar.h"
 
 // Worker thread data
 typedef struct {
@@ -807,22 +808,13 @@ static bool reset_connection(connection_t* conn) {
     conn->read_bytes    = 0;
     conn->last_activity = time(NULL);
     conn->keep_alive    = true;
-
     memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
-    if (conn->request) {
-        free_request(conn->request);
-    }
-
-    if (conn->response) {
-        free_response(conn->response);
-    }
-
-    // If we have an arena, reset the memory.
+    if (conn->request) free_request(conn->request);
+    if (conn->response) free_response(conn->response);
     if (conn->arena) {
         arena_reset(conn->arena);
     } else {
-        // Create the and initialize arena.
         conn->arena = arena_create(ARENA_CAPACITY);
         if (!conn->arena) return false;
     }
@@ -854,7 +846,7 @@ static int conn_accept(int server_fd, int worker_id) {
 void add_connection_to_worker(int epoll_fd, int client_fd) {
     connection_t* conn = calloc(1, sizeof(connection_t));
     if (!conn) {
-        perror("malloc");
+        perror("calloc");
         close(client_fd);
         return;
     }
@@ -862,7 +854,8 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
 
     if (!reset_connection(conn)) {
         fprintf(stderr, "Error in reset_connection\n");
-        goto error;
+        conn->state = STATE_CLOSING;
+        return;
     }
 
     struct epoll_event event;
@@ -871,14 +864,9 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
         perror("epoll_ctl");
-        goto error;
+        conn->state = STATE_CLOSING;
+        return;
     }
-    return;
-
-error:
-    if (conn->arena) arena_destroy(conn->arena);
-    free(conn);
-    close(client_fd);
 }
 
 static void copy_bodyfrom_buf(connection_t* conn) {
@@ -905,7 +893,7 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method) {
 
     bool clset         = false;
     bool keepalive_set = false;
-    bool is_safe       = (method != HTTP_GET && method != HTTP_OPTIONS && method != HTTP_INVALID);
+    bool is_safe       = (method == HTTP_GET || method == HTTP_OPTIONS);
 
     while (ptr < end) {
         // Parse header name
@@ -1001,6 +989,7 @@ const char* query_get(connection_t* conn, const char* name) {
 
 static bool parse_request_body(connection_t* conn, size_t headers_len) {
     if (conn->request->content_length == 0) {
+        printf("Content-Length is zero\n");
         return true;
     }
 
@@ -1233,8 +1222,7 @@ void handle_write(int epoll_fd, connection_t* conn) {
     }
 }
 
-void close_connection(int epoll_fd, connection_t* conn, int worker_id) {
-    (void)worker_id;
+void close_connection(int epoll_fd, connection_t* conn) {
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     close(conn->fd);
 
@@ -1305,7 +1293,7 @@ void* worker_thread(void* arg) {
                 check_timeouts(conn, worker_id);
 
                 if (conn->state == STATE_CLOSING) {
-                    close_connection(epoll_fd, conn, worker_id);
+                    close_connection(epoll_fd, conn);
                 }
             }
         }

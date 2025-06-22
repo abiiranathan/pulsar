@@ -1,4 +1,4 @@
-#include "forms.h"
+#include "../include/forms.h"
 
 /**
  * @enum State
@@ -446,21 +446,8 @@ cleanup:
     return code;
 }
 
-// Parses the form boundary from the request body
-bool parse_boundary(const char* body, char* boundary, size_t size) {
-    char* boundary_end = sstrstr(body, "\r\n", 64);
-    if (!boundary_end) return false;
-
-    size_t length = boundary_end - body;
-    if (size <= length + 1) return false;
-
-    strncpy(boundary, body, length);
-    boundary[length] = '\0';
-    return true;
-}
-
 // Parses the form boundary from the content-type header
-bool parse_boundary_from_header(const char* content_type, char* boundary, size_t size) {
+bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     if (!content_type || !boundary) return false;
 
     const char* prefix  = "--";

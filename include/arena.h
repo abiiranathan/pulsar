@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Single threaded Linear (bump) allocator.
 typedef struct {
     uint8_t* memory;   // Arena memory
     size_t allocated;  // Allocated memory
@@ -14,7 +15,10 @@ typedef struct {
 } Arena;
 
 static inline Arena* arena_create(size_t capacity) {
-    assert(capacity > 0);
+    if (capacity == 0) {
+        capacity = 1024;  // Default is 1KB
+    }
+
     Arena* arena = malloc(sizeof(Arena));
     if (!arena) {
         return NULL;
@@ -60,6 +64,7 @@ static inline char* arena_strdup(Arena* arena, const char* str) {
 
 static inline void arena_reset(Arena* arena) {
     arena->allocated = 0;
+    memset(arena->memory, 0, arena->capacity);
 }
 
 #endif /* ARENA_H */

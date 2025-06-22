@@ -2,7 +2,7 @@
 #include <sys/stat.h>
 #include <assert.h>
 
-#include "forms.h"
+#include "../include/forms.h"
 
 // Helper function to read a file into memory
 char* read_file(const char* filename, size_t* size) {

@@ -210,4 +210,4 @@ bool conn_writeheader(connection_t* conn, const char* name, const char* value);
 // Set HTTP status code.
 void conn_set_status(connection_t* conn, http_status code);
 
-#endif  // PULSAR_H
+#endif /* PULSAR_H */
