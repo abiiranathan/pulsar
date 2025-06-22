@@ -25,7 +25,7 @@
 
 #define NUM_WORKERS           8          // Number of workers.
 #define MAX_EVENTS            2048       // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE      2048       // Buffer size for incoming statusline + headers.
+#define READ_BUFFER_SIZE      819        // Buffer size for incoming statusline + headers +/-(part/all of body)
 #define CONNECTION_TIMEOUT    30         // Keep-Alive connection timeout in seconds
 #define MAX_BODY_SIZE         (2 << 20)  // Max Request body allowed.
 #define ARENA_CAPACITY        8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
@@ -93,10 +93,10 @@ typedef enum {
 } connection_state;
 
 typedef struct __attribute__((aligned(64))) connection_t {
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
-    struct request_t* request;        // HTTP request data
-    response_t* response;             // HTTP response data
-    Arena* arena;                     // Memory arena for allocations
+    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
+    struct request_t* request;  // HTTP request data
+    response_t* response;       // HTTP response data
+    Arena* arena;               // Memory arena for allocations
 
     // 4-byte fields
     int fd;                // Client socket file descriptor

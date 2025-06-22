@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -901,7 +902,6 @@ static bool reset_connection(connection_t* conn) {
     conn->keep_alive          = true;
     conn->user_data           = NULL;
     conn->user_data_free_func = NULL;
-    memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->request) free_request(conn->request);
     if (conn->response) free_response(conn->response);
@@ -911,10 +911,20 @@ static bool reset_connection(connection_t* conn) {
         conn->arena = arena_create(ARENA_CAPACITY);
         if (!conn->arena) return false;
     }
-
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     return (conn->request && conn->response);
+}
+
+void close_connection(int epoll_fd, connection_t* conn) {
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+    close(conn->fd);
+
+    if (conn->request) free_request(conn->request);
+    if (conn->response) free_response(conn->response);
+    if (conn->arena) arena_destroy(conn->arena);
+    if (conn->read_buf) free(conn->read_buf);
+    free(conn);
 }
 
 static int conn_accept(int server_fd, int worker_id) {
@@ -944,6 +954,14 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
         return;
     }
     conn->fd = client_fd;
+
+    char* read_buf = calloc(1, READ_BUFFER_SIZE);
+    if (!read_buf) {
+        perror("malloc read_buf");
+        conn->state = STATE_CLOSING;
+        return;
+    }
+    conn->read_buf = read_buf;
 
     if (!reset_connection(conn)) {
         fprintf(stderr, "Error in reset_connection\n");
@@ -1260,8 +1278,6 @@ static void handle_read(int epoll_fd, connection_t* conn) {
         return;
     }
 
-    printf("Read %lu bytes\n", count);
-
     conn->last_activity = time(NULL);
     conn->read_bytes += count;
     conn->read_buf[conn->read_bytes] = '\0';
@@ -1356,16 +1372,6 @@ void handle_write(int epoll_fd, connection_t* conn) {
     } else {
         conn->state = STATE_CLOSING;
     }
-}
-
-void close_connection(int epoll_fd, connection_t* conn) {
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-    close(conn->fd);
-
-    if (conn->request) free_request(conn->request);
-    if (conn->response) free_response(conn->response);
-    if (conn->arena) arena_destroy(conn->arena);
-    free(conn);
 }
 
 void check_timeouts(connection_t* conn, int worker_id) {
