@@ -1,5 +1,8 @@
+#include <stddef.h>
 #include <assert.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 #include <strings.h>
 
 #include "../include/pulsar.h"
@@ -14,8 +17,13 @@ typedef struct {
 // Global flag to keep all workers running.
 static volatile sig_atomic_t server_running = 1;
 
+// Global routes
 static route_t global_routes[MAX_ROUTES];
 static size_t global_count = 0;
+
+// Global middleware
+static HttpHandler global_mw[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array.
+static size_t global_mw_count                       = 0;   // Global middleware count
 
 // ================== Signal handler    ========================
 void handle_sigint(int sig) {
@@ -313,9 +321,8 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     r->pattern = strdup(pattern);
     assert(r->pattern);
 
-    r->method  = method;
-    r->handler = handler;
-
+    r->method      = method;
+    r->handler     = handler;
     r->path_params = malloc(sizeof(PathParams));
     assert(r->path_params);
 
@@ -337,6 +344,10 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     // default to normal route.
     r->flags   = NORMAL_ROUTE_FLAG;
     r->dirname = NULL;
+
+    // Initialize route middleware
+    r->mw_count = 0;
+    memset(r->mw, 0, sizeof(r->mw));
 
     // Increment global count
     global_count++;
@@ -520,6 +531,19 @@ path_toolong:
     conn_set_content_type(conn, "text/html");
     conn_write_string(conn, "<h1>Path too long</h1>");
     return true;
+}
+
+void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr)) {
+    assert(conn && ptr && free_func);
+
+    conn->user_data           = ptr;
+    conn->user_data_free_func = free_func;
+}
+
+// Returns the void* ptr, set with set_userdata function or NULL.
+void* get_userdata(connection_t* conn) {
+    if (!conn) return NULL;
+    return conn->user_data;
 }
 
 route_t* register_static_route(const char* pattern, const char* dir) {
@@ -707,6 +731,73 @@ static route_t* route_match(connection_t* conn, HttpMethod method) {
     }
 
     return NULL;
+}
+
+static inline bool execute_middleware_chain(connection_t* conn, const MiddlewareContext* mw_ctx) {
+    HttpHandler* middleware;
+    size_t count, index;
+    bool success;
+
+    switch (mw_ctx->ctx_type) {
+        case MwGlobal:
+            middleware = mw_ctx->ctx.Global.g_middleware;
+            count      = mw_ctx->ctx.Global.g_count;
+            index      = mw_ctx->ctx.Global.g_index;
+            break;
+        case MwLocal:
+            middleware = mw_ctx->ctx.Local.r_middleware;
+            count      = mw_ctx->ctx.Local.r_count;
+            index      = mw_ctx->ctx.Local.r_index;
+            break;
+        default:
+            unreachable();
+    }
+
+    while (index < count) {
+        success = middleware[index++](conn);
+        if (!success) {
+            conn->abort = true;
+            return false;
+        }
+
+        if (conn->abort) {
+            break;
+        }
+    }
+
+    return true;
+}
+
+// Register one or more global middleware.
+void use_global_middleware(size_t count, ...) {
+    size_t new_count = count + global_mw_count;
+    assert(new_count <= MAX_GLOBAL_MIDDLEWARE && "Exceeded maximum global middleware count");
+
+    va_list args;
+    va_start(args, count);
+    for (size_t i = global_mw_count; i < new_count; i++) {
+        global_mw[i] = va_arg(args, HttpHandler);
+    }
+    va_end(args);
+
+    global_mw_count += count;
+}
+
+// Register one or more middleware for this route.
+void use_route_middleware(route_t* route, size_t count, ...) {
+    if (count == 0) return;
+    size_t new_count = route->mw_count + count;
+    assert(new_count <= MAX_ROUTE_MIDDLEWARE && "route middleware count > MAX_ROUTE_MIDDLEWARE");
+
+    // Append the new middleware to the route middleware
+    va_list args;
+    va_start(args, count);
+    for (size_t i = route->mw_count; i < new_count; i++) {
+        route->mw[i] = va_arg(args, HttpHandler);
+    }
+    va_end(args);
+
+    route->mw_count = new_count;
 }
 
 // ====================================================================
@@ -989,7 +1080,6 @@ const char* query_get(connection_t* conn, const char* name) {
 
 static bool parse_request_body(connection_t* conn, size_t headers_len) {
     if (conn->request->content_length == 0) {
-        printf("Content-Length is zero\n");
         return true;
     }
 
@@ -1030,6 +1120,31 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
         req->body_received += count;
     }
     return true;
+}
+
+static inline void execute_all_middleware(connection_t* conn, route_t* route) {
+    // Execute global middleware
+    if (global_mw_count > 0) {
+        MiddlewareContext mw_ctx = {
+            .ctx_type = MwGlobal,
+            .ctx      = {.Global = {.g_count = global_mw_count, .g_index = 0, .g_middleware = global_mw}},
+        };
+        execute_middleware_chain(conn, &mw_ctx);
+
+        // If request was aborted, skip route middleware.
+        if (conn->abort) {
+            return;
+        }
+    }
+
+    // Execute route specific middleware.
+    if (route->mw_count > 0) {
+        MiddlewareContext mw_ctx = {
+            .ctx_type = MwLocal,
+            .ctx      = {.Local = {.r_count = route->mw_count, .r_index = 0, .r_middleware = route->mw}},
+        };
+        execute_middleware_chain(conn, &mw_ctx);
+    }
 }
 
 static void process_request(connection_t* conn) {
@@ -1083,9 +1198,22 @@ static void process_request(connection_t* conn) {
 
     bool handler_success = true;
     if (route) {
-        handler_success = route->handler(conn);
+        // Directly execute the handler if no middleware
+        if (route->mw_count == 0 && global_mw_count == 0) {
+            handler_success = route->handler(conn);
+            goto post_handler;
+        }
+
+        // Execute all middleware
+        execute_all_middleware(conn, route);
+
+        // Execute the handler after the mw.
+        if (!conn->abort) {
+            handler_success = route->handler(conn);
+        }
     }
 
+post_handler:
     if (!handler_success || !route) {
         // Handle error or 404
         if (!route) {
@@ -1103,6 +1231,11 @@ static void process_request(connection_t* conn) {
     // Finalize response after handler completes
     finalize_response(conn);
 
+    // free user data.
+    if (conn->user_data && conn->user_data_free_func) {
+        conn->user_data_free_func(conn->user_data);
+    }
+
     if (conn->response->buffer) {
         conn->state         = STATE_WRITING_RESPONSE;
         conn->last_activity = time(NULL);
@@ -1112,8 +1245,6 @@ static void process_request(connection_t* conn) {
 }
 
 static void handle_read(int epoll_fd, connection_t* conn) {
-    // We are reading up to READ_BUFFER_SIZE.
-    // But the buffer is arena-allocated.
     ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
     if (count == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -1122,6 +1253,7 @@ static void handle_read(int epoll_fd, connection_t* conn) {
         }
         return;
     } else if (count == 0) {
+        // Unexpected close.
         conn->state = STATE_CLOSING;
         return;
     }

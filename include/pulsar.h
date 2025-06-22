@@ -23,13 +23,17 @@
 #include "mimetype.h"
 #include "headers.h"
 
-#define NUM_WORKERS        8          // Number of workers.
-#define MAX_EVENTS         2048       // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE   2048       // Buffer size for incoming statusline + headers.
-#define CONNECTION_TIMEOUT 30         // Keep-Alive connection timeout in seconds
-#define MAX_BODY_SIZE      (2 << 20)  // Max Request body allowed.
-#define ARENA_CAPACITY     8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
-#define MAX_ROUTES         64         // Maximum number of routes
+#define NUM_WORKERS           8          // Number of workers.
+#define MAX_EVENTS            2048       // Maximum events for epoll->ready queue.
+#define READ_BUFFER_SIZE      2048       // Buffer size for incoming statusline + headers.
+#define CONNECTION_TIMEOUT    30         // Keep-Alive connection timeout in seconds
+#define MAX_BODY_SIZE         (2 << 20)  // Max Request body allowed.
+#define ARENA_CAPACITY        8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
+#define MAX_ROUTES            64         // Maximum number of routes
+#define MAX_GLOBAL_MIDDLEWARE 32
+#define MAX_ROUTE_MIDDLEWARE  4
+
+#define UNUSED(var) ((void)var)
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,7 +105,12 @@ typedef struct connection_t {
 
     // Small fields (1-2 bytes)
     connection_state state;  // Current connection state (enum, likely 1-4 bytes)
-    uint8_t keep_alive;      // Keep-alive flag (bool, 1 byte)
+    bool keep_alive;         // Keep-alive flag (bool, 1 byte)
+    bool abort;              // Abort middleware processing
+
+    // User data.
+    void* user_data;                         // User data pointer
+    void (*user_data_free_func)(void* ptr);  // Function to free user-data after request
 } connection_t;
 
 // HTTP Request structure
@@ -117,16 +126,42 @@ typedef struct request_t {
     struct route_t* route;    // Matched route.
 } request_t;
 
+// Http handler function pointer.
+// This is also the same signature for the middleware.
+// If its returns false, a 500 response is sent unless another code was already set.
+// If a middleware was being executed, the chain will be aborted and handler will never be called.
 typedef bool (*HttpHandler)(connection_t* conn);
 
 typedef struct route_t {
-    int flags;                // Bit mask for route type. NormalRoute | StaticRoute
-    char* pattern;            // dynamically allocated route pattern
-    char* dirname;            // Directory name (for static routes)
-    HttpMethod method;        // Http method.
-    HttpHandler handler;      // Handler function pointer
-    PathParams* path_params;  // Path parameters
+    int flags;                             // Bit mask for route type. NormalRoute | StaticRoute
+    char* pattern;                         // dynamically allocated route pattern
+    char* dirname;                         // Directory name (for static routes)
+    HttpMethod method;                     // Http method.
+    HttpHandler handler;                   // Handler function pointer
+    PathParams* path_params;               // Path parameters
+    HttpHandler mw[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
+    size_t mw_count;                       // Number of middleware
 } route_t;
+
+typedef enum { MwGlobal = 1, MwLocal } MwCtxType;
+
+// Context for middleware functions.
+typedef struct MiddlewareContext {
+    union {
+        struct {
+            // Global middleware context
+            size_t g_count;             // Number of middleware golabl mw functions
+            size_t g_index;             // Current index in the global middleware array
+            HttpHandler* g_middleware;  // Array of global middleware functions
+        } Global;
+        struct {
+            size_t r_count;             // Number of route middleware functions
+            size_t r_index;             // Current index in the route middleware array
+            HttpHandler* r_middleware;  // Array of route middleware functions
+        } Local;
+    } ctx;
+    MwCtxType ctx_type;
+} MiddlewareContext;
 
 #ifdef __cplusplus
 }
@@ -140,6 +175,21 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 // Handles serving of index.html at root of directory. File System Traversal
 // `should` be blocked.
 route_t* register_static_route(const char* pattern, const char* dir);
+
+// Set a user data pointer inside the current route.
+// This must be called from inside the middleware handler.
+// The ptr is freed after the request is finished.
+void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
+
+// Returns the void* ptr, set with set_userdata function or NULL.
+// Should be called from inside the middleware/handler.
+void* get_userdata(connection_t* conn);
+
+// Register one or more global middleware.
+void use_global_middleware(size_t n, ...);
+
+// Register one or more middleware for this route.
+void use_route_middleware(route_t* route, size_t count, ...);
 
 // Serve a file with given filename efficiently with sendfile.
 bool conn_servefile(connection_t* conn, const char* filename);

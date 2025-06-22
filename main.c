@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 #include "include/pulsar.h"
 
 bool hello_world_handler(connection_t* conn) {
@@ -89,7 +91,7 @@ bool handle_form(connection_t* conn) {
 
     char dest[1024] = {0};
     strlcat(dest, "./test_output/", sizeof(dest));
-    strlcat(dest, file->filename, sizeof(dest) - 15);    // ignore potential truncation
+    strlcat(dest, file->filename, sizeof(dest) - 15);  // ignore potential truncation
     if (!multipart_save_file(file, conn->request->body, dest)) {
         return false;
     }
@@ -97,7 +99,33 @@ bool handle_form(connection_t* conn) {
     return conn_write_string(conn, "File uploaded successfully\n") > 0;
 }
 
+bool mw1(connection_t* conn) {
+    UNUSED(conn);
+
+    // Pass a user-data ptr
+    int* ptr = malloc(sizeof(int));
+    if (!ptr) return false;
+
+    *ptr = 100;
+
+    set_userdata(conn, ptr, free);
+    return true;
+}
+
+bool mw2(connection_t* conn) {
+    UNUSED(conn);
+
+    // Print the user-data pointer
+    int* userId = get_userdata(conn);
+    UNUSED(userId);
+    return 1;
+}
+
 int main() {
+
+    // Global middleware
+    use_global_middleware(2, mw1, mw2);
+
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
     route_register("/hello", HTTP_GET, hello_world_handler);
