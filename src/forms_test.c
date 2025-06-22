@@ -140,7 +140,7 @@ int main() {
         const char* content_type = "multipart/form-data; boundary=boundary123";
         char boundary[256];
 
-        bool parse_result = parse_boundary_from_header(content_type, boundary, sizeof(boundary));
+        bool parse_result = parse_boundary(content_type, boundary, sizeof(boundary));
         assert(parse_result && "Failed to parse boundary from header");
 
         printf("Parsed boundary: %s\n", boundary);
