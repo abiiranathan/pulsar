@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "include/forms.h"
 #include "include/pulsar.h"
 
 bool hello_world_handler(connection_t* conn) {
@@ -57,7 +59,6 @@ bool pathparams_query_params_handler(connection_t* conn) {
     return true;
 }
 
-#include "include/forms.h"
 bool handle_form(connection_t* conn) {
     MultipartForm form = {};
     char boundary[128];
@@ -122,8 +123,6 @@ bool mw2(connection_t* conn) {
 }
 
 int main() {
-
-    // Global middleware
     use_global_middleware(2, mw1, mw2);
 
     // Register routes using the new API

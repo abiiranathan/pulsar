@@ -1,4 +1,3 @@
-#include <stddef.h>
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -53,7 +52,8 @@ static void install_signal_handler(void) {
 // Set HTTP status code and message
 void conn_set_status(connection_t* conn, http_status code) {
     response_t* res = conn->response;
-    if (res->status_code > 0) return;  // Status already set( Makes it Indempotent)
+    if (res->status_code > 0)
+        return;  // Status already set( Makes it Indempotent)
     res->status_code = code;
     strlcpy(res->status_message, http_status_text(code), sizeof(res->status_message));
 }
@@ -73,14 +73,16 @@ bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
 
 bool conn_set_content_type(connection_t* conn, const char* content_type) {
     response_t* res = conn->response;
-    if (res->content_type_set) return true;
+    if (res->content_type_set)
+        return true;
     res->content_type_set = conn_writeheader(conn, "Content-Type", content_type);
     return res->content_type_set;
 }
 
 // Write data to response body
 int conn_write(connection_t* conn, const void* data, size_t len) {
-    if (!data || len == 0) return 0;
+    if (!data || len == 0)
+        return 0;
 
     response_t* resp = conn->response;
 
@@ -117,7 +119,8 @@ int serve_404(connection_t* conn) {
 
 // Write a NULL terminated string.
 int conn_write_string(connection_t* conn, const char* str) {
-    if (!str) return -1;
+    if (!str)
+        return -1;
     return conn_write(conn, str, strlen(str));
 }
 
@@ -128,7 +131,8 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
     int len      = vsnprintf(buffer, 0, fmt, args);  // Determine the required buffer size
     va_end(args);
 
-    if (len <= 0) return -1;  // there was an error in formatting the string
+    if (len <= 0)
+        return -1;  // there was an error in formatting the string
 
     // Allocate a buffer of the required size
     buffer = (char*)malloc(len + 1);  // +1 for the null terminator
@@ -154,7 +158,8 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
 }
 
 bool conn_servefile(connection_t* conn, const char* filename) {
-    if (!filename) return false;
+    if (!filename)
+        return false;
 
     int fd = open(filename, O_RDONLY);
     if (fd == -1) {
@@ -177,7 +182,8 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 // Build the complete HTTP response
 static void finalize_response(connection_t* conn) {
     response_t* resp = conn->response;
-    if (resp->headers_written) return;
+    if (resp->headers_written)
+        return;
 
     // Set default status if not set
     if (resp->status_code == 0) {
@@ -211,12 +217,12 @@ static void finalize_response(connection_t* conn) {
     resp->buffer_size = buffer_size;
 
     // Build headers
-    int offset =
-        snprintf(resp->buffer, header_size,
-                 "HTTP/1.1 %d %s\r\n"
-                 "Connection: %s\r\n"
-                 "Content-Length: %zu\r\n",
-                 resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close", content_length);
+    int offset = snprintf(resp->buffer, header_size,
+                          "HTTP/1.1 %d %s\r\n"
+                          "Connection: %s\r\n"
+                          "Content-Length: %zu\r\n",
+                          resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close",
+                          content_length);
 
     // Add custom headers
     headers_foreach(resp->headers, hdr) {
@@ -263,13 +269,20 @@ const char* http_method_to_string(const HttpMethod method) {
 }
 
 HttpMethod http_method_from_string(const char* method) {
-    if (!method) return HTTP_INVALID;
-    if (strcmp(method, "GET") == 0) return HTTP_GET;
-    if (strcmp(method, "POST") == 0) return HTTP_POST;
-    if (strcmp(method, "PUT") == 0) return HTTP_PUT;
-    if (strcmp(method, "PATCH") == 0) return HTTP_PATCH;
-    if (strcmp(method, "DELETE") == 0) return HTTP_DELETE;
-    if (strcmp(method, "OPTIONS") == 0) return HTTP_OPTIONS;
+    if (!method)
+        return HTTP_INVALID;
+    if (strcmp(method, "GET") == 0)
+        return HTTP_GET;
+    if (strcmp(method, "POST") == 0)
+        return HTTP_POST;
+    if (strcmp(method, "PUT") == 0)
+        return HTTP_PUT;
+    if (strcmp(method, "PATCH") == 0)
+        return HTTP_PATCH;
+    if (strcmp(method, "DELETE") == 0)
+        return HTTP_DELETE;
+    if (strcmp(method, "OPTIONS") == 0)
+        return HTTP_OPTIONS;
     return HTTP_INVALID;
 }
 
@@ -361,14 +374,18 @@ static int compare_routes(const void* a, const void* b) {
     const route_t* rb = (const route_t*)b;
 
     // First sort by method
-    if (ra->method < rb->method) return -1;
-    if (ra->method > rb->method) return 1;
+    if (ra->method < rb->method)
+        return -1;
+    if (ra->method > rb->method)
+        return 1;
 
     // Then sort by pattern length (longer patterns first)
     size_t len_a = strlen(ra->pattern);
     size_t len_b = strlen(rb->pattern);
-    if (len_a > len_b) return -1;
-    if (len_a < len_b) return 1;
+    if (len_a > len_b)
+        return -1;
+    if (len_a < len_b)
+        return 1;
 
     // Finally sort alphabetically
     return strcmp(ra->pattern, rb->pattern);
@@ -421,13 +438,20 @@ static inline void url_percent_decode(const char* src, char* dst, size_t dst_siz
             *dst++ = ' ';
             src++;
             written++;
-        } else if ((*src == '%') && (src_len >= 2) && ((a = src[1]) && (b = src[2])) && (isxdigit(a) && isxdigit(b))) {
-            if (a >= 'a') a -= 'a' - 'A';
-            if (a >= 'A') a -= 'A' - 10;
-            else a -= '0';
-            if (b >= 'a') b -= 'a' - 'A';
-            if (b >= 'A') b -= 'A' - 10;
-            else b -= '0';
+        } else if ((*src == '%') && (src_len >= 2) && ((a = src[1]) && (b = src[2])) &&
+                   (isxdigit(a) && isxdigit(b))) {
+            if (a >= 'a')
+                a -= 'a' - 'A';
+            if (a >= 'A')
+                a -= 'A' - 10;
+            else
+                a -= '0';
+            if (b >= 'a')
+                b -= 'a' - 'A';
+            if (b >= 'A')
+                b -= 'A' - 10;
+            else
+                b -= '0';
             *dst++ = 16 * a + b;
             src += 3;
             written++;
@@ -543,15 +567,18 @@ void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr)) {
 
 // Returns the void* ptr, set with set_userdata function or NULL.
 void* get_userdata(connection_t* conn) {
-    if (!conn) return NULL;
+    if (!conn)
+        return NULL;
     return conn->user_data;
 }
 
 route_t* register_static_route(const char* pattern, const char* dir) {
     assert(pattern && dir);  // validate inputs
 
-    if (strcmp(".", dir) == 0) dir = "./";
-    if (strcmp("..", dir) == 0) dir = "../";
+    if (strcmp(".", dir) == 0)
+        dir = "./";
+    if (strcmp("..", dir) == 0)
+        dir = "../";
     size_t dirlen = strlen(dir);
     assert(dirlen + 1 < PATH_MAX);
 
@@ -577,14 +604,16 @@ route_t* register_static_route(const char* pattern, const char* dir) {
 /**
  * match_path_parameters compares the pattern with the URL and extracts the parameters.
  * The pattern can contain parameters in the form of {name}.
- * 
+ *
  * @param pattern: The pattern to match
  * @param url_path: The URL path to match
  * @param pathParams: The PathParams struct to store the matched parameters
  * @return true if the pattern and URL match, false otherwise
  */
-static bool match_path_parameters(Arena* arena, const char* pattern, const char* url_path, PathParams* path_params) {
-    if (!path_params || !pattern || !url_path) return false;
+static bool match_path_parameters(Arena* arena, const char* pattern, const char* url_path,
+                                  PathParams* path_params) {
+    if (!path_params || !pattern || !url_path)
+        return false;
 
     const char* pat          = pattern;
     const char* url          = url_path;
@@ -616,7 +645,8 @@ static bool match_path_parameters(Arena* arena, const char* pattern, const char*
             const char* name_start = pat;
             while (*pat && *pat != '}')
                 pat++;
-            if (*pat != '}') return false;
+            if (*pat != '}')
+                return false;
 
             size_t name_len = pat - name_start;
 
@@ -643,7 +673,8 @@ static bool match_path_parameters(Arena* arena, const char* pattern, const char*
             memcpy(param->value, val_start, val_len);
             param->value[val_len] = '\0';
         } else {
-            if (*pat != *url) return false;
+            if (*pat != *url)
+                return false;
             pat++;
             url++;
         }
@@ -660,9 +691,11 @@ static bool match_path_parameters(Arena* arena, const char* pattern, const char*
 }
 
 const char* get_path_param(connection_t* conn, const char* name) {
-    if (!name) return NULL;
+    if (!name)
+        return NULL;
     route_t* route = conn->request->route;
-    if (!route) return NULL;
+    if (!route)
+        return NULL;
 
     PathParams* path_params = route->path_params;
     for (size_t i = 0; i < path_params->match_count; i++) {
@@ -786,7 +819,8 @@ void use_global_middleware(size_t count, ...) {
 
 // Register one or more middleware for this route.
 void use_route_middleware(route_t* route, size_t count, ...) {
-    if (count == 0) return;
+    if (count == 0)
+        return;
     size_t new_count = route->mw_count + count;
     assert(new_count <= MAX_ROUTE_MIDDLEWARE && "route middleware count > MAX_ROUTE_MIDDLEWARE");
 
@@ -850,7 +884,8 @@ static int create_server_socket(int port) {
 
 static request_t* create_request(Arena* arena) {
     request_t* req = arena_alloc(arena, sizeof(request_t));
-    if (!req) return NULL;
+    if (!req)
+        return NULL;
 
     req->body           = NULL;
     req->body_received  = 0;
@@ -872,7 +907,8 @@ static request_t* create_request(Arena* arena) {
 
 static response_t* create_response(Arena* arena) {
     response_t* resp = arena_alloc(arena, sizeof(response_t));
-    if (!resp) return NULL;
+    if (!resp)
+        return NULL;
 
     memset(resp, 0, sizeof(response_t));
     resp->file_fd = -1;
@@ -885,14 +921,19 @@ static response_t* create_response(Arena* arena) {
 }
 
 static inline void free_request(request_t* req) {
-    if (!req) return;
-    if (req->body) free(req->body);
+    if (!req)
+        return;
+    if (req->body)
+        free(req->body);
 }
 
 static inline void free_response(response_t* resp) {
-    if (!resp) return;
-    if (resp->buffer) free(resp->buffer);
-    if (resp->body_data) free(resp->body_data);
+    if (!resp)
+        return;
+    if (resp->buffer)
+        free(resp->buffer);
+    if (resp->body_data)
+        free(resp->body_data);
 }
 
 static bool reset_connection(connection_t* conn) {
@@ -903,13 +944,16 @@ static bool reset_connection(connection_t* conn) {
     conn->user_data           = NULL;
     conn->user_data_free_func = NULL;
 
-    if (conn->request) free_request(conn->request);
-    if (conn->response) free_response(conn->response);
+    if (conn->request)
+        free_request(conn->request);
+    if (conn->response)
+        free_response(conn->response);
     if (conn->arena) {
         arena_reset(conn->arena);
     } else {
         conn->arena = arena_create(ARENA_CAPACITY);
-        if (!conn->arena) return false;
+        if (!conn->arena)
+            return false;
     }
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
@@ -920,10 +964,14 @@ void close_connection(int epoll_fd, connection_t* conn) {
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     close(conn->fd);
 
-    if (conn->request) free_request(conn->request);
-    if (conn->response) free_response(conn->response);
-    if (conn->arena) arena_destroy(conn->arena);
-    if (conn->read_buf) free(conn->read_buf);
+    if (conn->request)
+        free_request(conn->request);
+    if (conn->response)
+        free_response(conn->response);
+    if (conn->arena)
+        arena_destroy(conn->arena);
+    if (conn->read_buf)
+        free(conn->read_buf);
     free(conn);
 }
 
@@ -980,24 +1028,6 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
     }
 }
 
-static void copy_bodyfrom_buf(connection_t* conn) {
-    if (conn->state == STATE_READING_REQUEST && conn->request->body &&
-        conn->request->body_received < conn->request->content_length && conn->request->headers_len > 0) {
-        size_t new_body = conn->read_bytes - conn->request->headers_len - conn->request->body_received;
-        if (new_body > 0) {
-            size_t copy_len = ((conn->request->body_received + new_body) > conn->request->content_length)
-                                  ? conn->request->content_length - conn->request->body_received
-                                  : new_body;
-
-            // Copy partial body read in initial recv.
-            memcpy(conn->request->body + conn->request->body_received,
-                   conn->read_buf + conn->request->headers_len + conn->request->body_received, copy_len);
-            conn->request->body_received += copy_len;
-            conn->request->body[conn->request->body_received] = '\0';
-        }
-    }
-}
-
 static bool parse_request_headers(connection_t* conn, HttpMethod method) {
     const char* ptr = conn->read_buf;
     const char* end = ptr + conn->request->headers_len;
@@ -1009,11 +1039,13 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method) {
     while (ptr < end) {
         // Parse header name
         const char* colon = (const char*)memchr(ptr, ':', end - ptr);
-        if (!colon) break;  // no more headers
+        if (!colon)
+            break;  // no more headers
 
         size_t name_len = colon - ptr;
         char* name      = arena_alloc(conn->arena, name_len + 1);
-        if (!name) return false;
+        if (!name)
+            return false;
 
         memcpy(name, ptr, name_len);
         name[name_len] = '\0';
@@ -1025,11 +1057,13 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method) {
 
         // Parse header value
         const char* eol = (const char*)memchr(ptr, '\r', end - ptr);
-        if (!eol || eol + 1 >= end || eol[1] != '\n') break;
+        if (!eol || eol + 1 >= end || eol[1] != '\n')
+            break;
 
         size_t value_len = eol - ptr;
         char* value      = arena_alloc(conn->arena, value_len + 1);
-        if (!value) return false;
+        if (!value)
+            return false;
 
         memcpy(value, ptr, value_len);
         value[value_len] = '\0';
@@ -1064,13 +1098,15 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method) {
 static bool parse_query_params(connection_t* conn) {
     char* path  = conn->request->path;
     char* query = strchr(path, '?');  // find first occurence of ?
-    if (query == NULL) return true;   // No Query parameters
-    *query = '\0';                    // Trim query from the path and NULL terminate path
-    query++;                          // move past ?
+    if (query == NULL)
+        return true;  // No Query parameters
+    *query = '\0';    // Trim query from the path and NULL terminate path
+    query++;          // move past ?
 
     // allocate memory in arena.
     conn->request->query_params = headers_new(conn->arena);
-    if (!conn->request->query_params) return false;
+    if (!conn->request->query_params)
+        return false;
 
     char* save_ptr1 = NULL;
     char* save_ptr2 = NULL;
@@ -1084,7 +1120,8 @@ static bool parse_query_params(connection_t* conn) {
         if (key != NULL) {
             char* key_ptr   = arena_strdup(conn->arena, key);
             char* value_ptr = arena_strdup(conn->arena, value ? value : "");
-            if (!key_ptr || !value_ptr) return false;
+            if (!key_ptr || !value_ptr)
+                return false;
             headers_set(conn->arena, conn->request->query_params, key_ptr, value_ptr);
         }
         pair = strtok_r(NULL, "&", &save_ptr1);
@@ -1094,7 +1131,8 @@ static bool parse_query_params(connection_t* conn) {
 
 // Get value for a query parameter if present or NULL.
 const char* query_get(connection_t* conn, const char* name) {
-    if (!conn->request->query_params) return NULL;  // no query params.
+    if (!conn->request->query_params)
+        return NULL;  // no query params.
     return headers_get(conn->request->query_params, name);
 }
 
@@ -1106,6 +1144,13 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
     request_t* req        = conn->request;
     size_t content_length = req->content_length;
     size_t body_available = conn->read_bytes - headers_len;
+    assert(body_available <= content_length && "Can not read more than content-length");
+
+    // Check body size.
+    if (content_length > MAX_BODY_SIZE) {
+        conn->response->status_code = StatusRequestEntityTooLarge;
+        return false;
+    }
 
     req->body = malloc(content_length + 1);
     if (!req->body) {
@@ -1113,13 +1158,10 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
         return false;
     }
 
-    size_t copy_len = (body_available > content_length) ? content_length : body_available;
-    memcpy(req->body, conn->read_buf + headers_len, copy_len);
-    req->body_received  = copy_len;
-    req->body[copy_len] = '\0';
-
-    // copy part of body read with headers.
-    copy_bodyfrom_buf(conn);
+    // Copy body read together with headers.
+    memcpy(req->body, conn->read_buf + headers_len, body_available);
+    req->body_received        = body_available;
+    req->body[body_available] = '\0';
 
     // Read complete body.
     while (req->body_received < content_length) {
@@ -1130,12 +1172,11 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
                 usleep(1000);
                 continue;  // try again
             } else {
-                perror("read");
+                perror("read");  // real error.
                 return false;
             }
         } else if (count == 0) {
-            perror("read");
-            return false;
+            return false;  // Client closed connection unexpectedly.
         }
         req->body_received += count;
     }
@@ -1169,7 +1210,8 @@ static inline void execute_all_middleware(connection_t* conn, route_t* route) {
 
 static void process_request(connection_t* conn) {
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
-    if (!end_of_headers) return;  // still reading headers
+    if (!end_of_headers)
+        return;  // still reading headers
 
     size_t headers_len         = end_of_headers - conn->read_buf + 4;
     conn->request->headers_len = headers_len;
@@ -1265,7 +1307,8 @@ post_handler:
 }
 
 static void handle_read(int epoll_fd, connection_t* conn) {
-    ssize_t count = read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
+    ssize_t count =
+        read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
     if (count == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("read");
@@ -1374,10 +1417,11 @@ void handle_write(int epoll_fd, connection_t* conn) {
     }
 }
 
-void check_timeouts(connection_t* conn, int worker_id) {
+// Check for timeouts on keep-alive connection, closing the connection
+// If it exceeds CONNECTION_TIMEOUT seconds.
+void check_timeouts(connection_t* conn) {
     time_t now = time(NULL);
     if (now - conn->last_activity > CONNECTION_TIMEOUT) {
-        printf("Worker %d: Connection fd %d timed out\n", worker_id, conn->fd);
         conn->state = STATE_CLOSING;
     }
 }
@@ -1432,7 +1476,7 @@ void* worker_thread(void* arg) {
                         break;
                 }
 
-                check_timeouts(conn, worker_id);
+                check_timeouts(conn);
 
                 if (conn->state == STATE_CLOSING) {
                     close_connection(epoll_fd, conn);
