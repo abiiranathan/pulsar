@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -24,16 +25,21 @@ bool echo_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "text/plain");
 
+    const char* method    = req_method(conn);
+    const char* path      = req_path(conn);
+    const char* body      = req_body(conn);
+    size_t content_length = req_content_len(conn);
+
     // Echo request method and path
     conn_write(conn, "Method: ", 8);
-    conn_write(conn, conn->request->method, strlen(conn->request->method));
+    conn_write(conn, method, strlen(method));
     conn_write(conn, "\nPath: ", 7);
-    conn_write(conn, conn->request->path, strlen(conn->request->path));
+    conn_write(conn, path, strlen(path));
 
     // Echo body if present
-    if (conn->request->body && conn->request->body_received > 0) {
+    if (body && content_length > 0) {
         conn_write(conn, "\nBody: ", 7);
-        conn_write(conn, conn->request->body, conn->request->body_received);
+        conn_write(conn, body, content_length);
     }
 
     return true;
@@ -51,7 +57,7 @@ bool pathparams_query_params_handler(connection_t* conn) {
 
     // Check for query params.
     printf("Query Params: \n");
-    headers_foreach(conn->request->query_params, query) {
+    headers_foreach(query_params(conn), query) {
         printf("%s = %s\n", query->name, query->value);
     }
 
@@ -70,30 +76,34 @@ bool handle_form(connection_t* conn) {
         return conn_write_string(conn, multipart_error(code));
     }
 
-    const char* ct = headers_get(conn->request->headers, "Content-Type");
-    if (!ct) {
+    const char* content_type = req_header_get(conn, "Content-Type");
+    if (!content_type) {
         conn_set_status(conn, StatusBadRequest);
         return conn_write_string(conn, "Invalid content type header");
     }
 
-    if (!parse_boundary(ct, boundary, sizeof(boundary))) {
+    if (!parse_boundary(content_type, boundary, sizeof(boundary))) {
         conn_set_status(conn, StatusBadRequest);
         return conn_write_string(conn, "Invalid content type header");
     }
 
-    code = multipart_parse(conn->request->body, conn->request->content_length, boundary, &form);
+    const char* body      = req_body(conn);
+    size_t content_length = req_content_len(conn);
+
+    code = multipart_parse(body, content_length, boundary, &form);
     if (code != MP_OK) {
         conn_set_status(conn, StatusBadRequest);
         return conn_write_string(conn, multipart_error(code));
     }
 
     FileHeader* file = multipart_file(&form, "file");
-    if (!file) return false;
+    if (!file)
+        return false;
 
     char dest[1024] = {0};
     strlcat(dest, "./test_output/", sizeof(dest));
     strlcat(dest, file->filename, sizeof(dest) - 15);  // ignore potential truncation
-    if (!multipart_save_file(file, conn->request->body, dest)) {
+    if (!multipart_save_file(file, body, dest)) {
         return false;
     }
 
@@ -105,7 +115,8 @@ bool mw1(connection_t* conn) {
 
     // Pass a user-data ptr
     int* ptr = malloc(sizeof(int));
-    if (!ptr) return false;
+    if (!ptr)
+        return false;
 
     *ptr = 100;
 

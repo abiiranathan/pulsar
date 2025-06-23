@@ -1,37 +1,38 @@
 #ifndef PULSAR_H
 #define PULSAR_H
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
+#include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <sys/sendfile.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <stddef.h>
 #include <sys/epoll.h>
-#include <fcntl.h>
-#include <errno.h>
+#include <sys/sendfile.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
-#include <pthread.h>
-#include <inttypes.h>
+#include <unistd.h>
 
 // Internal Libs.
 #include "arena.h"
-#include "status_code.h"
-#include "mimetype.h"
 #include "headers.h"
+#include "mimetype.h"
+#include "status_code.h"
 
-#define NUM_WORKERS           8          // Number of workers.
-#define MAX_EVENTS            2048       // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE      819        // Buffer size for incoming statusline + headers +/-(part/all of body)
-#define CONNECTION_TIMEOUT    30         // Keep-Alive connection timeout in seconds
-#define MAX_BODY_SIZE         (2 << 20)  // Max Request body allowed.
-#define ARENA_CAPACITY        8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
-#define MAX_ROUTES            64         // Maximum number of routes
+#define NUM_WORKERS 8            // Number of workers.
+#define MAX_EVENTS 2048          // Maximum events for epoll->ready queue.
+#define READ_BUFFER_SIZE 819     // Buffer size for incoming statusline + headers +/-(part/all of body)
+#define CONNECTION_TIMEOUT 30    // Keep-Alive connection timeout in seconds
+#define MAX_BODY_SIZE (2 << 20)  // Max Request body allowed.
+#define ARENA_CAPACITY 8 * 1024  // Arena memory per connection(8KB). Expand to 16 KB if required.
+#define MAX_ROUTES 64            // Maximum number of routes
 #define MAX_GLOBAL_MIDDLEWARE 32
-#define MAX_ROUTE_MIDDLEWARE  4
+#define MAX_ROUTE_MIDDLEWARE 4
 
 #define UNUSED(var) ((void)var)
 
@@ -39,41 +40,32 @@
 extern "C" {
 #endif
 
-// Path parameter.
-typedef struct {
-    char* name;   // Parameter name
-    char* value;  // Parameter value from the URL
-} PathParam;
+// ======= Declare opaque structs ===============
+// Opaque structs make it easy to extend the API and prevent user
+// Mutation of server state.
 
-// Array structure for path parameters.
-typedef struct PathParams {
-    PathParam* params;    // Array of matched parameters
-    size_t match_count;   // Number of matched parameters from request path.
-    size_t total_params;  // Total parameters counted at startup.
-} PathParams;
+// Opaque structure for path parameters.
+typedef struct PathParams PathParams;
 
-// HTTP Response structure
-typedef struct {
-    char* buffer;          // Buffer for outgoing data
-    size_t bytes_to_send;  // Total bytes to write
-    size_t bytes_sent;     // Bytes already sent
-    size_t buffer_size;    // Bytes allocated for buffer
+// Response object structure.
+typedef struct response_t response_t;
 
-    http_status status_code;  // HTTP status code
-    char status_message[40];  // HTTP status message
-    headers_t* headers;       // Custom headers
+// Connection Object structure.
+typedef struct connection_t connection_t;
 
-    char* body_data;       // Response body data
-    size_t body_size;      // Current body size
-    size_t body_capacity;  // Body buffer capacity
+// Request Object structure.
+typedef struct request_t request_t;
 
-    bool headers_written;   // Flag to track if headers are written
-    bool content_type_set;  // Track whether content-type has been set
+// Route structure.
+typedef struct route_t route_t;
 
-    // File serving with sendfile.
-    int file_fd;       // If a file_fd != -1, we are serving a file.
-    size_t file_size;  // The size of the file being sent.
-} response_t;
+// ================================================
+
+// Http handler function pointer.
+// This is also the same signature for the middleware.
+// If its returns false, a 500 response is sent unless another code was already set.
+// If a middleware was being executed, the chain will be aborted and handler will never be called.
+typedef bool (*HttpHandler)(connection_t* conn);
 
 typedef enum {
     HTTP_INVALID = -1,
@@ -85,87 +77,12 @@ typedef enum {
     HTTP_DELETE,
 } HttpMethod;
 
-// Connection states
-typedef enum {
-    STATE_READING_REQUEST,
-    STATE_WRITING_RESPONSE,
-    STATE_CLOSING,
-} connection_state;
+// Start server on port and run the server loop forever.
+// Stop with SIGINT or SIGTERM.
+int pulsar_run(int port);
 
-typedef struct __attribute__((aligned(64))) connection_t {
-    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
-    struct request_t* request;  // HTTP request data
-    response_t* response;       // HTTP response data
-    Arena* arena;               // Memory arena for allocations
-
-    // 4-byte fields
-    int fd;                // Client socket file descriptor
-    time_t last_activity;  // Timestamp of last I/O activity
-    size_t read_bytes;     // Bytes currently in read buffer
-
-    // Small fields (1-2 bytes)
-    connection_state state;  // Current connection state (enum, likely 1-4 bytes)
-    bool keep_alive;         // Keep-alive flag (bool, 1 byte)
-    bool abort;              // Abort middleware processing
-
-    // User data.
-    void* user_data;                         // User data pointer
-    void (*user_data_free_func)(void* ptr);  // Function to free user-data after request
-} connection_t;
-
-// HTTP Request structure
-typedef struct request_t {
-    char method[8];           // HTTP method (GET, POST etc.)
-    char* path;               // Requested path
-    char* body;               // Request body
-    size_t content_length;    // Content-Length header value
-    size_t body_received;     // Bytes of body received
-    size_t headers_len;       // Length of headers text in connection buffer. ie offset
-    headers_t* headers;       // Request headers
-    headers_t* query_params;  // Query parameters
-    struct route_t* route;    // Matched route.
-} request_t;
-
-// Http handler function pointer.
-// This is also the same signature for the middleware.
-// If its returns false, a 500 response is sent unless another code was already set.
-// If a middleware was being executed, the chain will be aborted and handler will never be called.
-typedef bool (*HttpHandler)(connection_t* conn);
-
-typedef struct route_t {
-    int flags;                             // Bit mask for route type. NormalRoute | StaticRoute
-    char* pattern;                         // dynamically allocated route pattern
-    char* dirname;                         // Directory name (for static routes)
-    HttpMethod method;                     // Http method.
-    HttpHandler handler;                   // Handler function pointer
-    PathParams* path_params;               // Path parameters
-    HttpHandler mw[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
-    size_t mw_count;                       // Number of middleware
-} route_t;
-
-typedef enum { MwGlobal = 1, MwLocal } MwCtxType;
-
-// Context for middleware functions.
-typedef struct MiddlewareContext {
-    union {
-        struct {
-            // Global middleware context
-            size_t g_count;             // Number of middleware golabl mw functions
-            size_t g_index;             // Current index in the global middleware array
-            HttpHandler* g_middleware;  // Array of global middleware functions
-        } Global;
-        struct {
-            size_t r_count;             // Number of route middleware functions
-            size_t r_index;             // Current index in the route middleware array
-            HttpHandler* r_middleware;  // Array of route middleware functions
-        } Local;
-    } ctx;
-    MwCtxType ctx_type;
-} MiddlewareContext;
-
-#ifdef __cplusplus
-}
-#endif
+// ======= Route Registration
+//=================================================================
 
 // Register a new route.
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler);
@@ -176,6 +93,8 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 // `should` be blocked.
 route_t* register_static_route(const char* pattern, const char* dir);
 
+// =============================================================
+
 // Set a user data pointer inside the current route.
 // This must be called from inside the middleware handler.
 // The ptr is freed after the request is finished.
@@ -185,11 +104,19 @@ void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
 // Should be called from inside the middleware/handler.
 void* get_userdata(connection_t* conn);
 
+// =============================================================
+
+// ====================== Middleware ==========================
+
 // Register one or more global middleware.
 void use_global_middleware(size_t n, ...);
 
 // Register one or more middleware for this route.
 void use_route_middleware(route_t* route, size_t count, ...);
+
+// =============================================================
+
+// ======================= Response Writer functions ===========
 
 // Serve a file with given filename efficiently with sendfile.
 bool conn_servefile(connection_t* conn, const char* filename);
@@ -207,12 +134,30 @@ int conn_write(connection_t* conn, const void* data, size_t len);
 // Uses similar format as printf.
 __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* fmt, ...);
 
-// Start server on port and run the server loop forever.
-// Stop with SIGINT or SIGTERM.
-int pulsar_run(int port);
+// ========================================================
+
+// ==================== Method, Parameter and Query functions ==============
 
 // Get value for a query parameter if present or NULL.
 const char* query_get(connection_t* conn, const char* name);
+
+// Returns the Query parameters.
+headers_t* query_params(connection_t* conn);
+
+// Get a request header.(Possibly NULL)
+const char* req_header_get(connection_t* conn, const char* name);
+
+// Returns request body or NULL if not available.
+const char* req_body(connection_t* conn);
+
+const char* req_method(connection_t* conn);
+const char* req_path(connection_t* conn);
+
+// Returns request body size. (Content-Length).
+size_t req_content_len(connection_t* conn);
+
+// Get a response header.(Possibly NULL)
+const char* res_header_get(connection_t* conn, const char* name);
 
 // Get the path parameter value by name if present or NULL.
 const char* get_path_param(connection_t* conn, const char* name);
@@ -228,6 +173,8 @@ const char* http_method_to_string(const HttpMethod method);
 static inline bool is_safe_method(HttpMethod method) {
     return method == HTTP_GET || method == HTTP_OPTIONS;
 }
+
+// ===============================================================
 
 static inline unsigned long parse_ulong(const char* value, bool* valid) {
     assert(valid);
@@ -254,10 +201,14 @@ static inline unsigned long parse_ulong(const char* value, bool* valid) {
 // Set content-type header. This is indempotent.
 bool conn_set_content_type(connection_t* conn, const char* content_type);
 
-// Set a header.
+// Set a header. name and value must be valid NULL-terminated strings.
 bool conn_writeheader(connection_t* conn, const char* name, const char* value);
 
 // Set HTTP status code.
 void conn_set_status(connection_t* conn, http_status code);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* PULSAR_H */

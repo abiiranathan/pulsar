@@ -1,7 +1,7 @@
 /**
  * @file forms.h
  * @brief Multipart form data parser implementation
- * 
+ *
  * This header provides structures and functions for parsing multipart/form-data
  * content as defined in RFC 7578. It handles both file uploads and regular form fields.
  */
@@ -9,8 +9,8 @@
 #ifndef FORMS_H
 #define FORMS_H
 
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +28,7 @@
 
 /**
  * @def INITIAL_FILE_CAPACITY
- * @brief Initial number of files to allocate space for 
+ * @brief Initial number of files to allocate space for
  */
 #ifndef INITIAL_FILE_CAPACITY
 #define INITIAL_FILE_CAPACITY 4
@@ -47,7 +47,7 @@
 /**
  * @struct FileHeader
  * @brief Metadata for uploaded files
- * 
+ *
  * Contains information about uploaded files including their location
  * in the original request body. (It must not be mutated for that matter)
  */
@@ -61,7 +61,7 @@ typedef struct FileHeader {
 } FileHeader;
 
 /**
- * @struct FormField 
+ * @struct FormField
  * @brief Key-value pair for regular form fields
  */
 typedef struct FormField {
@@ -110,7 +110,7 @@ typedef enum {
  * @param form Pointer to uninitialized MultipartForm structure
  * @param memory Size of memory arena to allocate (minimum 1024 bytes)
  * @return MpCode indicating success or failure
- * 
+ *
  * @note This must be called before any other functions on a MultipartForm
  */
 MpCode multipart_init(MultipartForm* form, size_t memory);
@@ -122,7 +122,7 @@ MpCode multipart_init(MultipartForm* form, size_t memory);
  * @param boundary Form boundary string (with -- prefix)
  * @param form Initialized MultipartForm structure
  * @return MpCode indicating parse result
- * 
+ *
  * @note The boundary should match the Content-Type header value
  */
 MpCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form);
@@ -170,7 +170,7 @@ const char* multipart_error(MpCode error);
 /**
  * @brief Extract boundary from Content-Type header
  * @param content_type Header value
- * @param boundary Output buffer 
+ * @param boundary Output buffer
  * @param size Buffer size
  * @return true if boundary found, false otherwise
  */

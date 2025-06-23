@@ -14,6 +14,112 @@ typedef struct {
     int server_fd;
 } worker_data_t;
 
+// Path parameter.
+typedef struct {
+    char* name;   // Parameter name
+    char* value;  // Parameter value from the URL
+} PathParam;
+
+// Array structure for path parameters.
+typedef struct PathParams {
+    PathParam* params;    // Array of matched parameters
+    size_t match_count;   // Number of matched parameters from request path.
+    size_t total_params;  // Total parameters counted at startup.
+} PathParams;
+
+// HTTP Response structure
+typedef struct response_t {
+    char* buffer;          // Buffer for outgoing data
+    size_t bytes_to_send;  // Total bytes to write
+    size_t bytes_sent;     // Bytes already sent
+    size_t buffer_size;    // Bytes allocated for buffer
+
+    http_status status_code;  // HTTP status code
+    char status_message[40];  // HTTP status message
+    headers_t* headers;       // Custom headers
+
+    char* body_data;       // Response body data
+    size_t body_size;      // Current body size
+    size_t body_capacity;  // Body buffer capacity
+
+    bool headers_written;   // Flag to track if headers are written
+    bool content_type_set;  // Track whether content-type has been set
+
+    // File serving with sendfile.
+    int file_fd;       // If a file_fd != -1, we are serving a file.
+    size_t file_size;  // The size of the file being sent.
+} response_t;
+
+typedef struct __attribute__((aligned(64))) connection_t {
+    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
+    struct request_t* request;  // HTTP request data
+    response_t* response;       // HTTP response data
+    Arena* arena;               // Memory arena for allocations
+
+    // 4-byte fields
+    int fd;                // Client socket file descriptor
+    time_t last_activity;  // Timestamp of last I/O activity
+    size_t read_bytes;     // Bytes currently in read buffer
+
+    // Small fields (1-2 bytes)
+    enum {
+        STATE_READING_REQUEST,
+        STATE_WRITING_RESPONSE,
+        STATE_CLOSING,
+    } state;  // Current connection state (enum, likely 1-4 bytes)
+
+    bool keep_alive;  // Keep-alive flag (bool, 1 byte)
+    bool abort;       // Abort middleware processing
+
+    // User data.
+    void* user_data;                         // User data pointer per connection.
+    void (*user_data_free_func)(void* ptr);  // Function to free user-data after request
+} connection_t;
+
+// HTTP Request structure
+typedef struct request_t {
+    char method[8];           // HTTP method (GET, POST etc.)
+    char* path;               // Requested path
+    char* body;               // Request body
+    size_t content_length;    // Content-Length header value
+    size_t body_received;     // Bytes of body received
+    size_t headers_len;       // Length of headers text in connection buffer. ie offset
+    headers_t* headers;       // Request headers
+    headers_t* query_params;  // Query parameters
+    struct route_t* route;    // Matched route.
+} request_t;
+
+typedef struct route_t {
+    int flags;                             // Bit mask for route type. NormalRoute | StaticRoute
+    char* pattern;                         // dynamically allocated route pattern
+    char* dirname;                         // Directory name (for static routes)
+    HttpMethod method;                     // Http method.
+    HttpHandler handler;                   // Handler function pointer
+    PathParams* path_params;               // Path parameters
+    HttpHandler mw[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
+    size_t mw_count;                       // Number of middleware
+} route_t;
+
+typedef enum { MwGlobal = 1, MwLocal } MwCtxType;
+
+// Context for middleware functions.
+typedef struct MiddlewareContext {
+    union {
+        struct {
+            // Global middleware context
+            size_t g_count;             // Number of middleware golabl mw functions
+            size_t g_index;             // Current index in the global middleware array
+            HttpHandler* g_middleware;  // Array of global middleware functions
+        } Global;
+        struct {
+            size_t r_count;             // Number of route middleware functions
+            size_t r_index;             // Current index in the route middleware array
+            HttpHandler* r_middleware;  // Array of route middleware functions
+        } Local;
+    } ctx;
+    MwCtxType ctx_type;
+} MiddlewareContext;
+
 // Global flag to keep all workers running.
 static volatile sig_atomic_t server_running = 1;
 
@@ -54,8 +160,12 @@ void conn_set_status(connection_t* conn, http_status code) {
     response_t* res = conn->response;
     if (res->status_code > 0)
         return;  // Status already set( Makes it Indempotent)
-    res->status_code = code;
-    strlcpy(res->status_message, http_status_text(code), sizeof(res->status_message));
+
+    // Only set valid status codes.
+    if (code >= StatusContinue && code <= StatusNetworkAuthenticationRequired) {
+        res->status_code = code;
+        strlcpy(res->status_message, http_status_text(code), sizeof(res->status_message));
+    }
 }
 
 // Add a custom header
@@ -1134,6 +1244,39 @@ const char* query_get(connection_t* conn, const char* name) {
     if (!conn->request->query_params)
         return NULL;  // no query params.
     return headers_get(conn->request->query_params, name);
+}
+
+// Returns the Query parameters.
+headers_t* query_params(connection_t* conn) {
+    return conn->request->query_params;
+}
+
+// Get a request header.(Possibly NULL)
+const char* req_header_get(connection_t* conn, const char* name) {
+    return headers_get(conn->request->headers, name);
+}
+
+// Returns request body or NULL if not available.
+const char* req_body(connection_t* conn) {
+    return conn->request->body;
+}
+
+const char* req_method(connection_t* conn) {
+    return conn->request->method;
+}
+
+const char* req_path(connection_t* conn) {
+    return conn->request->path;
+}
+
+// Returns request body size. (Content-Length).
+size_t req_content_len(connection_t* conn) {
+    return conn->request->content_length;
+}
+
+// Get a response header.(Possibly NULL)
+const char* res_header_get(connection_t* conn, const char* name) {
+    return headers_get(conn->response->headers, name);
 }
 
 static bool parse_request_body(connection_t* conn, size_t headers_len) {
