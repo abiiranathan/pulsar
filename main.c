@@ -2,8 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <pulsar/forms.h>
-#include <pulsar/pulsar.h>
+#include "include/forms.h"
+#include "include/pulsar.h"
 
 bool hello_world_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
