@@ -1,38 +1,18 @@
 #ifndef PULSAR_H
 #define PULSAR_H
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <limits.h>
-#include <netinet/in.h>
-#include <pthread.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stddef.h>
-#include <sys/epoll.h>
-#include <sys/sendfile.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
-
-// Internal Libs.
-#include "arena.h"
 #include "headers.h"
-#include "mimetype.h"
 #include "status_code.h"
 
-#define NUM_WORKERS 8            // Number of workers.
-#define MAX_EVENTS 2048          // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE 819     // Buffer size for incoming statusline + headers +/-(part/all of body)
-#define CONNECTION_TIMEOUT 30    // Keep-Alive connection timeout in seconds
-#define MAX_BODY_SIZE (2 << 20)  // Max Request body allowed.
-#define ARENA_CAPACITY 8 * 1024  // Arena memory per connection(8KB). Expand to 16 KB if required.
-#define MAX_ROUTES 64            // Maximum number of routes
-#define MAX_GLOBAL_MIDDLEWARE 32
-#define MAX_ROUTE_MIDDLEWARE 4
+#define NUM_WORKERS 8             // Number of workers.
+#define MAX_EVENTS 2048           // Maximum events for epoll->ready queue.
+#define READ_BUFFER_SIZE 819      // Buffer size for incoming statusline + headers +/-(part/all of body)
+#define CONNECTION_TIMEOUT 30     // Keep-Alive connection timeout in seconds
+#define MAX_BODY_SIZE (2 << 20)   // Max Request body allowed.
+#define ARENA_CAPACITY 8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
+#define MAX_ROUTES 64             // Maximum number of routes
+#define MAX_GLOBAL_MIDDLEWARE 32  // maximum number of global middleware.
+#define MAX_ROUTE_MIDDLEWARE 4    // Maximum number of route middleware.
 
 #define UNUSED(var) ((void)var)
 
@@ -175,28 +155,6 @@ static inline bool is_safe_method(HttpMethod method) {
 }
 
 // ===============================================================
-
-static inline unsigned long parse_ulong(const char* value, bool* valid) {
-    assert(valid);
-
-    *valid        = false;
-    char* endptr  = NULL;
-    errno         = 0;
-    uintmax_t num = strtoumax(value, &endptr, 10);
-
-    // Overflow or underflow.
-    if ((num > ULONG_MAX) || (errno == ERANGE && (num == 0 || num == UINTMAX_MAX))) {
-        return 0;
-    }
-
-    // Invalid value.
-    if (*endptr != '\0' || endptr == value) {
-        return 0;
-    }
-
-    *valid = true;
-    return num;
-}
 
 // Set content-type header. This is indempotent.
 bool conn_set_content_type(connection_t* conn, const char* content_type);

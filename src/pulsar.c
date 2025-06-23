@@ -1,11 +1,19 @@
-#include <assert.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <sys/epoll.h>
+#include <sys/sendfile.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
+#include "../include/arena.h"
+#include "../include/mimetype.h"
 #include "../include/pulsar.h"
+#include "../include/utils.h"
 
 // Worker thread data
 typedef struct {
@@ -507,95 +515,6 @@ void routes_sort_if_needed(void) {
         qsort(global_routes, global_count, sizeof(route_t), compare_routes);
         global_sort_state = 1;
     }
-}
-
-/**
- * Check if path is a directory
- * Returns true if path exists AND is a directory, false otherwise
- */
-static inline bool is_dir(const char* path) {
-    if (!path || !*path) {  // Handle NULL or empty string
-        errno = EINVAL;
-        return false;
-    }
-
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        return false;  // stat failed (errno is set)
-    }
-    return S_ISDIR(st.st_mode);
-}
-
-/**
- * Check if a path exists (file or directory)
- * Returns true if path exists, false otherwise (and sets errno)
- */
-static inline bool path_exists(const char* path) {
-    if (!path || !*path) {  // Handle NULL or empty string
-        errno = EINVAL;
-        return false;
-    }
-    return access(path, F_OK) == 0;
-}
-
-static inline void url_percent_decode(const char* src, char* dst, size_t dst_size) {
-    char a, b;
-    size_t written = 0;
-    size_t src_len = strlen(src);
-
-    while (*src && written + 1 < dst_size) {
-        if (*src == '+') {
-            *dst++ = ' ';
-            src++;
-            written++;
-        } else if ((*src == '%') && (src_len >= 2) && ((a = src[1]) && (b = src[2])) &&
-                   (isxdigit(a) && isxdigit(b))) {
-            if (a >= 'a')
-                a -= 'a' - 'A';
-            if (a >= 'A')
-                a -= 'A' - 10;
-            else
-                a -= '0';
-            if (b >= 'a')
-                b -= 'a' - 'A';
-            if (b >= 'A')
-                b -= 'A' - 10;
-            else
-                b -= '0';
-            *dst++ = 16 * a + b;
-            src += 3;
-            written++;
-        } else {
-            *dst++ = *src++;
-            written++;
-        }
-    }
-
-    // Null-terminate the destination buffer
-    *dst = '\0';
-}
-
-static inline bool is_malicious_path(const char* path) {
-    // List of dangerous patterns
-    const char* patterns[] = {"../",     // Directory traversal
-                              "/./",     // Current directory reference
-                              "//",      // Multiple slashes
-                              "/~",      // User home directories
-                              "%2e%2e",  // URL-encoded ..
-                              NULL};
-
-    for (int i = 0; patterns[i]; i++) {
-        if (strstr(path, patterns[i])) {
-            return true;
-        }
-    }
-
-    // Check for URL-encoded characters(\\x).
-    if (strstr(path, "\\x")) {
-        return true;
-    }
-
-    return false;
 }
 
 static bool static_file_handler(connection_t* conn) {
