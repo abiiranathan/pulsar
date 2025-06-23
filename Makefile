@@ -21,6 +21,7 @@ HEADERS := $(HEADERS_DIR)/arena.h \
 		   $(HEADERS_DIR)/mimetype.h \
 		   $(HEADERS_DIR)/pulsar.h \
 		   $(HEADERS_DIR)/status_code.h \
+		   $(HEADERS_DIR)/content_types.h \
 		   $(HEADERS_DIR)/utils.h
 
 SRC := main.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
