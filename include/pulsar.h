@@ -1,6 +1,7 @@
 #ifndef PULSAR_H
 #define PULSAR_H
 
+#include <stddef.h>
 #include "headers.h"
 #include "status_code.h"
 
@@ -84,15 +85,13 @@ void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
 // Should be called from inside the middleware/handler.
 void* get_userdata(connection_t* conn);
 
-// =============================================================
-
 // ====================== Middleware ==========================
 
 // Register one or more global middleware.
-void use_global_middleware(size_t n, ...);
+void use_global_middleware(HttpHandler* middleware, size_t count);
 
 // Register one or more middleware for this route.
-void use_route_middleware(route_t* route, size_t count, ...);
+void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count);
 
 // =============================================================
 
@@ -113,6 +112,9 @@ int conn_write(connection_t* conn, const void* data, size_t len);
 // Send a formatted message with variadic arguments.
 // Uses similar format as printf.
 __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* fmt, ...);
+
+// Abort request processing and middleware.
+void conn_abort(connection_t* conn);
 
 // ========================================================
 

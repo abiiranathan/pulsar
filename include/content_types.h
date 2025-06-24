@@ -1,6 +1,8 @@
 #ifndef CONTENT_TYPES_H
 #define CONTENT_TYPES_H
 
+#include <stddef.h>
+
 // Content-Type header
 #define CT_HEADER "Content-Type"
 

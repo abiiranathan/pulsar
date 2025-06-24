@@ -2,3 +2,10 @@ a.out
 server
 test_output
 forms_test
+*.so*
+*.dylib
+*.dll
+*.o
+__pycache__
+dist
+*.egg-info

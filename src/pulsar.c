@@ -1,9 +1,13 @@
 #include <arpa/inet.h>
+#include <assert.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -133,7 +137,7 @@ static volatile sig_atomic_t server_running = 1;
 
 // Global routes
 static route_t global_routes[MAX_ROUTES];
-static size_t global_count = 0;
+static size_t global_route_count = 0;
 
 // Global middleware
 static HttpHandler global_mw[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array.
@@ -273,6 +277,11 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
     ssize_t result = conn_write(conn, buffer, len);
     free(buffer);
     return result;
+}
+
+// Abort request processing and middleware.
+void conn_abort(connection_t* conn) {
+    conn->abort = true;
 }
 
 bool conn_servefile(connection_t* conn, const char* filename) {
@@ -447,9 +456,9 @@ static inline size_t count_path_params(const char* pattern, bool* valid) {
 #define NORMAL_ROUTE_FLAG 0x02  // 1 << 2
 
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
-    assert(global_count < MAX_ROUTES && http_method_valid(method) && pattern && handler);
+    assert(global_route_count < MAX_ROUTES && http_method_valid(method) && pattern && handler);
 
-    route_t* r = &global_routes[global_count];
+    route_t* r = &global_routes[global_route_count];
     r->pattern = strdup(pattern);
     assert(r->pattern);
 
@@ -482,7 +491,7 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     memset(r->mw, 0, sizeof(r->mw));
 
     // Increment global count
-    global_count++;
+    global_route_count++;
     return r;
 }
 
@@ -511,8 +520,8 @@ static int compare_routes(const void* a, const void* b) {
 
 static int global_sort_state = 0;
 void routes_sort_if_needed(void) {
-    if (global_sort_state == 0 && global_count > 0) {
-        qsort(global_routes, global_count, sizeof(route_t), compare_routes);
+    if (global_sort_state == 0 && global_route_count > 0) {
+        qsort(global_routes, global_route_count, sizeof(route_t), compare_routes);
         global_sort_state = 1;
     }
 }
@@ -739,8 +748,8 @@ static route_t* route_match(connection_t* conn, HttpMethod method) {
     // Binary search to find the first route with matching method
     // We can do binary search because our routes are sorted by method, then pattern
     size_t low         = 0;
-    size_t high        = global_count;
-    size_t first_match = global_count;  // Initialize to invalid index
+    size_t high        = global_route_count;
+    size_t first_match = global_route_count;  // Initialize to invalid index
 
     while (low < high) {
         size_t mid            = low + (high - low) / 2;
@@ -756,7 +765,7 @@ static route_t* route_match(connection_t* conn, HttpMethod method) {
     }
 
     // If no routes for this method, return early
-    if (first_match == global_count) {
+    if (first_match == global_route_count) {
         return NULL;
     }
 
@@ -765,7 +774,7 @@ static route_t* route_match(connection_t* conn, HttpMethod method) {
     size_t url_length = strlen(url);
 
     // Prefetch the first few route patterns
-    for (size_t i = first_match; i < first_match + 4 && i < global_count; i++) {
+    for (size_t i = first_match; i < first_match + 4 && i < global_route_count; i++) {
         if (global_routes[i].method == method) {
             __builtin_prefetch(global_routes[i].pattern, 0, 1);
         } else {
@@ -773,11 +782,11 @@ static route_t* route_match(connection_t* conn, HttpMethod method) {
         }
     }
 
-    for (size_t i = first_match; i < global_count && global_routes[i].method == method; i++) {
+    for (size_t i = first_match; i < global_route_count && global_routes[i].method == method; i++) {
         route_t* current = &global_routes[i];
 
         // Prefetch next route's pattern
-        if (i + 4 < global_count && global_routes[i + 4].method == method) {
+        if (i + 4 < global_route_count && global_routes[i + 4].method == method) {
             __builtin_prefetch(global_routes[i + 4].pattern, 0, 1);
         }
 
@@ -797,27 +806,31 @@ static route_t* route_match(connection_t* conn, HttpMethod method) {
 }
 
 static inline bool execute_middleware_chain(connection_t* conn, const MiddlewareContext* mw_ctx) {
-    HttpHandler* middleware;
+    HttpHandler* middlewares;
     size_t count, index;
     bool success;
 
     switch (mw_ctx->ctx_type) {
         case MwGlobal:
-            middleware = mw_ctx->ctx.Global.g_middleware;
-            count      = mw_ctx->ctx.Global.g_count;
-            index      = mw_ctx->ctx.Global.g_index;
+            middlewares = mw_ctx->ctx.Global.g_middleware;
+            count       = mw_ctx->ctx.Global.g_count;
+            index       = mw_ctx->ctx.Global.g_index;
             break;
         case MwLocal:
-            middleware = mw_ctx->ctx.Local.r_middleware;
-            count      = mw_ctx->ctx.Local.r_count;
-            index      = mw_ctx->ctx.Local.r_index;
+            middlewares = mw_ctx->ctx.Local.r_middleware;
+            count       = mw_ctx->ctx.Local.r_count;
+            index       = mw_ctx->ctx.Local.r_index;
             break;
         default:
-            unreachable();
+            assert(0 && "Unknown middleware type");
+    }
+
+    if (!middlewares || count == 0) {
+        return true;
     }
 
     while (index < count) {
-        success = middleware[index++](conn);
+        success = middlewares[index++](conn);
         if (!success) {
             conn->abort = true;
             return false;
@@ -832,36 +845,29 @@ static inline bool execute_middleware_chain(connection_t* conn, const Middleware
 }
 
 // Register one or more global middleware.
-void use_global_middleware(size_t count, ...) {
-    size_t new_count = count + global_mw_count;
-    assert(new_count <= MAX_GLOBAL_MIDDLEWARE && "Exceeded maximum global middleware count");
+void use_global_middleware(HttpHandler* middleware, size_t count) {
+    if (count == 0)
+        return;
 
-    va_list args;
-    va_start(args, count);
-    for (size_t i = global_mw_count; i < new_count; i++) {
-        global_mw[i] = va_arg(args, HttpHandler);
+    assert(count + global_mw_count <= MAX_GLOBAL_MIDDLEWARE &&
+           "Global middleware count > MAX_GLOBAL_MIDDLEWARE");
+
+    for (size_t i = 0; i < count; i++) {
+        global_mw[global_mw_count++] = middleware[i];
     }
-    va_end(args);
-
-    global_mw_count += count;
 }
 
 // Register one or more middleware for this route.
-void use_route_middleware(route_t* route, size_t count, ...) {
+void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count) {
     if (count == 0)
         return;
-    size_t new_count = route->mw_count + count;
-    assert(new_count <= MAX_ROUTE_MIDDLEWARE && "route middleware count > MAX_ROUTE_MIDDLEWARE");
 
-    // Append the new middleware to the route middleware
-    va_list args;
-    va_start(args, count);
-    for (size_t i = route->mw_count; i < new_count; i++) {
-        route->mw[i] = va_arg(args, HttpHandler);
+    assert(route->mw_count + count <= MAX_ROUTE_MIDDLEWARE &&
+           "route middleware count > MAX_ROUTE_MIDDLEWARE");
+
+    for (size_t i = 0; i < count; i++) {
+        route->mw[route->mw_count++] = middleware[i];
     }
-    va_end(args);
-
-    route->mw_count = new_count;
 }
 
 // ====================================================================
@@ -1589,7 +1595,7 @@ int pulsar_run(int port) {
 }
 
 __attribute__((destructor())) void cleanup(void) {
-    for (size_t i = 0; i < global_count; i++) {
+    for (size_t i = 0; i < global_route_count; i++) {
         route_t* r = &global_routes[i];
         free(r->pattern);
 
