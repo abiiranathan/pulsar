@@ -11,8 +11,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define UNUSED(var) ((void)var)
+
+#if defined(__GNUC__) || defined(__clang__)
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define likely(x) (x)
+#define unlikely(x) (x)
+#endif
+
 static inline unsigned long parse_ulong(const char* value, bool* valid) {
-    assert(valid);
+    assert(valid && "NULL pointer for bool *valid");
 
     *valid        = false;
     char* endptr  = NULL;

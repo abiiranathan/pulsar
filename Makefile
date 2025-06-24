@@ -38,7 +38,7 @@ SRC_DIR := src
 HEADERS_DIR := include
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 
-SRC := main.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
+SRC := main.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c $(SRC_DIR)/routing.c
 TEST_SRCS := $(SRC_DIR)/forms_test.c $(SRC_DIR)/forms.c
 LIB_SRCS := $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
 
