@@ -104,8 +104,8 @@ Functions to set status code, headers, and write response data.
 ### Middleware
 
 ```c
-void use_global_middleware(HttpHandler middleware);
-void use_route_middleware(route_t* route, HttpHandler middleware);
+void use_global_middleware(HttpHandler *middleware, size_t count);
+void use_route_middleware(route_t* route, HttpHandler *middleware, size_t count);
 ```
 
 Register global or route-specific middleware functions.
