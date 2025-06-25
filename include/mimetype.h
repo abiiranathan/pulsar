@@ -1,6 +1,10 @@
 #ifndef MIMETYPE_H
 #define MIMETYPE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
@@ -248,11 +252,11 @@ static MimeEntry mime_entries[] = {
 };
 
 #define DEFAULT_CONTENT_TYPE "application/octet-stream"
-#define MIME_MAPPING_SIZE    (sizeof(mime_entries) / sizeof(mime_entries[0]))
+#define MIME_MAPPING_SIZE (sizeof(mime_entries) / sizeof(mime_entries[0]))
 
 // Macro to compute the next power of two for a given number
 #define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
-#define HASH_TABLE_SIZE      NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
+#define HASH_TABLE_SIZE NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
 
 // Power of two check macro
 #define IS_POWER_OF_TWO(x) (((x) != 0) && (((x) & ((x) - 1)) == 0))
@@ -287,11 +291,13 @@ static inline const char* get_mimetype(char* filename) {
         initialized = 1;
     }
 
-    if (!filename) return DEFAULT_CONTENT_TYPE;
+    if (!filename)
+        return DEFAULT_CONTENT_TYPE;
 
     // Find last dot
     char* last_dot = strrchr(filename, '.');
-    if (!last_dot) return DEFAULT_CONTENT_TYPE;
+    if (!last_dot)
+        return DEFAULT_CONTENT_TYPE;
 
     char* extension = last_dot + 1;
 
@@ -310,4 +316,8 @@ static inline const char* get_mimetype(char* filename) {
     return DEFAULT_CONTENT_TYPE;
 }
 
-#endif /* MIMETYPE_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // MIMETYPE_H

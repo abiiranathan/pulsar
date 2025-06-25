@@ -1,6 +1,10 @@
 #ifndef HEADERS_H
 #define HEADERS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <ctype.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -32,7 +36,8 @@ static inline uint32_t header_name_hash(const char* name) {
 
 static inline headers_t* headers_new(Arena* arena) {
     headers_t* headers = arena_alloc(arena, sizeof(headers_t));
-    if (!headers) return NULL;
+    if (!headers)
+        return NULL;
 
     headers->count = 0;
 
@@ -75,7 +80,8 @@ static inline bool headers_set(Arena* arena, headers_t* headers, char* name, cha
     } else {
         // new header.
         hdr = arena_alloc(arena, sizeof(header_t));
-        if (!hdr) return false;
+        if (!hdr)
+            return false;
 
         hdr->name  = name;   // already allocated in the arena (so not copied)
         hdr->value = value;  // already allocated in the arena (so not copied)
@@ -125,8 +131,12 @@ static inline void headers_clear(headers_t* headers) {
 // Iterator macro
 // Outer loop iterates through all buckets
 // Inner loop traverses each chain in a bucket
-#define headers_foreach(headers, item)                                                                                 \
-    for (size_t _bucket = 0; _bucket < MAX_HEADERS; _bucket++)                                                         \
+#define headers_foreach(headers, item)                                                                       \
+    for (size_t _bucket = 0; _bucket < MAX_HEADERS; _bucket++)                                               \
         for (header_t* item = (headers)->buckets[_bucket]; item != NULL; item = item->next)
 
-#endif /* HEADERS_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // HEADERS_H

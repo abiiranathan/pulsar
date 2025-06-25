@@ -1,6 +1,10 @@
 #ifndef ROUTING_H
 #define ROUTING_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include "arena.h"
 #include "constants.h"
@@ -73,4 +77,8 @@ route_t* register_static_route(const char* pattern, const char* dir);
 // parameters. The path params have the lifetime of the arena where they are allocated.
 route_t* route_match(Arena* arena, const char* path, HttpMethod method);
 
-#endif /* ROUTING_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // ROUTING_H

@@ -2,6 +2,7 @@
 #define STATUS_CODE_H
 
 #include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

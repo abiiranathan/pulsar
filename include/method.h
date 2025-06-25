@@ -1,6 +1,10 @@
 #ifndef METHOD_H
 #define METHOD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <string.h>
 
 typedef enum {
@@ -64,4 +68,8 @@ static inline HttpMethod http_method_from_string(const char* method) {
     return HTTP_INVALID;
 }
 
-#endif /* METHOD_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // METHOD_H

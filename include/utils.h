@@ -1,6 +1,10 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -124,4 +128,8 @@ static inline bool is_malicious_path(const char* path) {
     return false;
 }
 
-#endif /* UTILS_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // UTILS_H

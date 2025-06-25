@@ -9,6 +9,10 @@
 #ifndef FORMS_H
 #define FORMS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -176,4 +180,8 @@ const char* multipart_error(MpCode error);
  */
 bool parse_boundary(const char* content_type, char* boundary, size_t size);
 
-#endif /* FORMS_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // FORMS_H
