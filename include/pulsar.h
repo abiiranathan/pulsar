@@ -225,22 +225,6 @@ const char* res_header_get(connection_t* conn, const char* name);
 const char* get_path_param(connection_t* conn, const char* name);
 
 /**
- * @brief Converts HTTP method string to enum
- *
- * @param method HTTP method string
- * @return HttpMethod Method enum value
- */
-HttpMethod http_method_from_string(const char* method);
-
-/**
- * @brief Converts HTTP method enum to string
- *
- * @param method HTTP method enum
- * @return const char* Method string
- */
-const char* http_method_to_string(const HttpMethod method);
-
-/**
  * @brief Attaches user data to a connection
  *
  * @param conn The connection object

@@ -8,7 +8,7 @@ ARCH := $(shell uname -m)
 
 # Compiler and Flags
 CC := gcc
-CFLAGS := -Wall -Werror -Wextra -pedantic -g -std=c23 -D_GNU_SOURCE -fno-builtin
+CFLAGS := -Wall -Werror -Wextra -pedantic -O3 -std=c23 -fno-builtin -D_GNU_SOURCE
 LDFLAGS := -lpthread
 INSTALL_PREFIX := /usr/local
 
@@ -35,12 +35,13 @@ TEST_TARGET := forms_test
 
 # Source Files
 SRC_DIR := src
+BASE_SRC := $(SRC_DIR)/routing.c $(SRC_DIR)/method.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
 HEADERS_DIR := include
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 
-SRC := main.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c $(SRC_DIR)/routing.c
+SRC := main.c $(BASE_SRC)
 TEST_SRCS := $(SRC_DIR)/forms_test.c $(SRC_DIR)/forms.c
-LIB_SRCS := $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
+LIB_SRCS := $(BASE_SRC)
 
 # Library names
 STATIC_LIB := libpulsar.a

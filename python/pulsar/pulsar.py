@@ -7,6 +7,7 @@ import enum
 from typing import Any, Callable, Optional, TypeVar, Union, List, Dict
 from pathlib import Path
 from functools import wraps
+import json
 
 # Get package directory
 PACKAGE_DIR = Path(__file__).parent.resolve()
@@ -36,12 +37,13 @@ lib = _load_library()
 # Type definitions
 class HttpMethod(enum.IntEnum):
     INVALID = -1
-    OPTIONS = 0
-    GET = 1
-    POST = 2
-    PUT = 3
-    PATCH = 4
-    DELETE = 5
+    GET = 0
+    POST = 1
+    PUT = 2
+    PATCH = 3
+    DELETE = 4
+    HEAD = 5
+    OPTIONS = 6
 
 class HttpStatus(enum.IntEnum):
     # Informational
@@ -125,11 +127,11 @@ lib.pulsar_run.restype = ctypes.c_int
 Connection = ctypes.c_void_p
 Route = ctypes.c_void_p
 
-# Handler type (returns bool, takes Connection)
-HandlerFunc = ctypes.CFUNCTYPE(ctypes.c_bool, Connection)
+# Handler type (returns None, takes Connection)
+HandlerFunc = ctypes.CFUNCTYPE(None, Connection)
 
 # Middleware type (same as handler)
-MiddlewareFunc = ctypes.CFUNCTYPE(ctypes.c_bool, Connection)
+MiddlewareFunc = ctypes.CFUNCTYPE(None, Connection)
 
 def _setup_function(name: str, argtypes: List[Any], restype: Any) -> None: # type: ignore
     """Helper to setup ctypes function signatures"""
@@ -145,15 +147,16 @@ _setup_function("register_static_route",
 _setup_function("use_global_middleware", 
     [ctypes.POINTER(MiddlewareFunc), ctypes.c_int, ], None)
 _setup_function("use_route_middleware", 
-    [Route, ctypes.POINTER(MiddlewareFunc),ctypes.c_int], None)
+    [Route, ctypes.POINTER(MiddlewareFunc), ctypes.c_int], None)
 
 # Response functions
 _setup_function("conn_servefile", [Connection, ctypes.c_char_p], ctypes.c_bool)
 _setup_function("conn_write_string", [Connection, ctypes.c_char_p], ctypes.c_int)
-_setup_function("serve_404", [Connection], ctypes.c_int)
 _setup_function("conn_write", [Connection, ctypes.c_void_p, ctypes.c_size_t], ctypes.c_int)
+_setup_function("conn_send", [Connection, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t], None)
 _setup_function("conn_writef", [Connection, ctypes.c_char_p], ctypes.c_int)
 _setup_function("conn_abort", [Connection], None)
+_setup_function("conn_notfound", [Connection], ctypes.c_int)
 
 # Request functions
 _setup_function("req_method", [Connection], ctypes.c_char_p)
@@ -171,8 +174,8 @@ _setup_function("res_header_get", [Connection, ctypes.c_char_p], ctypes.c_char_p
 
 # Status/header setters
 _setup_function("conn_set_status", [Connection, ctypes.c_int], None)
-_setup_function("conn_set_content_type", [Connection, ctypes.c_char_p], ctypes.c_bool)
-_setup_function("conn_writeheader", [Connection, ctypes.c_char_p, ctypes.c_char_p], ctypes.c_bool)
+_setup_function("conn_set_content_type", [Connection, ctypes.c_char_p], None)
+_setup_function("conn_writeheader", [Connection, ctypes.c_char_p, ctypes.c_char_p], None)
 
 # User data functions
 _setup_function("set_userdata", 
@@ -182,7 +185,8 @@ _setup_function("get_userdata", [Connection], ctypes.c_void_p)
 # Method conversion
 _setup_function("http_method_from_string", [ctypes.c_char_p], ctypes.c_int)
 _setup_function("http_method_to_string", [ctypes.c_int], ctypes.c_char_p)
-
+_setup_function("http_method_valid", [ctypes.c_int], ctypes.c_bool)
+_setup_function("is_safe_method", [ctypes.c_int], ctypes.c_bool)
 
 class Request:
     """Wrapper for request-related operations"""
@@ -248,7 +252,7 @@ class Response:
         lib.conn_set_status(self._conn, status)
 
     def abort(self):
-        lib.conn_abort(self._conn);
+        lib.conn_abort(self._conn)
     
     def set_content_type(self, content_type: str) -> bool:
         """Set response content type"""
@@ -265,27 +269,22 @@ class Response:
         
         return lib.conn_write(self._conn, data, len(data))
     
-
-    def send(self, content: Union[str, bytes], 
-             content_type: str = "text/plain",
-             status: HttpStatus = HttpStatus.OK) -> int:
-        """Send complete response with status code and content-type"""
-
-        self.set_status(status)
-        self.set_content_type(content_type)
-        return self.write(content)
+    def send(self, content: Union[str, bytes],
+             status: HttpStatus = HttpStatus.OK):
+        """Write a response with status code and content-type"""
+        if isinstance(content, str):
+            lib.conn_send(self._conn, status, content.encode(), len(content))
+        else:
+            lib.conn_send(self._conn, status, content, len(content))
     
     def send_json(self, data: Any, status: HttpStatus = HttpStatus.OK) -> int:
         """Send JSON response"""
-        import json
         self.set_status(status)
         self.set_content_type("application/json")
         return self.write(json.dumps(data))
     
-
     def send_file(self, filename: str, content_type: str | None = None) -> bool:
         """Serve a file"""
-
         if content_type:
             self.set_content_type(content_type)
 
@@ -293,7 +292,7 @@ class Response:
     
     def not_found(self) -> int:
         """Serve 404 response"""
-        return lib.serve_404(self._conn)
+        return lib.conn_notfound(self._conn)
     
 
 # Type variables for request/response
@@ -302,31 +301,29 @@ Res = TypeVar('Res', bound=Response)
 Conn = TypeVar('Conn', bound=ctypes.c_void_p)
 
 # Middleware type: takes request and response, returns bool
-Middleware = Callable[[Request, Response], bool]
+Middleware = Callable[[Request, Response], None]
 
 # Handler type: takes request and response, returns Union[str, bytes]
-Handler = Callable[[Request, Response], Union[str, bytes]]
+Handler = Callable[[Request, Response], None]
 
 # Error handler type
-ErrorHandler = Callable[[Exception, Request, Response], bool]
+ErrorHandler = Callable[[Exception, Request, Response], None]
 
 # Global dictionary to maintain callback references
 _CALLBACK_STORE : Dict[int, Union[Middleware, Handler]]= {}
 
-def _create_handler_wrapper(py_handler):  # type: ignore
+def _create_handler_wrapper(c_handler: HandlerFunc):  # type: ignore
     """Wrapper that keeps Python handler alive and handles exceptions"""
     @HandlerFunc
-    def wrapped_handler(conn: Connection):  # type: ignore
+    def wrapped_handler(conn: Connection):
         try:
-            result = py_handler(conn)  # type: ignore
-            # Ensure result is valid boolean
-            return bool(result) # type: ignore
+            c_handler(conn) 
         except Exception as e:
-            print(f"Handler error: {e}", file=sys.stderr)
-            return False
+            print(f"Handler error: {e} ", file=sys.stderr)
+            return
 
     # Prevent GC
-    _CALLBACK_STORE[id(py_handler)] = wrapped_handler # type: ignore
+    _CALLBACK_STORE[id(c_handler)] = wrapped_handler # type: ignore
     return wrapped_handler
 
 def _create_middleware_wrapper(py_middleware: Middleware):
@@ -355,13 +352,10 @@ class Pulsar:
         """Decorator for registering routes"""
         def decorator(handler: Handler):
             @wraps(handler)
-            def wrapped_handler(conn: Conn) -> bool: # type: ignore
+            def wrapped_handler(conn: ctypes.c_void_p):
                 req = Request(conn)
                 res = Response(conn)
-
-                # Call the C handler
-                result = handler(req, res)
-                return res.send(result) > 0
+                handler(req, res)
                 
             # Register the route for method
             method_enum = lib.http_method_from_string(method.upper().encode())
@@ -450,36 +444,34 @@ class Pulsar:
 if __name__ == "__main__":
     app = Pulsar()
     
-    def logger(req: Request, res: Response)->bool:
+    def logger(req: Request, res: Response):
         print(f"{req.method} {req.path}")
-        return True
     
-    def auth_middleware(req: Request, res: Response) -> bool:
+    def auth_middleware(req: Request, res: Response):
         if not req.get_header("Authorization"):
             res.send("Unauthorized", status=HttpStatus.UNAUTHORIZED)
-            return False
-        return True
+            res.abort()
+            return
     
     # Global middleware.
     app.use(logger)
 
     @app.GET("/", auth_middleware)
     def hello(req: Request, res: Response):
-        return "Hello, World!"
+        res.send("Hello, World!")
 
     @app.GET("/greet/{name}")
     def greet(req: Request, res: Response):
         name = req.get_path_param("name") or "stranger"
-        return f"Hello, {name}!"
+        res.send(f"Hello, {name}!")
     
     @app.POST("/echo")
     def echo(req: Request, res: Response):
-        return req.body
+        res.send(req.body)
     
     @app.errorhandler
     def handle_errors(err: Exception, req: Request, res: Response):
         res.send(f"Error occurred: {str(err)}", status=HttpStatus.INTERNAL_SERVER_ERROR)
-        return True
     
     # Serve static files
     app.static("/static", ".")

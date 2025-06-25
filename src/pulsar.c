@@ -9,6 +9,7 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 
+#include "../include/method.h"
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
 
@@ -407,14 +408,16 @@ const char* query_get(connection_t* conn, const char* name) {
     return headers_get(conn->request->query_params, name);
 }
 
-// Returns the Query parameters.
 headers_t* query_params(connection_t* conn) {
     return conn->request->query_params;
 }
 
-// Get a request header.(Possibly NULL)
 const char* req_header_get(connection_t* conn, const char* name) {
     return headers_get(conn->request->headers, name);
+}
+
+const char* res_header_get(connection_t* conn, const char* name) {
+    return headers_get(conn->response->headers, name);
 }
 
 // Returns request body size. (Content-Length).
@@ -861,9 +864,9 @@ static void process_request(connection_t* conn) {
         return;
     }
 
-    // Validate version number (1.0 or 1.1)
-    float version = atof(http_protocol + 5);
-    if (version < 1.0 || version > 1.1) {
+    // Check the minor version character
+    char minor_version = http_protocol[7];
+    if (minor_version != '0' && minor_version != '1') {
         send_error_response(conn, StatusHTTPVersionNotSupported);
         return;
     }
