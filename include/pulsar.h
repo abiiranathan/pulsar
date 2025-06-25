@@ -32,8 +32,8 @@ int conn_write(connection_t* conn, const void* data, size_t len);
 int conn_writef(connection_t* conn, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void conn_abort(connection_t* conn);
 void conn_send(connection_t* conn, http_status status, const void* data, size_t length);
-bool conn_set_content_type(connection_t* conn, const char* content_type);
-bool conn_writeheader(connection_t* conn, const char* name, const char* value);
+void conn_set_content_type(connection_t* conn, const char* content_type);
+void conn_writeheader(connection_t* conn, const char* name, const char* value);
 void conn_set_status(connection_t* conn, http_status code);
 
 const char* query_get(connection_t* conn, const char* name);
@@ -49,7 +49,10 @@ const char* get_path_param(connection_t* conn, const char* name);
 HttpMethod http_method_from_string(const char* method);
 const char* http_method_to_string(const HttpMethod method);
 
+// Set user data and an optional free function.
 void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
+
+// Returns the userdata pointer stored with set_userdata or NULL if NONE exists.
 void* get_userdata(connection_t* conn);
 
 #ifdef __cplusplus

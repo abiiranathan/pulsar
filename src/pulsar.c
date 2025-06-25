@@ -415,46 +415,41 @@ void conn_set_status(connection_t* conn, http_status code) {
 }
 
 // Add a custom header
-bool conn_writeheader(connection_t* conn, const char* name, const char* value) {
+void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     assert(name && value);
 
     char* name_ptr  = arena_strdup(conn->arena, name);
     char* value_ptr = arena_strdup(conn->arena, value);
-    if (!name_ptr || !value_ptr)
-        return false;
-
-    return headers_set(conn->arena, conn->response->headers, name_ptr, value_ptr);
+    if (!name_ptr || !value_ptr) {
+        fprintf(stderr, "conn_writeheader: arena_strdup failed\n");
+        return;
+    }
+    headers_set(conn->arena, conn->response->headers, name_ptr, value_ptr);
 }
 
-bool conn_set_content_type(connection_t* conn, const char* content_type) {
-    response_t* res = conn->response;
-    if (res->content_type_set)
-        return true;
-
-    res->content_type_set = conn_writeheader(conn, "Content-Type", content_type);
-    return res->content_type_set;
+void conn_set_content_type(connection_t* conn, const char* content_type) {
+    if (conn->response->content_type_set)
+        return;
+    conn_writeheader(conn, "Content-Type", content_type);
 }
 
 // Write data to response body
 int conn_write(connection_t* conn, const void* data, size_t len) {
-    if (!data || len == 0)
-        return 0;
-
-    HttpMethod method = conn->request->method_type;
-    if (method == HTTP_OPTIONS || method == HTTP_HEAD)
+    if (unlikely(!data || len == 0))
         return 0;
 
     response_t* resp     = conn->response;
     size_t required_size = resp->body_size + len;
-
     if (required_size > resp->body_capacity) {
         size_t new_capacity = resp->body_capacity ? resp->body_capacity * 2 : 1024;
         while (new_capacity < required_size)
             new_capacity *= 2;
 
         char* new_buffer = realloc(resp->body_data, new_capacity);
-        if (!new_buffer)
+        if (!new_buffer) {
+            perror("realloc");
             return 0;
+        }
 
         resp->body_data     = new_buffer;
         resp->body_capacity = new_capacity;
@@ -465,11 +460,18 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
     return len;
 }
 
-// Send a 404 response
+// Send a 404 response (StatusNotFound)
 int conn_notfound(connection_t* conn) {
     conn_set_status(conn, StatusNotFound);
-    conn_set_content_type(conn, "text/plain");
+    conn_set_content_type(conn, CT_PLAIN);
     return conn_write(conn, "404 Not Found", 13);
+}
+
+// Send a 405 response (StatusMethodNotAllowed)
+int conn_method_not_allowed(connection_t* conn) {
+    conn_set_status(conn, StatusMethodNotAllowed);
+    conn_set_content_type(conn, CT_PLAIN);
+    return conn_write(conn, "405 Method Not Found", 20);
 }
 
 int conn_write_string(connection_t* conn, const char* str) {
@@ -560,9 +562,15 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
         buffer_size    = header_size;
     }
 
-    // Skip body for HEAD/OPTIONS
+    // Skip body for HEAD / OPTIONS
     if (method == HTTP_OPTIONS || method == HTTP_HEAD) {
         buffer_size = header_size;
+
+        // Override content-length if it only options
+        // Without this the client will hang!
+        if (method == HTTP_OPTIONS) {
+            content_length = 0;  // don't expect body!
+        }
     }
 
     resp->buffer = malloc(buffer_size);
@@ -680,7 +688,7 @@ path_toolong:
  * ================================================================ */
 
 void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr)) {
-    assert(conn && ptr && free_func);
+    assert(conn && ptr);
     conn->user_data           = ptr;
     conn->user_data_free_func = free_func;
 }
@@ -848,14 +856,11 @@ static void process_request(connection_t* conn) {
 
         execute_all_middleware(conn, route);
 
-        if (method == HTTP_OPTIONS) {
-            goto post_handler;
-        }
-
         if (!conn->abort) {
             route->handler(conn);
         }
     } else {
+        // We are not handling 405 Method Not Allowed.
         conn_notfound(conn);
     }
 
