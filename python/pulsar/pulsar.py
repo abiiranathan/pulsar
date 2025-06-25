@@ -1,5 +1,7 @@
 """
-Pulsar Web Server Python Wrapper with Decorator Support
+Pulsar Web Server.
+
+This is a python wrapper around the C pulsar API.
 """
 import sys
 import ctypes
@@ -327,14 +329,13 @@ def _create_handler_wrapper(c_handler: HandlerFunc):  # type: ignore
     return wrapped_handler
 
 def _create_middleware_wrapper(py_middleware: Middleware):
-    """Wrapper for middleware functions with better error handling"""
     @MiddlewareFunc
-    def wrapped_middleware(conn: Connection)->bool:
+    def wrapped_middleware(conn: Connection):
         req = Request(conn)
         res = Response(conn)
-        result = py_middleware(req, res) 
-        return bool(result)             
+        py_middleware(req, res) 
 
+    # Prevent GC
     _CALLBACK_STORE[id(py_middleware)] = wrapped_middleware
     return wrapped_middleware
 
@@ -433,49 +434,9 @@ class Pulsar:
         return func
     
     def static(self, url_prefix: str, directory: str):
-        """Register static file route"""
+        """Register static file route. Files served efficiently with sendfile syscall."""
         route = lib.register_static_route(url_prefix.encode(),directory.encode())
         if not route:
             raise RuntimeError("Failed to register static route")
         return route
-
-
-# Example usage.
-if __name__ == "__main__":
-    app = Pulsar()
-    
-    def logger(req: Request, res: Response):
-        print(f"{req.method} {req.path}")
-    
-    def auth_middleware(req: Request, res: Response):
-        if not req.get_header("Authorization"):
-            res.send("Unauthorized", status=HttpStatus.UNAUTHORIZED)
-            res.abort()
-            return
-    
-    # Global middleware.
-    # app.use(auth_middleware)
-
-    @app.GET("/")
-    def hello(req: Request, res: Response):
-        res.send("Hello, World!")
-
-    @app.GET("/greet/{name}")
-    def greet(req: Request, res: Response):
-        name = req.get_path_param("name") or "stranger"
-        res.send(f"Hello, {name}!")
-    
-    @app.POST("/echo")
-    def echo(req: Request, res: Response):
-        res.send(req.body)
-    
-    @app.errorhandler
-    def handle_errors(err: Exception, req: Request, res: Response):
-        res.send(f"Error occurred: {str(err)}", status=HttpStatus.INTERNAL_SERVER_ERROR)
-    
-    # Serve static files
-    app.static("/static", ".")
-    
-    # Start server
-    app.run(8080)
 

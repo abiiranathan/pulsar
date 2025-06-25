@@ -1,115 +1,201 @@
-# Pulsar Python Bindings
 
-## Overview
-Python bindings for the Pulsar web server using ctypes, providing a high-performance HTTP server interface.
+# Pulsar Python
+
+[![PyPI version](https://img.shields.io/pypi/v/pulsar-python.svg)](https://pypi.org/project/pulsar-python/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pulsar-python.svg)](https://pypi.org/project/pulsar-python/)
+[![License](https://img.shields.io/pypi/l/pulsar-python.svg)](https://opensource.org/licenses/MIT)
+
+Python bindings for the Pulsar web server, providing a high-performance HTTP server interface with minimal overhead. It is currently linux only.
+
+## Features
+
+- High-performance HTTP server
+- Simple and intuitive API
+- Middleware support
+- Route parameters
+- Static file serving
+- Built-in error handling
+- Low-level access when needed
 
 ## Installation
+
 ```bash
 pip install pulsar-python
 ```
 
 ## Quick Start
+
 ```python
-from pulsar import Pulsar, HttpMethod, HttpStatus
+from pulsar import Pulsar, HttpStatus, HttpMethod, Request, Response
 
-def hello_handler(conn):
-    Pulsar.set_status(conn, HttpStatus.OK)
-    Pulsar.set_content_type(conn, "text/plain")
-    Pulsar.write_string(conn, "Hello World!")
-    return True
+app = Pulsar()
 
-# Register route
-Pulsar.route("/hello", HttpMethod.GET, hello_handler)
+# Simple route
+@app.GET("/")
+def home(req: Request, res: Response):
+    res.send("Hello, World!")
+
+# Route with parameters
+@app.GET("/greet/{name}")
+def greet(req: Request, res: Response):
+    name = req.get_path_param("name")
+    res.send(f"Hello, {name}!")
+
+# POST request handler
+@app.POST("/echo")
+def echo(req: Request, res: Response):
+    res.send(req.body)
+
+# Error handler
+@app.errorhandler
+def handle_errors(err: Exception, req: Request, res: Response):
+    res.send(f"Error: {str(err)}", status=HttpStatus.INTERNAL_SERVER_ERROR)
+
+# Serve static files
+app.static("/static", "./public")
 
 # Start server
-Pulsar.run(8080)
+app.run(port=8080)
 ```
 
 ## API Reference
 
-### Core Functions
-| Function                                                                     | Description                        |
-| ---------------------------------------------------------------------------- | ---------------------------------- |
-| `Pulsar.run(port: int) -> int`                                               | Start the server on specified port |
-| `Pulsar.route(pattern: str, method: HttpMethod, handler: Callable) -> Route` | Register a new route               |
-| `Pulsar.static_route(pattern: str, directory: str) -> Route`                 | Register static file route         |
+### Pulsar Class
 
-### Request Handling
-| Method                            | Description        |
-| --------------------------------- | ------------------ |
-| `get_method(conn) -> str`         | Get HTTP method    |
-| `get_path(conn) -> str`           | Get request path   |
-| `get_body(conn) -> bytes`         | Get request body   |
-| `get_content_length(conn) -> int` | Get content length |
+| Method                                       | Description                        |
+| -------------------------------------------- | ---------------------------------- |
+| `run(port: int = 8080)`                      | Start the server on specified port |
+| `route(path: str, method: str, *middleware)` | Decorator to register routes       |
+| `GET(path: str, *middleware)`                | Decorator for GET routes           |
+| `POST(path: str, *middleware)`               | Decorator for POST routes          |
+| `PUT(path: str, *middleware)`                | Decorator for PUT routes           |
+| `DELETE(path: str, *middleware)`             | Decorator for DELETE routes        |
+| `PATCH(path: str, *middleware)`              | Decorator for PATCH routes         |
+| `OPTIONS(path: str, *middleware)`            | Decorator for OPTIONS routes       |
+| `HEAD(path: str, *middleware)`               | Decorator for HEAD routes          |
+| `static(url_prefix: str, directory: str)`    | Register static file route         |
+| `use(*middleware)`                           | Register global middleware         |
+| `errorhandler(func)`                         | Decorator for error handling       |
 
-### Response Handling
-| Method                                              | Description             |
-| --------------------------------------------------- | ----------------------- |
-| `set_status(conn, status: HttpStatus)`              | Set HTTP status code    |
-| `set_content_type(conn, content_type: str) -> bool` | Set Content-Type header |
-| `write(conn, data: bytes) -> int`                   | Write raw response      |
-| `write_string(conn, text: str) -> int`              | Write text response     |
-| `serve_file(conn, filename: str) -> bool`           | Serve file response     |
+### Request Object
 
-### Middleware
-| Method                                     | Description                |
-| ------------------------------------------ | -------------------------- |
-| `use_global_middleware(*middleware)`       | Register global middleware |
-| `use_route_middleware(route, *middleware)` | Register route middleware  |
+| Property/Method              | Description                    |
+| ---------------------------- | ------------------------------ |
+| `method`                     | HTTP method (GET, POST, etc.)  |
+| `path`                       | Request path                   |
+| `body`                       | Request body as bytes          |
+| `content_length`             | Content length of request body |
+| `get_query_param(name: str)` | Get query parameter by name    |
+| `get_path_param(name: str)`  | Get path parameter by name     |
+| `get_header(name: str)`      | Get request header by name     |
+| `query_params`               | All query parameters (dict)    |
+| `headers`                    | All request headers (dict)     |
+
+### Response Object
+
+| Method                                                 | Description               |
+| ------------------------------------------------------ | ------------------------- |
+| `set_status(status: HttpStatus)`                       | Set HTTP status code      |
+| `set_content_type(content_type: str)`                  | Set Content-Type header   |
+| `set_header(name: str, value: str)`                    | Set response header       |
+| `write(data: Union[bytes, str])`                       | Write response data       |
+| `send(content: Union[str, bytes], status: HttpStatus)` | Send response with status |
+| `send_json(data: Any, status: HttpStatus)`             | Send JSON response        |
+| `send_file(filename: str, content_type: str)`          | Serve file response       |
+| `not_found()`                                          | Send 404 response         |
+| `abort()`                                              | Abort the request         |
 
 ### Enums
-```python
-class HttpMethod(IntEnum):
-    GET = 1
-    POST = 2
-    PUT = 3
-    # ... other methods ...
 
-class HttpStatus(IntEnum):
+```python
+class HttpMethod(enum.IntEnum):
+    GET = 0
+    POST = 1
+    PUT = 2
+    PATCH = 3
+    DELETE = 4
+    HEAD = 5
+    OPTIONS = 6
+
+class HttpStatus(enum.IntEnum):
+    # All standard HTTP status codes
     OK = 200
+    CREATED = 201
+    BAD_REQUEST = 400
+    UNAUTHORIZED = 401
     NOT_FOUND = 404
-    # ... all status codes ...
+    INTERNAL_SERVER_ERROR = 500
+    # ... and many more
 ```
 
 ## Advanced Usage
 
-### User Data
-```python
-def free_func(data):
-    print(f"Cleaning up: {data}")
+### Middleware
 
-def handler(conn):
-    data = {"key": "value"}
-    Pulsar.set_user_data(conn, data, free_func)
-    # ...
+```python
+def logger(req: Request, res: Response):
+    print(f"{req.method} {req.path}")
+
+def auth_middleware(req: Request, res: Response):
+    if not req.get_header("Authorization"):
+        res.send("Unauthorized", status=HttpStatus.UNAUTHORIZED)
+        res.abort()
+
+# Global middleware
+app.use(logger)
+
+# Route-specific middleware
+@app.GET("/protected", auth_middleware)
+def protected_route(req: Request, res: Response):
+    res.send("Secret content")
 ```
 
-### Middleware Chain
-```python
-def auth_middleware(conn):
-    if not Pulsar.get_req_header(conn, "Authorization"):
-        Pulsar.set_status(conn, HttpStatus.UNAUTHORIZED)
-        return False
-    return True
+### Error Handling
 
-Pulsar.use_global_middleware(auth_middleware)
+```python
+@app.errorhandler
+def handle_errors(err: Exception, req: Request, res: Response):
+    if isinstance(err, ValueError):
+        res.send("Bad request", status=HttpStatus.BAD_REQUEST)
+    else:
+        res.send("Server error", status=HttpStatus.INTERNAL_SERVER_ERROR)
+```
+
+### JSON API
+
+```python
+@app.GET("/api/data")
+def get_data(req: Request, res: Response):
+    data = {"message": "Hello", "status": "success"}
+    res.send_json(data)
+
+@app.POST("/api/data")
+def post_data(req: Request, res: Response):
+    try:
+        payload = json.loads(req.body.decode())
+        # Process data...
+        res.send_json({"status": "success"})
+    except json.JSONDecodeError as e:
+        res.send_json({"error": "Invalid JSON"}, status=HttpStatus.BAD_REQUEST)
 ```
 
 ## Platform Support
-- Linux (`libpulsar.so`)
-- macOS (`libpulsar.dylib`)
+
+- [x] Linux (`libpulsar.so`)
+- [] macOS (`libpulsar.dylib`)
 
 ## Requirements
-- Python 3.6+
-- Pre-built Pulsar library in `pulsar/lib/`
 
-## Error Handling
-All functions raise Python exceptions for errors:
-- `ValueError` for invalid arguments
-- `RuntimeError` for server errors
-- `OSError` for platform issues
+- Python 3.8+
+- Pre-built Pulsar library (included in package)
 
-## Performance Notes
-- Uses native ctypes for minimal overhead
-- Zero-copy file serving with `serve_file()`
-- Memory-efficient request/response handling
+## Performance Tips
+
+1. Use `send_file()` for static assets (uses zero-copy file serving)
+2. Minimize middleware for critical paths
+3. Use `bytes` instead of `str` for binary responses
+4. Reuse objects where possible
+
+## License
+
+MIT License. See `LICENSE` file for 
