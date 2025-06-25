@@ -3,14 +3,49 @@
 
 #include <stddef.h>
 
-#define NUM_WORKERS 8             // Number of workers.
-#define MAX_EVENTS 2048           // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE 819      // Buffer size for incoming statusline + headers +/-(part/all of body)
-#define CONNECTION_TIMEOUT 30     // Keep-Alive connection timeout in seconds
-#define MAX_BODY_SIZE (2 << 20)   // Max Request body allowed.
-#define ARENA_CAPACITY 8 * 1024   // Arena memory per connection(8KB). Expand to 16 KB if required.
-#define MAX_ROUTES 64             // Maximum number of routes
-#define MAX_GLOBAL_MIDDLEWARE 32  // maximum number of global middleware.
-#define MAX_ROUTE_MIDDLEWARE 4    // Maximum number of route middleware.
+// Number of workers
+#ifndef NUM_WORKERS
+#define NUM_WORKERS 8
+#endif
+
+// Maximum events for epoll->ready queue
+#ifndef MAX_EVENTS
+#define MAX_EVENTS 4096
+#endif
+
+// Buffer size for incoming statusline + headers +/-(part/all of body)
+#ifndef READ_BUFFER_SIZE
+#define READ_BUFFER_SIZE 8192
+#endif
+
+// Keep-Alive connection timeout in seconds
+#ifndef CONNECTION_TIMEOUT
+#define CONNECTION_TIMEOUT 30
+#endif
+
+// Max Request body allowed. Default 2 MB
+#ifndef MAX_BODY_SIZE
+#define MAX_BODY_SIZE (2 << 20)
+#endif
+
+// Arena memory per connection(8KB). Expand to 16 KB if required
+#ifndef ARENA_CAPACITY
+#define ARENA_CAPACITY (8 * 1024)
+#endif
+
+// Maximum number of routes
+#ifndef MAX_ROUTES
+#define MAX_ROUTES 64
+#endif
+
+// Maximum number of global middleware
+#ifndef MAX_GLOBAL_MIDDLEWARE
+#define MAX_GLOBAL_MIDDLEWARE 32
+#endif
+
+// Maximum number of route middleware
+#ifndef MAX_ROUTE_MIDDLEWARE
+#define MAX_ROUTE_MIDDLEWARE 4
+#endif
 
 #endif /* CONSTANTS_H */
