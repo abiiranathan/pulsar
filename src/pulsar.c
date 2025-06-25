@@ -112,6 +112,8 @@ static volatile sig_atomic_t server_running = 1;
 static HttpHandler global_mw[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
 static size_t global_mw_count                       = 0;   // Global middleware count
 
+static void finalize_response(connection_t* conn, HttpMethod method);
+
 /* ================================================================
  * Signal Handling Functions
  * ================================================================ */
@@ -182,6 +184,7 @@ static bool reset_connection(connection_t* conn) {
     conn->keep_alive          = true;
     conn->user_data           = NULL;
     conn->user_data_free_func = NULL;
+    conn->read_buf[0]         = '\0';
 
     free_request(conn->request);
     free_response(conn->response);
@@ -201,16 +204,37 @@ static bool reset_connection(connection_t* conn) {
 }
 
 void close_connection(int epoll_fd, connection_t* conn) {
+    if (!conn)
+        return;
+
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     close(conn->fd);
 
     free_request(conn->request);
     free_response(conn->response);
+
     if (conn->arena)
         arena_destroy(conn->arena);
     if (conn->read_buf)
         free(conn->read_buf);
     free(conn);
+}
+
+// Send an error response during request processing.
+static void send_error_response(connection_t* conn, http_status status) {
+    conn_set_status(conn, status);
+    conn_set_content_type(conn, CT_PLAIN);
+
+    // use resp status code as it might have already been set.
+    const char* msg = http_status_text(conn->response->status_code);
+    conn_write_string(conn, msg);
+    finalize_response(conn, conn->request->method_type);
+
+    if (conn->response->buffer) {
+        conn->state = STATE_WRITING_RESPONSE;
+    } else {
+        conn->state = STATE_CLOSING;
+    }
 }
 
 /* ================================================================
@@ -326,7 +350,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
     assert(body_available <= content_length);
 
     if (content_length > MAX_BODY_SIZE) {
-        conn->response->status_code = StatusRequestEntityTooLarge;
+        conn_set_status(conn, StatusRequestEntityTooLarge);
         return false;
     }
 
@@ -545,6 +569,14 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
         strlcpy(resp->status_message, "OK", sizeof(resp->status_message));
     }
 
+    if (!resp->headers) {
+        resp->headers = headers_new(conn->arena);
+        if (!resp->headers) {
+            conn->state = STATE_CLOSING;
+            return;
+        }
+    }
+
     // Calculate total response size
     size_t header_size = 512;  // Base headers
 
@@ -582,12 +614,19 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
     resp->buffer_size = buffer_size;
 
     // Build headers
-    int offset = snprintf(resp->buffer, header_size,
+    int offset = snprintf(resp->buffer, header_size,  // header_size is always <= buffer_size.
                           "HTTP/1.1 %d %s\r\n"
                           "Connection: %s\r\n"
                           "Content-Length: %zu\r\n",
                           resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close",
                           content_length);
+
+    // Check for header truncation
+    if (offset < 0 || offset >= (int)header_size) {
+        fprintf(stderr, "Header truncation during write\n");
+        conn->state = STATE_CLOSING;
+        return;
+    }
 
     // Add custom headers
     headers_foreach(resp->headers, hdr) {
@@ -800,36 +839,52 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
 
 static void process_request(connection_t* conn) {
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
-    if (!end_of_headers)
+    if (!end_of_headers) {
+        send_error_response(conn, StatusBadRequest);  // Invalid Http payload.
         return;
+    }
 
     size_t headers_len         = end_of_headers - conn->read_buf + 4;
     conn->request->headers_len = headers_len;
 
     char path[1024];
-    if (sscanf(conn->read_buf, "%7s %1023s", conn->request->method, path) != 2) {
-        fprintf(stderr, "Failed to parse method and path\n");
-        conn->state = STATE_CLOSING;
+    char http_protocol[16];
+    // Parse method, path and HTTP version
+    if (sscanf(conn->read_buf, "%7s %1023s %15s", conn->request->method, path, http_protocol) != 3) {
+        send_error_response(conn, StatusBadRequest);
+        return;
+    }
+
+    // Validate HTTP version
+    if (strncmp(http_protocol, "HTTP/1.", 7) != 0) {
+        send_error_response(conn, StatusHTTPVersionNotSupported);
+        return;
+    }
+
+    // Validate version number (1.0 or 1.1)
+    float version = atof(http_protocol + 5);
+    if (version < 1.0 || version > 1.1) {
+        send_error_response(conn, StatusHTTPVersionNotSupported);
         return;
     }
 
     conn->request->path = arena_strdup(conn->arena, path);
     if (!conn->request->path) {
-        conn->state = STATE_CLOSING;
+        send_error_response(conn, StatusInternalServerError);
         return;
     }
 
     if (!parse_query_params(conn)) {
-        fprintf(stderr, "Failed to parse query parameters\n");
-        conn->state = STATE_CLOSING;
+        send_error_response(conn, StatusInternalServerError);
         return;
     }
 
     HttpMethod method = http_method_from_string(conn->request->method);
-    if (method == HTTP_INVALID) {
-        conn->state = STATE_CLOSING;
+    if (!http_method_valid(method)) {
+        send_error_response(conn, StatusMethodNotAllowed);
         return;
     }
+
     conn->request->method_type = method;
 
     route_t* route = route_match(conn->arena, conn->request->path, method);
@@ -837,34 +892,25 @@ static void process_request(connection_t* conn) {
         conn->request->route = route;
 
         if (!parse_request_headers(conn, method)) {
-            fprintf(stderr, "error parsing request headers\n");
-            conn->state = STATE_CLOSING;
+            send_error_response(conn, StatusInternalServerError);
             return;
         };
 
         if (!parse_request_body(conn, headers_len)) {
-            conn->state = STATE_CLOSING;
+            send_error_response(conn, StatusInternalServerError);
             return;
         }
     }
 
     if (route) {
-        if (route->mw_count == 0 && global_mw_count == 0) {
-            route->handler(conn);
-            goto post_handler;
-        }
-
         execute_all_middleware(conn, route);
-
         if (!conn->abort) {
             route->handler(conn);
         }
     } else {
-        // We are not handling 405 Method Not Allowed.
         conn_notfound(conn);
     }
 
-post_handler:
     if (conn->response->buffer == NULL && conn->response->status_code == 0) {
         conn_set_status(conn, StatusNoContent);
     }
@@ -991,7 +1037,7 @@ static void handle_read(int epoll_fd, connection_t* conn) {
     if (count == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("read");
-            conn->state = STATE_CLOSING;
+            send_error_response(conn, StatusInternalServerError);
         }
         return;
     } else if (count == 0) {
@@ -999,9 +1045,9 @@ static void handle_read(int epoll_fd, connection_t* conn) {
         return;
     }
 
-    conn->last_activity = time(NULL);
-    conn->read_bytes += count;
-    conn->read_buf[conn->read_bytes] = '\0';
+    conn->last_activity   = time(NULL);
+    conn->read_bytes      = count;
+    conn->read_buf[count] = '\0';
 
     process_request(conn);
 

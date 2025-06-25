@@ -8,7 +8,7 @@ ARCH := $(shell uname -m)
 
 # Compiler and Flags
 CC := gcc
-CFLAGS := -Wall -Werror -Wextra -pedantic -O3 -std=c23 -D_GNU_SOURCE -fno-builtin
+CFLAGS := -Wall -Werror -Wextra -pedantic -g -std=c23 -D_GNU_SOURCE -fno-builtin
 LDFLAGS := -lpthread
 INSTALL_PREFIX := /usr/local
 
