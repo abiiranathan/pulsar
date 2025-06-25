@@ -6,7 +6,6 @@ extern "C" {
 #endif
 
 #include <stdint.h>
-#include "arena.h"
 #include "constants.h"
 #include "headers.h"
 #include "method.h"
@@ -75,7 +74,7 @@ route_t* register_static_route(const char* pattern, const char* dir);
 // Entry Point to router.
 // Matches request path and method to a registered route and parses and populates the path
 // parameters. The path params have the lifetime of the arena where they are allocated.
-route_t* route_match(Arena* arena, const char* path, HttpMethod method);
+route_t* route_match(const char* path, HttpMethod method);
 
 #ifdef __cplusplus
 }

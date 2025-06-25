@@ -454,9 +454,9 @@ if __name__ == "__main__":
             return
     
     # Global middleware.
-    app.use(logger)
+    # app.use(auth_middleware)
 
-    @app.GET("/", auth_middleware)
+    @app.GET("/")
     def hello(req: Request, res: Response):
         res.send("Hello, World!")
 

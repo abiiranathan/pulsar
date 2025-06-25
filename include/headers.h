@@ -132,7 +132,7 @@ static inline void headers_clear(headers_t* headers) {
 // Outer loop iterates through all buckets
 // Inner loop traverses each chain in a bucket
 #define headers_foreach(headers, item)                                                                       \
-    for (size_t _bucket = 0; _bucket < MAX_HEADERS; _bucket++)                                               \
+    for (size_t _bucket = 0; _bucket < MAX_HEADERS && headers != NULL; _bucket++)                            \
         for (header_t* item = (headers)->buckets[_bucket]; item != NULL; item = item->next)
 
 #ifdef __cplusplus

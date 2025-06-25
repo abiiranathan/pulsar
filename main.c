@@ -46,17 +46,16 @@ void pathparams_query_params_handler(connection_t* conn) {
     const char* username = get_path_param(conn, "username");
 
     // Should exist, otherwise our router is broken
-    assert(userId && username);
-
     printf("Path Params: \n");
     printf("User ID: %s and username: %s\n", userId, username);
+
+    assert(userId && username);
 
     // Check for query params.
     printf("Query Params: \n");
     headers_foreach(query_params(conn), query) {
         printf("%s = %s\n", query->name, query->value);
     }
-
     conn_writef(conn, "Your user_id is %s and username %s\n", userId, username);
 }
 

@@ -890,7 +890,7 @@ static void process_request(connection_t* conn) {
 
     conn->request->method_type = method;
 
-    route_t* route = route_match(conn->arena, conn->request->path, method);
+    route_t* route = route_match(conn->request->path, method);
     if (route) {
         conn->request->route = route;
 
@@ -914,7 +914,10 @@ static void process_request(connection_t* conn) {
         conn_notfound(conn);
     }
 
-    if (conn->response->buffer == NULL && conn->response->status_code == 0) {
+    bool sending_file = conn->response->file_fd > 0 && conn->response->file_size > 0;
+
+    // If handler did not write any content, send 204.
+    if (!sending_file && (conn->response->buffer == NULL && conn->response->status_code == 0)) {
         conn_set_status(conn, StatusNoContent);
     }
 

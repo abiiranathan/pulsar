@@ -5,6 +5,8 @@
 
 #include "../include/routing.h"
 #include <linux/limits.h>
+#include <stddef.h>
+#include <stdio.h>
 #include "../include/method.h"
 #include "../include/utils.h"
 
@@ -54,14 +56,17 @@ static inline size_t count_path_params(const char* pattern, bool* valid) {
 /**
  * match_path_parameters compares the pattern with the URL and extracts the parameters.
  * The pattern can contain parameters in the form of {name}.
+ * Matches parameters are dynamically allocated and populated in path_params.
+ * Dynamic allocation is necessary b'se the name and value must have program-lifetime
+ * since the params are cached inside the route. MemoryPools/Arenas would cause bugs
+ * when we reset them.
  *
  * @param pattern: The pattern to match
  * @param url_path: The URL path to match
  * @param pathParams: The PathParams struct to store the matched parameters
  * @return true if the pattern and URL match, false otherwise
  */
-static bool match_path_parameters(Arena* arena, const char* pattern, const char* url_path,
-                                  PathParams* path_params) {
+static bool match_path_parameters(const char* pattern, const char* url_path, PathParams* path_params) {
     if (!path_params)  // pattern/url/arena should be valid (since this is internal.)
         return false;
 
@@ -100,11 +105,12 @@ static bool match_path_parameters(Arena* arena, const char* pattern, const char*
 
             size_t name_len = pat - name_start;
 
-            param->name = arena_alloc(arena, name_len + 1);
+            param->name = malloc(name_len + 1);
             if (param->name == NULL) {
-                fprintf(stderr, "arena_alloc failed to allocate path parameter name\n");
-                return false;
+                perror("malloc");
+                goto malloc_fail;
             }
+
             memcpy(param->name, name_start, name_len);
             param->name[name_len] = '\0';
             pat++;  // Skip '}'
@@ -115,10 +121,10 @@ static bool match_path_parameters(Arena* arena, const char* pattern, const char*
                 url++;
             size_t val_len = url - val_start;
 
-            param->value = arena_alloc(arena, val_len + 1);
+            param->value = malloc(val_len + 1);
             if (param->value == NULL) {
-                fprintf(stderr, "arena_alloc failed to allocate path parameter value\n");
-                return false;
+                perror("malloc");
+                goto malloc_fail;
             }
             memcpy(param->value, val_start, val_len);
             param->value[val_len] = '\0';
@@ -138,6 +144,18 @@ static bool match_path_parameters(Arena* arena, const char* pattern, const char*
 
     path_params->match_count = nparams;
     return (*pat == '\0' && *url == '\0' && path_params->total_params == path_params->match_count);
+
+malloc_fail:
+    // Free all params allocated.
+    for (size_t i = 0; i < nparams; i++) {
+        char* name  = path_params->params[i].name;
+        char* value = path_params->params[i].value;
+        if (name)
+            free(name);
+        if (value)
+            free(value);
+    }
+    return false;
 }
 
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
@@ -266,9 +284,9 @@ static inline uint32_t hash_route_key(HttpMethod method, const char* url) {
 }
 
 // Helper function to check if a route matches a URL
-static inline bool route_matches(Arena* arena, route_t* route, const char* url, size_t url_length) {
+static inline bool route_matches(route_t* route, const char* url, size_t url_length) {
     if ((route->flags & NORMAL_ROUTE_FLAG) != 0) {
-        return match_path_parameters(arena, route->pattern, url, route->path_params);
+        return match_path_parameters(route->pattern, url, route->path_params);
     } else if ((route->flags & STATIC_ROUTE_FLAG) != 0) {
         size_t pat_length = strlen(route->pattern);
         return (pat_length <= url_length) && (memcmp(route->pattern, url, pat_length) == 0);
@@ -276,7 +294,7 @@ static inline bool route_matches(Arena* arena, route_t* route, const char* url, 
     return false;
 }
 
-route_t* route_match(Arena* arena, const char* path, HttpMethod method) {
+route_t* route_match(const char* path, HttpMethod method) {
     // 0. Check cache first
     uint32_t key        = hash_route_key(method, path);
     uint32_t cache_slot = key & (ROUTE_CACHE_SIZE - 1);
@@ -309,7 +327,7 @@ route_t* route_match(Arena* arena, const char* path, HttpMethod method) {
     // Search through routes of the matching method
     for (size_t i = first_match; i < global_route_count && global_routes[i].method == method; i++) {
         route_t* current = &global_routes[i];
-        if (route_matches(arena, current, path, url_length)) {
+        if (route_matches(current, path, url_length)) {
             matched_route = current;
             goto caching;
         }
@@ -318,13 +336,13 @@ route_t* route_match(Arena* arena, const char* path, HttpMethod method) {
     // 2. Special case fallbacks
     if (method == HTTP_HEAD) {
         // HEAD falls back to GET, but we'll still process it as HEAD later
-        matched_route = route_match(arena, path, HTTP_GET);
+        matched_route = route_match(path, HTTP_GET);
         goto caching;
     } else if (method == HTTP_OPTIONS) {
         // OPTIONS matches if ANY route exists for this path
         for (size_t i = 0; i < global_route_count; i++) {
             route_t* current = &global_routes[i];
-            if (route_matches(arena, current, path, url_length)) {
+            if (route_matches(current, path, url_length)) {
                 matched_route = current;
                 goto caching;
             }
@@ -340,6 +358,23 @@ route_t* route_match(Arena* arena, const char* path, HttpMethod method) {
     return matched_route;
 }
 
+static inline void free_path_params(PathParams* path_params) {
+    if (!path_params)
+        return;
+
+    PathParam* params = path_params->params;
+    for (size_t i = 0; i < path_params->match_count; i++) {
+        char* name  = params[i].name;
+        char* value = params[i].value;
+        if (name)
+            free(name);
+        if (value)
+            free(value);
+    }
+    free(params);
+    free(path_params);
+}
+
 __attribute__((destructor())) void routing_cleanup(void) {
     for (size_t i = 0; i < global_route_count; i++) {
         route_t* r = &global_routes[i];
@@ -348,10 +383,6 @@ __attribute__((destructor())) void routing_cleanup(void) {
         if (r->dirname) {
             free(r->dirname);
         }
-
-        if (r->path_params) {
-            free(r->path_params->params);
-            free(r->path_params);
-        }
+        free_path_params(r->path_params);
     }
 }
