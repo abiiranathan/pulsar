@@ -914,13 +914,6 @@ static void process_request(connection_t* conn) {
         conn_notfound(conn);
     }
 
-    bool sending_file = conn->response->file_fd > 0 && conn->response->file_size > 0;
-
-    // If handler did not write any content, send 204.
-    if (!sending_file && (conn->response->buffer == NULL && conn->response->status_code == 0)) {
-        conn_set_status(conn, StatusNoContent);
-    }
-
     finalize_response(conn, method);
 
     if (conn->user_data && conn->user_data_free_func) {
