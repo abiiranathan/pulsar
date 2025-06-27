@@ -55,8 +55,9 @@ typedef struct request_t {
 } request_t;
 
 // Connection state structure
-typedef struct __attribute__((aligned(64))) connection_t {
+typedef struct connection_t {
     char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
+    size_t read_bytes;          // Bytes currently in read buffer
     struct request_t* request;  // HTTP request data (arena allocated)
     response_t* response;       // HTTP response data (arena allocated)
     Arena* arena;               // Memory arena for allocations
@@ -64,7 +65,6 @@ typedef struct __attribute__((aligned(64))) connection_t {
     // 4-byte fields
     int fd;                // Client socket file descriptor
     time_t last_activity;  // Timestamp of last I/O activity
-    size_t read_bytes;     // Bytes currently in read buffer
 
     // Connection state
     enum {
@@ -200,7 +200,6 @@ static bool reset_connection(connection_t* conn) {
 
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
-
     return (conn->request && conn->response);
 }
 
@@ -572,14 +571,6 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
         strlcpy(resp->status_message, "OK", sizeof(resp->status_message));
     }
 
-    if (!resp->headers) {
-        resp->headers = headers_new(conn->arena);
-        if (!resp->headers) {
-            conn->state = STATE_CLOSING;
-            return;
-        }
-    }
-
     // Calculate total response size
     size_t header_size = 512;  // Base headers
 
@@ -590,10 +581,10 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
 
     size_t content_length = resp->body_size;
     size_t buffer_size    = header_size + content_length;
-    bool sending_file     = conn->response->file_fd > 0 && conn->response->file_size > 0;
+    bool sending_file     = resp->file_fd > 0 && resp->file_size > 0;
 
     if (sending_file) {
-        content_length = conn->response->file_size;
+        content_length = resp->file_size;
         buffer_size    = header_size;
     }
 
@@ -1121,7 +1112,6 @@ static void handle_write(int epoll_fd, connection_t* conn) {
         res->bytes_sent += sent;
     }
 
-    conn->last_activity = time(NULL);
     if (conn->keep_alive) {
         reset_connection(conn);
 
@@ -1138,7 +1128,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
     }
 }
 
-static void check_timeouts(connection_t* conn) {
+void check_timeouts(connection_t* conn) {
     time_t now = time(NULL);
     if (now - conn->last_activity > CONNECTION_TIMEOUT) {
         conn->state = STATE_CLOSING;
@@ -1160,7 +1150,6 @@ void* worker_thread(void* arg) {
     int epoll_fd       = worker->epoll_fd;
     int worker_id      = worker->worker_id;
     int server_fd      = worker->server_fd;
-
     struct epoll_event server_event;
     server_event.events  = EPOLLIN | EPOLLEXCLUSIVE;
     server_event.data.fd = server_fd;
