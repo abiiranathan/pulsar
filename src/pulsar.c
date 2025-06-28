@@ -23,14 +23,14 @@
 
 // HTTP Response structure
 typedef struct response_t {
+    http_status status_code;  // HTTP status code
+    char status_message[40];  // HTTP status message
+    headers_t* headers;       // Custom headers map data structure.
+
     char* buffer;          // Buffer for outgoing data
     size_t bytes_to_send;  // Total bytes to write
     size_t bytes_sent;     // Bytes already sent
     size_t buffer_size;    // Bytes allocated for buffer
-
-    http_status status_code;  // HTTP status code
-    char status_message[40];  // HTTP status message
-    headers_t* headers;       // Custom headers map data structure.
 
     char* body_data;       // Response body data (written to be conn_write, etc...)
     size_t body_size;      // Current body size (current length of body data)
@@ -166,6 +166,7 @@ static inline void free_request(request_t* req) {
 static inline void free_response(response_t* resp) {
     if (!resp)
         return;
+
     if (resp->buffer)
         free(resp->buffer);
     if (resp->body_data)
@@ -583,6 +584,7 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
     size_t header_size = 512;  // Base headers
 
     // Calculate space needed for headers
+    header_entry* entry;
     headers_foreach(resp->headers, entry) {
         header_size += strlen(entry->name) + strlen(entry->value) + 4;
     }

@@ -13,7 +13,19 @@ void hello_world_handler(connection_t* conn) {
     conn_writeheader(conn, "Set-Cookie", "sessionId=12345; Path=/; HttpOnly");
     conn_writeheader(conn, "Set-Cookie", "theme=dark; Path=/; Secure");
     conn_set_content_type(conn, "text/plain");
-    conn_write(conn, "Hello, World!", 13);
+
+    char buf[8192];
+    FILE* fp = fopen(__FILE__, "r");
+    int n    = fread(buf, 1, sizeof(buf), fp);
+    if (n < 0) {
+        perror("fread");
+        fclose(fp);
+        return;
+    }
+    fclose(fp);
+
+    buf[n] = '\0';  // Null-terminate the buffer
+    conn_write(conn, buf, n);
 }
 
 void json_handler(connection_t* conn) {
@@ -58,6 +70,7 @@ void pathparams_query_params_handler(connection_t* conn) {
 
     // Check for query params.
     printf("Query Params: \n");
+    header_entry* entry;
     headers_foreach(query_params(conn), entry) {
         printf("%s = %s\n", entry->name, entry->value);
     }

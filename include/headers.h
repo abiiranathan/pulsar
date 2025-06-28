@@ -1,163 +1,92 @@
 #ifndef __HEADERS_H__
 #define __HEADERS_H__
 
-#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <string.h>
-#include <xxhash.h>
+#include <strings.h>
 #include "arena.h"
-#include "mimetype.h"
+#include "constants.h"
 #include "utils.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define HEADERS_CAPACITY 64  // Must be power of 2
-static_assert(IS_POWER_OF_TWO(HEADERS_CAPACITY));
-
-#define HEADERS_MASK (HEADERS_CAPACITY - 1)
-
 typedef struct {
     char* name;
     char* value;
-    uint64_t hash;
 } header_entry;
 
 typedef struct {
     header_entry entries[HEADERS_CAPACITY];
-    uint64_t occupied_bitmask;  // Tracks occupied slots
+    size_t count;
     Arena* arena;
 } headers_t;
 
-// Initialize headers map
+// Initialize headers
 static inline headers_t* headers_new(Arena* arena) {
-    headers_t* map = arena_alloc(arena, sizeof(headers_t));
-    if (!map)
+    headers_t* headers = arena_alloc(arena, sizeof(headers_t));
+    if (unlikely(!headers))
         return NULL;
 
-    memset(map, 0, sizeof(headers_t));
-    map->arena = arena;
-    return map;
+    memset(headers, 0, sizeof(headers_t));
+    headers->arena = arena;
+    return headers;
 }
 
-// Fast ASCII lowercase conversion
-static inline void strtolower(char* s) {
-    for (; *s; ++s) {
-        *s = (*s >= 'A' && *s <= 'Z') ? (*s | 0x20) : *s;
-    }
-}
+// Set a header (case-insensitive)
+static inline bool headers_set(headers_t* headers, const char* name, const char* value) {
+    if (unlikely(headers->count >= HEADERS_CAPACITY))
+        return false;
 
-// Find entry using quadratic probing
-static inline header_entry* headers_find_entry(headers_t* map, const char* name, uint64_t hash) {
-    uint32_t index = hash & HEADERS_MASK;
-    uint32_t probe = 0;
+    // Check if header already exists (update if found)
+    for (size_t i = 0; i < headers->count; i++) {
+        if (strcasecmp(headers->entries[i].name, name) == 0) {
+            char* new_value = arena_strdup(headers->arena, value);
+            if (unlikely(!new_value))
+                return false;
 
-    while (1) {
-        header_entry* entry = &map->entries[index];
+            headers->entries[i].value = new_value;
 
-        // Empty slot or matching entry
-        if (!(map->occupied_bitmask & (1ULL << index))) {
-            return entry;
-        }
-        if (entry->hash == hash && strcasecmp(entry->name, name) == 0) {
-            return entry;
-        }
-
-        // Quadratic probing
-        probe++;
-        index = (index + probe) & HEADERS_MASK;
-    }
-}
-
-// Set a header
-static inline bool headers_set(headers_t* map, char* name, char* value) {
-    strtolower(name);
-    uint64_t hash = XXH3_64bits(name, strlen(name));
-
-    // Special case: Set-Cookie can have multiple entries
-    if (unlikely(strcasecmp(name, "set-cookie") == 0)) {
-        // Find an empty slot by linear probing.
-        for (uint32_t probe = 0; probe < HEADERS_CAPACITY; probe++) {
-            uint32_t index = (hash + probe) & HEADERS_MASK;
-            if (!(map->occupied_bitmask & (1ULL << index))) {
-                // Found an empty slot
-                header_entry* entry = &map->entries[index];
-                entry->name         = name;
-                entry->value        = value;
-                entry->hash         = hash;
-                map->occupied_bitmask |= (1ULL << index);
-                return true;
+            // Set-Cookie is a special header that can be set multiple times.
+            if ((strcasecmp(name, "Set-Cookie") == 0)) {
+                goto new_header;
             }
+            return true;
         }
-        return false;  // No space left
     }
 
-    header_entry* entry = headers_find_entry(map, name, hash);
-    uint32_t index      = entry - map->entries;
+new_header:
+    // Add new header with copied strings
+    char* new_name  = arena_strdup(headers->arena, name);
+    char* new_value = arena_strdup(headers->arena, value);
+    if (unlikely(!new_name || !new_value))
+        return false;
 
-    if (likely(!(map->occupied_bitmask & (1ULL << index)))) {
-        // New entry
-        if (map->occupied_bitmask == ~0ULL) {
-            return false;  // Full
-        }
-        entry->name  = name;
-        entry->value = value;
-        entry->hash  = hash;
-        map->occupied_bitmask |= (1ULL << index);
-    } else {
-        // Update existing
-        entry->value = value;
-    }
-
+    headers->entries[headers->count].name  = new_name;
+    headers->entries[headers->count].value = new_value;
+    headers->count++;
     return true;
 }
 
-// Get a header
-static inline const char* headers_get(const headers_t* map, const char* name) {
-    char lower_name[256];
-    size_t len = strlen(name);
-    if (len >= sizeof(lower_name))
-        return NULL;
-
-    // Convert to lowercase (ASCII only)
-    for (size_t i = 0; i < len; i++) {
-        char c        = name[i];
-        lower_name[i] = (c >= 'A' && c <= 'Z') ? (c | 0x20) : c;
-    }
-    lower_name[len] = '\0';
-
-    uint64_t hash  = XXH3_64bits(lower_name, len);
-    uint32_t index = hash & HEADERS_MASK;
-    uint32_t probe = 0;
-
-    while (1) {
-        const header_entry* entry = &map->entries[index];
-
-        if (!(map->occupied_bitmask & (1ULL << index))) {
-            return NULL;
+// Get a header (case-insensitive)
+static inline const char* headers_get(const headers_t* headers, const char* name) {
+    for (size_t i = 0; i < headers->count; i++) {
+        if (strcasecmp(headers->entries[i].name, name) == 0) {
+            return headers->entries[i].value;
         }
-        if (entry->hash == hash && strcmp(entry->name, lower_name) == 0) {
-            return entry->value;
-        }
-
-        probe++;
-        index = (index + probe) & HEADERS_MASK;
     }
+    return NULL;
 }
 
 // Clear all headers
-static inline void headers_clear(headers_t* map) {
-    memset(map->entries, 0, sizeof(map->entries));
-    map->occupied_bitmask = 0;
+static inline void headers_clear(headers_t* headers) {
+    headers->count = 0;
 }
 
 // Iterator
-#define headers_foreach(map, item)                                                                           \
-    for (uint64_t _mask = (map)->occupied_bitmask; _mask; _mask &= _mask - 1)                                \
-        for (uint32_t _pos = __builtin_ctzll(_mask), _done = 0; !_done; _done = 1)                           \
-            for (header_entry* item = &(map)->entries[_pos]; item; item = NULL)
+#define headers_foreach(headers, item)                                                                       \
+    for (size_t _i = 0; _i < (headers)->count && ((item) = &(headers)->entries[_i], 1); _i++)
 
 #ifdef __cplusplus
 }

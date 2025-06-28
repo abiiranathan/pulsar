@@ -28,9 +28,9 @@
 #define MAX_BODY_SIZE (2 << 20)
 #endif
 
-// Arena memory per connection(8KB). Expand to 16 KB if required
+// Arena memory per connection(16KB).
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY (8 * 1024)
+#define ARENA_CAPACITY (16 * 1024)
 #endif
 
 // Maximum number of routes
@@ -46,6 +46,10 @@
 // Maximum number of route middleware
 #ifndef MAX_ROUTE_MIDDLEWARE
 #define MAX_ROUTE_MIDDLEWARE 4
+#endif
+
+#ifndef HEADERS_CAPACITY
+#define HEADERS_CAPACITY 32
 #endif
 
 #endif /* CONSTANTS_H */
