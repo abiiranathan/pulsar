@@ -1,10 +1,12 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -55,26 +57,24 @@ typedef struct request_t {
 } request_t;
 
 // Connection state structure
-typedef struct connection_t {
-    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
-    size_t read_bytes;          // Bytes currently in read buffer
-    struct request_t* request;  // HTTP request data (arena allocated)
-    response_t* response;       // HTTP response data (arena allocated)
-    Arena* arena;               // Memory arena for allocations
-
-    // 4-byte fields
-    int fd;                // Client socket file descriptor
-    time_t last_activity;  // Timestamp of last I/O activity
-
+typedef struct __attribute__((aligned(64))) connection_t {
     // Connection state
     enum {
         STATE_READING_REQUEST,
         STATE_WRITING_RESPONSE,
         STATE_CLOSING,
     } state;
+    // 4-byte fields
+    int fd;                     // Client socket file descriptor
+    time_t last_activity;       // Timestamp of last I/O activity
+    bool keep_alive;            // Keep-alive flag
+    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
+    size_t read_bytes;          // Bytes currently in read buffer
+    struct request_t* request;  // HTTP request data (arena allocated)
+    response_t* response;       // HTTP response data (arena allocated)
+    Arena* arena;               // Memory arena for allocations
 
-    bool keep_alive;  // Keep-alive flag
-    bool abort;       // Abort handler/middleware processing
+    bool abort;  // Abort handler/middleware processing
 
     // User data
     void* user_data;                         // User data pointer per connection
@@ -148,7 +148,6 @@ static request_t* create_request(Arena* arena) {
     req->headers = headers_new(arena);
     if (!req->headers)
         return NULL;
-
     return req;
 }
 
@@ -181,7 +180,6 @@ static inline void free_response(response_t* resp) {
 static bool reset_connection(connection_t* conn) {
     conn->state               = STATE_READING_REQUEST;
     conn->read_bytes          = 0;
-    conn->last_activity       = time(NULL);
     conn->keep_alive          = true;
     conn->user_data           = NULL;
     conn->user_data_free_func = NULL;
@@ -297,7 +295,7 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method) {
             keepalive_set    = true;
         }
 
-        if (!headers_set(conn->arena, conn->request->headers, name, value)) {
+        if (!headers_set(conn->request->headers, name, value)) {
             return false;
         }
 
@@ -333,7 +331,7 @@ static bool parse_query_params(connection_t* conn) {
             char* value_ptr = arena_strdup(conn->arena, value ? value : "");
             if (!key_ptr || !value_ptr)
                 return false;
-            headers_set(conn->arena, conn->request->query_params, key_ptr, value_ptr);
+            headers_set(conn->request->query_params, key_ptr, value_ptr);
         }
         pair = strtok_r(NULL, "&", &save_ptr1);
     }
@@ -450,7 +448,7 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
         fprintf(stderr, "conn_writeheader: arena_strdup failed\n");
         return;
     }
-    headers_set(conn->arena, conn->response->headers, name_ptr, value_ptr);
+    headers_set(conn->response->headers, name_ptr, value_ptr);
 }
 
 void conn_set_content_type(connection_t* conn, const char* content_type) {
@@ -575,10 +573,9 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
     size_t header_size = 512;  // Base headers
 
     // Calculate space needed for headers
-    headers_foreach(resp->headers, hdr) {
-        header_size += strlen(hdr->name) + strlen(hdr->value) + 4;
+    headers_foreach(resp->headers, entry) {
+        header_size += strlen(entry->name) + strlen(entry->value) + 4;
     }
-
     size_t content_length = resp->body_size;
     size_t buffer_size    = header_size + content_length;
     bool sending_file     = resp->file_fd > 0 && resp->file_size > 0;
@@ -623,8 +620,9 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
     }
 
     // Add custom headers
-    headers_foreach(resp->headers, hdr) {
-        offset += snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", hdr->name, hdr->value);
+    headers_foreach(resp->headers, entry) {
+        offset +=
+            snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", entry->name, entry->value);
     }
 
     // End headers
@@ -975,7 +973,13 @@ static int conn_accept(int server_fd, int worker_id) {
     struct sockaddr_in client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
 
+    // Accept with fast path (Linux 4.3+)
+#ifdef __linux__
+    client_fd = accept4(server_fd, (struct sockaddr*)&client_addr, &client_addr_len, SOCK_NONBLOCK);
+#else
     client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+#endif
+
     if (client_fd < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("accept");
@@ -983,20 +987,60 @@ static int conn_accept(int server_fd, int worker_id) {
         return -1;
     }
 
+#ifndef __linux__
     set_nonblocking(client_fd);
+#endif
+
+    // Set high-performance options
+    int yes = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+
+    // Linux-specific optimizations
+#ifdef __linux__
+    // Enable TCP Fast Open (if configured)
+    setsockopt(client_fd, SOL_TCP, TCP_FASTOPEN, &yes, sizeof(yes));
+
+    // Enable TCP Quick ACK
+    setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
+
+    // Set maximum segment size
+    int mss = 1460;  // Standard Ethernet MTU - headers
+    setsockopt(client_fd, IPPROTO_TCP, TCP_MAXSEG, &mss, sizeof(mss));
+
+    int bufsize = 1024 * 1024;  // 1MB buffer
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    int defer_accept = 1;
+    setsockopt(server_fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer_accept, sizeof(defer_accept));
+#endif
+
+    // BSD/Darwin optimizations
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    // Disable SIGPIPE generation
+    setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
+
+    // Enable TCP_NOPUSH (similar to TCP_CORK)
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NOPUSH, &yes, sizeof(yes));
+#endif
+
     return client_fd;
 }
 
 void add_connection_to_worker(int epoll_fd, int client_fd) {
-    connection_t* conn = calloc(1, sizeof(connection_t));
+    connection_t* conn = malloc(sizeof(connection_t));
     if (!conn) {
         perror("calloc");
         close(client_fd);
         return;
     }
+
+    // Zero all fields.
+    memset(conn, 0, sizeof(connection_t));
     conn->fd = client_fd;
 
-    char* read_buf = calloc(1, READ_BUFFER_SIZE);
+    // Allocate read buffer.
+    char* read_buf = malloc(READ_BUFFER_SIZE);
     if (!read_buf) {
         perror("malloc read_buf");
         conn->state = STATE_CLOSING;
@@ -1026,12 +1070,11 @@ static void handle_read(int epoll_fd, connection_t* conn) {
         read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
     if (count == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            perror("read");
-            send_error_response(conn, StatusInternalServerError);
+            conn->state = STATE_CLOSING;  // read: connection reset by peer.
         }
         return;
     } else if (count == 0) {
-        conn->state = STATE_CLOSING;
+        conn->state = STATE_CLOSING;  // Unexpected close.
         return;
     }
 
@@ -1043,7 +1086,7 @@ static void handle_read(int epoll_fd, connection_t* conn) {
 
     if (conn->state == STATE_WRITING_RESPONSE) {
         struct epoll_event event;
-        event.events   = EPOLLOUT | EPOLLET | EPOLLRDHUP;
+        event.events   = EPOLLOUT | EPOLLET;
         event.data.ptr = conn;
 
         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
@@ -1128,13 +1171,6 @@ static void handle_write(int epoll_fd, connection_t* conn) {
     }
 }
 
-void check_timeouts(connection_t* conn) {
-    time_t now = time(NULL);
-    if (now - conn->last_activity > CONNECTION_TIMEOUT) {
-        conn->state = STATE_CLOSING;
-    }
-}
-
 /* ================================================================
  * Worker Thread Functions
  * ================================================================ */
@@ -1168,6 +1204,11 @@ void* worker_thread(void* arg) {
         }
 
         for (int i = 0; i < num_events; i++) {
+            // Simple prefetch
+            if (i + 1 < num_events) {
+                __builtin_prefetch(events[i + 1].data.ptr, 0, 3);
+            }
+
             if (events[i].data.fd == server_fd) {
                 int client_fd = conn_accept(server_fd, worker_id);
                 if (client_fd >= 0) {
@@ -1175,19 +1216,17 @@ void* worker_thread(void* arg) {
                 }
             } else {
                 connection_t* conn = (connection_t*)events[i].data.ptr;
+                int state          = conn->state;
+                uint32_t ev        = events[i].events;
 
-                if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                    conn->state = STATE_CLOSING;
-                }
-
-                switch (conn->state) {
+                switch (state) {
                     case STATE_READING_REQUEST:
-                        if (events[i].events & EPOLLIN) {
+                        if (ev & EPOLLIN) {
                             handle_read(epoll_fd, conn);
                         }
                         break;
                     case STATE_WRITING_RESPONSE:
-                        if (events[i].events & EPOLLOUT) {
+                        if (ev & EPOLLOUT) {
                             handle_write(epoll_fd, conn);
                         }
                         break;
@@ -1195,9 +1234,13 @@ void* worker_thread(void* arg) {
                         break;
                 }
 
-                check_timeouts(conn);
+                // Check timeouts
+                time_t now = time(NULL);
+                if (now - conn->last_activity > CONNECTION_TIMEOUT) {
+                    state = STATE_CLOSING;
+                }
 
-                if (conn->state == STATE_CLOSING) {
+                if (state == STATE_CLOSING) {
                     close_connection(epoll_fd, conn);
                 }
             }

@@ -216,6 +216,26 @@ Various constants can be adjusted in pulsar.h:
 
 ```
 
+## Kernel Tuning (sysctl)
+
+```txt
+# TCP Performance Tuning
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_fastopen = 3
+
+# Socket buffer tuning
+net.core.netdev_max_backlog = 30000
+net.core.somaxconn = 1024
+net.ipv4.tcp_max_syn_backlog = 1024
+
+# Connection reuse
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_tw_recycle = 1  # Warning: Disable if behind NAT
+```
+
 
 ## License
 

@@ -7,14 +7,13 @@ UNAME := $(shell uname -s)
 ARCH := $(shell uname -m)
 
 # Compiler and Flags
-CC := gcc
+CC := clang
 CFLAGS := -Wall -Werror -Wextra -pedantic -O3 -mavx2 -flto -std=c23 -fno-builtin -mtune=native -D_GNU_SOURCE
-LDFLAGS := -lpthread
+LDFLAGS := -lpthread -lxxhash
 INSTALL_PREFIX := /usr/local
 
 # Platform-specific adjustments
 ifeq ($(UNAME), Darwin)
-    CC := clang
     # Universal binary flags for macOS (Intel + ARM)
     CFLAGS += -arch x86_64 -arch arm64
     LIBEXT := dylib
@@ -56,7 +55,7 @@ LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,%.o,$(LIB_SRCS))
 all: $(TARGET)
 
 # Main application build rule
-$(TARGET): $(HEADERS) $(SRC)
+$(TARGET): $(SRC)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Test binary build rule

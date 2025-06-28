@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "include/forms.h"
+#include "include/headers.h"
 #include "include/pulsar.h"
 
 void hello_world_handler(connection_t* conn) {
@@ -53,8 +54,8 @@ void pathparams_query_params_handler(connection_t* conn) {
 
     // Check for query params.
     printf("Query Params: \n");
-    headers_foreach(query_params(conn), query) {
-        printf("%s = %s\n", query->name, query->value);
+    headers_foreach(query_params(conn), entry) {
+        printf("%s = %s\n", entry->name, entry->value);
     }
     conn_writef(conn, "Your user_id is %s and username %s\n", userId, username);
 }

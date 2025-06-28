@@ -48,9 +48,4 @@
 #define MAX_ROUTE_MIDDLEWARE 4
 #endif
 
-// Maximum number of Keep-Alive connections
-#ifndef MAX_KEEPALIVE_CONNECTIONS
-#define MAX_KEEPALIVE_CONNECTIONS 4096
-#endif
-
 #endif /* CONSTANTS_H */
