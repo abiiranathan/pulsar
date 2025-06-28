@@ -15,7 +15,7 @@
 
 // Buffer size for incoming statusline + headers +/-(part/all of body)
 #ifndef READ_BUFFER_SIZE
-#define READ_BUFFER_SIZE 8192
+#define READ_BUFFER_SIZE 4096
 #endif
 
 // Keep-Alive connection timeout in seconds

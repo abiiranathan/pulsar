@@ -8,6 +8,10 @@
 
 void hello_world_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
+
+    // Set-Cookie is a special header that can be set multiple times.
+    conn_writeheader(conn, "Set-Cookie", "sessionId=12345; Path=/; HttpOnly");
+    conn_writeheader(conn, "Set-Cookie", "theme=dark; Path=/; Secure");
     conn_set_content_type(conn, "text/plain");
     conn_write(conn, "Hello, World!", 13);
 }

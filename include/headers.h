@@ -8,6 +8,7 @@
 #include <xxhash.h>
 #include "arena.h"
 #include "mimetype.h"
+#include "utils.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,15 +76,32 @@ static inline bool headers_set(headers_t* map, char* name, char* value) {
     strtolower(name);
     uint64_t hash = XXH3_64bits(name, strlen(name));
 
+    // Special case: Set-Cookie can have multiple entries
+    if (unlikely(strcasecmp(name, "set-cookie") == 0)) {
+        // Find an empty slot by linear probing.
+        for (uint32_t probe = 0; probe < HEADERS_CAPACITY; probe++) {
+            uint32_t index = (hash + probe) & HEADERS_MASK;
+            if (!(map->occupied_bitmask & (1ULL << index))) {
+                // Found an empty slot
+                header_entry* entry = &map->entries[index];
+                entry->name         = name;
+                entry->value        = value;
+                entry->hash         = hash;
+                map->occupied_bitmask |= (1ULL << index);
+                return true;
+            }
+        }
+        return false;  // No space left
+    }
+
     header_entry* entry = headers_find_entry(map, name, hash);
     uint32_t index      = entry - map->entries;
 
-    if (!(map->occupied_bitmask & (1ULL << index))) {
+    if (likely(!(map->occupied_bitmask & (1ULL << index)))) {
         // New entry
         if (map->occupied_bitmask == ~0ULL) {
             return false;  // Full
         }
-
         entry->name  = name;
         entry->value = value;
         entry->hash  = hash;

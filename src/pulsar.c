@@ -1,10 +1,12 @@
 #include <arpa/inet.h>
+#include <assert.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -57,32 +59,25 @@ typedef struct request_t {
 } request_t;
 
 // Connection state structure
-typedef struct __attribute__((aligned(64))) connection_t {
-    // Connection state
+typedef struct connection_t {
     enum {
         STATE_READING_REQUEST,
         STATE_WRITING_RESPONSE,
         STATE_CLOSING,
-    } state;
-    // 4-byte fields
-    int fd;                     // Client socket file descriptor
-    time_t last_activity;       // Timestamp of last I/O activity
-    bool keep_alive;            // Keep-alive flag
-    char* read_buf;             // Buffer for incoming data of size READ_BUFFER_SIZE (arena allocated)
-    size_t read_bytes;          // Bytes currently in read buffer
-    struct request_t* request;  // HTTP request data (arena allocated)
-    response_t* response;       // HTTP response data (arena allocated)
-    Arena* arena;               // Memory arena for allocations
-
-    bool abort;  // Abort handler/middleware processing
-
-    // User data
+    } state;                                 // Connection state
+    int client_fd;                           // Client socket file descriptor
+    time_t last_activity;                    // Timestamp of last I/O activity
+    bool keep_alive;                         // Keep-alive flag
+    bool abort;                              // Abort handler/middleware processing
+    struct request_t* request;               // HTTP request data (arena allocated)
+    response_t* response;                    // HTTP response data (arena allocated)
+    Arena* arena;                            // Memory arena for allocations
     void* user_data;                         // User data pointer per connection
     void (*user_data_free_func)(void* ptr);  // Function to free user-data after request
 } connection_t;
 
 // Middleware context types
-typedef enum { MwGlobal = 1, MwLocal } MwCtxType;
+typedef enum { MW_TYPE_GLOBAL = 1, MW_TYPE_LOCAL } MW_TYPE;
 
 // Context for middleware functions
 typedef struct MiddlewareContext {
@@ -99,7 +94,7 @@ typedef struct MiddlewareContext {
             HttpHandler* r_middleware;  // Array of route middleware functions
         } Local;
     } ctx;
-    MwCtxType ctx_type;
+    MW_TYPE ctx_type;
 } MiddlewareContext;
 
 /* ================================================================
@@ -179,11 +174,9 @@ static inline void free_response(response_t* resp) {
 
 static bool reset_connection(connection_t* conn) {
     conn->state               = STATE_READING_REQUEST;
-    conn->read_bytes          = 0;
     conn->keep_alive          = true;
     conn->user_data           = NULL;
     conn->user_data_free_func = NULL;
-    conn->read_buf[0]         = '\0';
 
     free_request(conn->request);
     free_response(conn->response);
@@ -205,16 +198,15 @@ void close_connection(int epoll_fd, connection_t* conn) {
     if (!conn)
         return;
 
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-    close(conn->fd);
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
+    close(conn->client_fd);
 
     free_request(conn->request);
     free_response(conn->response);
 
     if (conn->arena)
         arena_destroy(conn->arena);
-    if (conn->read_buf)
-        free(conn->read_buf);
+
     free(conn);
 }
 
@@ -239,8 +231,8 @@ static void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-static bool parse_request_headers(connection_t* conn, HttpMethod method) {
-    const char* ptr = conn->read_buf;
+static bool parse_request_headers(connection_t* conn, HttpMethod method, char* read_buf) {
+    const char* ptr = read_buf;
     const char* end = ptr + conn->request->headers_len;
 
     bool clset         = false;
@@ -338,13 +330,13 @@ static bool parse_query_params(connection_t* conn) {
     return true;
 }
 
-static bool parse_request_body(connection_t* conn, size_t headers_len) {
+static bool parse_request_body(connection_t* conn, size_t headers_len, char* read_buf, size_t read_bytes) {
     if (conn->request->content_length == 0)
         return true;
 
     request_t* req        = conn->request;
     size_t content_length = req->content_length;
-    size_t body_available = conn->read_bytes - headers_len;
+    size_t body_available = read_bytes - headers_len;
     assert(body_available <= content_length);
 
     if (content_length > MAX_BODY_SIZE) {
@@ -358,13 +350,13 @@ static bool parse_request_body(connection_t* conn, size_t headers_len) {
         return false;
     }
 
-    memcpy(req->body, conn->read_buf + headers_len, body_available);
+    memcpy(req->body, read_buf + headers_len, body_available);
     req->body_received        = body_available;
     req->body[body_available] = '\0';
 
     while (req->body_received < content_length) {
         size_t remaining = content_length - req->body_received;
-        ssize_t count    = read(conn->fd, req->body + req->body_received, remaining);
+        ssize_t count    = read(conn->client_fd, req->body + req->body_received, remaining);
 
         if (count == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -552,6 +544,15 @@ bool conn_servefile(connection_t* conn, const char* filename) {
         return false;
     }
 
+    char time_buf[64];
+    strftime(time_buf, sizeof(time_buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&stat_buf.st_mtime));
+    conn_writeheader(conn, "Last-Modified", time_buf);
+
+    // Set mime type if not already set
+    if (!conn->response->content_type_set) {
+        const char* mimetype = get_mimetype((char*)filename);
+        conn_set_content_type(conn, mimetype);
+    }
     conn->response->file_fd   = fd;
     conn->response->file_size = stat_buf.st_size;
     return true;
@@ -562,6 +563,15 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
     response_t* resp = conn->response;
     if (resp->headers_written)
         return;
+
+    // Make sure we have a response and headers
+    assert(conn->response && conn->response->headers);
+
+    // Set server headers.
+    conn_writeheader(conn, "Server", "Pulsar/1.0");
+    char date_buf[64];
+    strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&conn->last_activity));
+    conn_writeheader(conn, "Date", date_buf);
 
     // Set default status if not set
     if (resp->status_code <= 0) {
@@ -756,12 +766,12 @@ static inline void execute_middleware_chain(connection_t* conn, const Middleware
     size_t count, index;
 
     switch (mw_ctx->ctx_type) {
-        case MwGlobal:
+        case MW_TYPE_GLOBAL:
             middlewares = mw_ctx->ctx.Global.g_middleware;
             count       = mw_ctx->ctx.Global.g_count;
             index       = mw_ctx->ctx.Global.g_index;
             break;
-        case MwLocal:
+        case MW_TYPE_LOCAL:
             middlewares = mw_ctx->ctx.Local.r_middleware;
             count       = mw_ctx->ctx.Local.r_count;
             index       = mw_ctx->ctx.Local.r_index;
@@ -784,7 +794,7 @@ static inline void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute global middleware
     if (global_mw_count > 0) {
         MiddlewareContext mw_ctx = {
-            .ctx_type = MwGlobal,
+            .ctx_type = MW_TYPE_GLOBAL,
             .ctx      = {.Global = {.g_count = global_mw_count, .g_index = 0, .g_middleware = global_mw}},
         };
         execute_middleware_chain(conn, &mw_ctx);
@@ -798,7 +808,7 @@ static inline void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute route specific middleware.
     if (route->mw_count > 0) {
         MiddlewareContext mw_ctx = {
-            .ctx_type = MwLocal,
+            .ctx_type = MW_TYPE_LOCAL,
             .ctx      = {.Local = {.r_count = route->mw_count, .r_index = 0, .r_middleware = route->mw}},
         };
         execute_middleware_chain(conn, &mw_ctx);
@@ -829,20 +839,19 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
  * Request Processing Functions
  * ================================================================ */
 
-static void process_request(connection_t* conn) {
-    char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
+static void process_request(connection_t* conn, char* read_buf, size_t read_bytes) {
+    char* end_of_headers = strstr(read_buf, "\r\n\r\n");
     if (!end_of_headers) {
         send_error_response(conn, StatusBadRequest);  // Invalid Http payload.
         return;
     }
 
-    size_t headers_len         = end_of_headers - conn->read_buf + 4;
-    conn->request->headers_len = headers_len;
+    conn->request->headers_len = end_of_headers - read_buf + 4;
 
     char path[1024];
     char http_protocol[16];
     // Parse method, path and HTTP version
-    if (sscanf(conn->read_buf, "%7s %1023s %15s", conn->request->method, path, http_protocol) != 3) {
+    if (sscanf(read_buf, "%7s %1023s %15s", conn->request->method, path, http_protocol) != 3) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
@@ -883,12 +892,12 @@ static void process_request(connection_t* conn) {
     if (route) {
         conn->request->route = route;
 
-        if (!parse_request_headers(conn, method)) {
+        if (!parse_request_headers(conn, method, read_buf)) {
             send_error_response(conn, StatusInternalServerError);
             return;
         };
 
-        if (!parse_request_body(conn, headers_len)) {
+        if (!parse_request_body(conn, conn->request->headers_len, read_buf, read_bytes)) {
             send_error_response(conn, StatusInternalServerError);
             return;
         }
@@ -1037,16 +1046,7 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
 
     // Zero all fields.
     memset(conn, 0, sizeof(connection_t));
-    conn->fd = client_fd;
-
-    // Allocate read buffer.
-    char* read_buf = malloc(READ_BUFFER_SIZE);
-    if (!read_buf) {
-        perror("malloc read_buf");
-        conn->state = STATE_CLOSING;
-        return;
-    }
-    conn->read_buf = read_buf;
+    conn->client_fd = client_fd;
 
     if (!reset_connection(conn)) {
         fprintf(stderr, "Error in reset_connection\n");
@@ -1066,30 +1066,29 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
 }
 
 static void handle_read(int epoll_fd, connection_t* conn) {
-    ssize_t count =
-        read(conn->fd, conn->read_buf + conn->read_bytes, READ_BUFFER_SIZE - conn->read_bytes - 1);
-    if (count == -1) {
+    char read_buf[READ_BUFFER_SIZE];
+    ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
+    if (bytes_read == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             conn->state = STATE_CLOSING;  // read: connection reset by peer.
         }
         return;
-    } else if (count == 0) {
+    } else if (bytes_read == 0) {
         conn->state = STATE_CLOSING;  // Unexpected close.
         return;
     }
 
-    conn->last_activity   = time(NULL);
-    conn->read_bytes      = count;
-    conn->read_buf[count] = '\0';
+    conn->last_activity  = time(NULL);
+    read_buf[bytes_read] = '\0';
 
-    process_request(conn);
+    process_request(conn, read_buf, bytes_read);
 
     if (conn->state == STATE_WRITING_RESPONSE) {
         struct epoll_event event;
         event.events   = EPOLLOUT | EPOLLET;
         event.data.ptr = conn;
 
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
             perror("epoll_ctl mod to EPOLLOUT");
             conn->state = STATE_CLOSING;
         }
@@ -1103,7 +1102,7 @@ static ssize_t conn_sendfile(connection_t* conn) {
     ssize_t total_sent = 0;
 
     while (offset < size) {
-        sent = sendfile(conn->fd, conn->response->file_fd, &offset, size - offset);
+        sent = sendfile(conn->client_fd, conn->response->file_fd, &offset, size - offset);
         if (sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 usleep(1000);
@@ -1129,7 +1128,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
 
     // Send headers and contents (except file contents)
     while (remaining > 0) {
-        ssize_t count = write(conn->fd, res->buffer + res->bytes_sent, remaining);
+        ssize_t count = write(conn->client_fd, res->buffer + res->bytes_sent, remaining);
         if (count <= 1) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 perror("write");
@@ -1162,7 +1161,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
         event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
         event.data.ptr = conn;
 
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) {
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
             perror("epoll_ctl mod to EPOLLIN");
             conn->state = STATE_CLOSING;
         }
