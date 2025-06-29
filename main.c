@@ -13,19 +13,8 @@ void hello_world_handler(connection_t* conn) {
     conn_writeheader(conn, "Set-Cookie", "sessionId=12345; Path=/; HttpOnly");
     conn_writeheader(conn, "Set-Cookie", "theme=dark; Path=/; Secure");
     conn_set_content_type(conn, "text/plain");
-
-    char buf[8192];
-    FILE* fp = fopen(__FILE__, "r");
-    int n    = fread(buf, 1, sizeof(buf), fp);
-    if (n < 0) {
-        perror("fread");
-        fclose(fp);
-        return;
-    }
-    fclose(fp);
-
-    buf[n] = '\0';  // Null-terminate the buffer
-    conn_write(conn, buf, n);
+    const char* response = "Hello, World! This is Pulsar HTTP server.\n";
+    conn_write(conn, response, strlen(response));
 }
 
 void json_handler(connection_t* conn) {
