@@ -301,15 +301,19 @@ static inline const char* get_mimetype(char* filename) {
 
     char* extension = last_dot + 1;
 
+    char ext[11] = {0};  // Max length of extension is 10 + null terminator
+    strncpy(ext, extension, sizeof(ext) - 1);
+    ext[sizeof(ext) - 1] = '\0';
+
     // Convert to lowercase
-    for (char* p = extension; *p; ++p) {
-        *p = tolower((unsigned char)*p);
+    for (char* p = ext; *p; ++p) {
+        *p |= 0x20;  // Convert to lowercase using bitwise OR with 0x20(ascii trick)
     }
 
     // O(1) lookup
-    unsigned int hash = hash_func(extension);
+    unsigned int hash = hash_func(ext);
     for (MimeEntry* entry = hash_table[hash]; entry; entry = entry->next) {
-        if (strcmp(extension, entry->ext) == 0) {
+        if (strcmp(ext, entry->ext) == 0) {
             return entry->mimetype;
         }
     }
