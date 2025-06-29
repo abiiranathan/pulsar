@@ -158,6 +158,10 @@ static inline const char* http_status_text(http_status code) {
     return "";  // Return empty string for unknown codes
 }
 
+static inline bool http_status_valid(http_status code) {
+    return code >= StatusContinue && code <= StatusNetworkAuthenticationRequired;
+}
+
 #ifdef __cplusplus
 }
 #endif

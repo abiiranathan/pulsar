@@ -18,6 +18,9 @@
 #define READ_BUFFER_SIZE 4096
 #endif
 
+// Default buffer size (adjust based on expected max headers)
+#define RESPONSE_BUFFER_DEFAULT_SIZE 8192  // 8KB total buffer
+
 // Keep-Alive connection timeout in seconds
 #ifndef CONNECTION_TIMEOUT
 #define CONNECTION_TIMEOUT 30

@@ -8,40 +8,55 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/uio.h>
 
 #include "../include/method.h"
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
 
+// Buffer segment offsets (fixed positions)
+#define RESPONSE_BUFFER_STATUS_OFFSET 0
+#define RESPONSE_BUFFER_HEADERS_OFFSET 256  // Reserve 256B for status line
+#define RESPONSE_BUFFER_BODY_OFFSET 4355    // Reserve 4096 for headers (4355 - 256) + 3 for \r\n\0
+
+// Actual size available for headers without terminating \r\n and null byte.
+#define RESPONSE_HEADER_CAPACITY                                                                             \
+    (RESPONSE_BUFFER_BODY_OFFSET - RESPONSE_BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
+
+// Size available for status line with terminating \r\n.
+#define RESPONSE_STATUS_CAPACITY RESPONSE_BUFFER_HEADERS_OFFSET
+
 /* ================================================================
  * Data Structures and Type Definitions
  * ================================================================ */
+const char* CRLF = "\r\n";
 
 // HTTP Response structure
 typedef struct response_t {
     http_status status_code;  // HTTP status code
-    char status_message[40];  // HTTP status message
-    headers_t* headers;       // Custom headers map data structure.
+    unsigned char* buffer;    // Single response buffer: [STATUS | HEADERS | BODY]
+    size_t buffer_size;       // Total size of the response buffer
+    size_t status_len;        // Actual length of status line
+    size_t headers_len;       // Actual length of headers
+    size_t body_len;          // Actual length of body
 
-    char* buffer;          // Buffer for outgoing data
-    size_t bytes_to_send;  // Total bytes to write
-    size_t bytes_sent;     // Bytes already sent
-    size_t buffer_size;    // Bytes allocated for buffer
+    // Sending state
+    size_t status_sent;    // Bytes of status line sent
+    size_t headers_sent;   // Bytes of headers sent
+    size_t body_sent;      // Bytes of body sent
+    bool headers_written;  // For file transfers
 
-    char* body_data;       // Response body data (written to be conn_write, etc...)
-    size_t body_size;      // Current body size (current length of body data)
-    size_t body_capacity;  // Body buffer capacity. Determines realloc trigger.
-
-    bool headers_written;   // Flag to track if headers are already written
-    bool content_type_set;  // Track whether content-type has already been set
-
-    // File serving with sendfile
-    int file_fd;       // If a file_fd != -1, we are serving a file
-    size_t file_size;  // The size of the file being sent
+    // File transfer state
+    size_t file_size;       // Size of file to send (if applicable)
+    off_t file_offset;      // Offset in file for sendfile
+    int file_fd;            // File descriptor for file to send (if applicable)
+    bool content_type_set;  // Flag to indicate if Content-Type header is set
 } response_t;
 
 // HTTP Request structure
@@ -151,10 +166,19 @@ static response_t* create_response(Arena* arena) {
     if (!resp)
         return NULL;
 
-    memset(resp, 0, sizeof(response_t));
-    resp->file_fd = -1;
-    resp->headers = headers_new(arena);
+    memset(resp, 0, sizeof(response_t));  // Initialize response structure
+    resp->file_fd     = -1;               // No file descriptor initially
+    resp->status_code = StatusOK;         // Default status code
 
+    // Allocate a buffer for the response
+    resp->buffer = malloc(RESPONSE_BUFFER_DEFAULT_SIZE);
+    if (!resp->buffer) {
+        perror("malloc response buffer");
+        return NULL;
+    }
+
+    resp->buffer_size = RESPONSE_BUFFER_DEFAULT_SIZE;
+    memset(resp->buffer, 0, RESPONSE_BUFFER_DEFAULT_SIZE);
     return resp;
 }
 
@@ -169,8 +193,6 @@ static inline void free_response(response_t* resp) {
 
     if (resp->buffer)
         free(resp->buffer);
-    if (resp->body_data)
-        free(resp->body_data);
 }
 
 static bool reset_connection(connection_t* conn) {
@@ -406,10 +428,6 @@ const char* req_header_get(connection_t* conn, const char* name) {
     return headers_get(conn->request->headers, name);
 }
 
-const char* res_header_get(connection_t* conn, const char* name) {
-    return headers_get(conn->response->headers, name);
-}
-
 // Returns request body size. (Content-Length).
 size_t req_content_len(connection_t* conn) {
     return conn->request->content_length;
@@ -421,27 +439,49 @@ size_t req_content_len(connection_t* conn) {
 
 // Set HTTP status code and message
 void conn_set_status(connection_t* conn, http_status code) {
-    response_t* res = conn->response;
-    if (res->status_code > 0)
-        return;  // Indempotent
+    assert(code > StatusContinue && code <= StatusNetworkAuthenticationRequired);
 
-    if (code >= StatusContinue && code <= StatusNetworkAuthenticationRequired) {
-        res->status_code = code;
-        strlcpy(res->status_message, http_status_text(code), sizeof(res->status_message));
+    response_t* res = conn->response;
+    char status_line[RESPONSE_STATUS_CAPACITY];
+    res->status_code       = code;
+    const char* status_msg = http_status_text(code);
+
+    // Clear only the status line segment if it was already set
+    if (res->status_len > 0) {
+        memset(res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, 0, res->status_len);
+        res->status_len = 0;  // Reset length
     }
+
+    int len = snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d %s\r\n", code, status_msg);
+    assert(len > 0 && (size_t)len < sizeof(status_line));
+
+    // Write to fixed status segment
+    memcpy(res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, status_line, len);
+    res->status_len = len;
 }
 
-// Add a custom header
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     assert(name && value);
+    response_t* res = conn->response;
 
-    char* name_ptr  = arena_strdup(conn->arena, name);
-    char* value_ptr = arena_strdup(conn->arena, value);
-    if (!name_ptr || !value_ptr) {
-        fprintf(stderr, "conn_writeheader: arena_strdup failed\n");
-        return;
+    // Calculate required space: "name: value\r\n"
+    size_t required_len = strlen(name) + strlen(value) + 4;  // 4 for ": ", "\r\n"
+
+    // Fail if header exceeds available space
+    if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY) {
+        fprintf(stderr, "Header '%s' rejected (no space in headers segment)\n", name);
+        return;  // or trigger error response
     }
-    headers_set(conn->response->headers, name_ptr, value_ptr);
+
+    // Write directly to headers segment
+    size_t cursize      = RESPONSE_HEADER_CAPACITY - res->headers_len;
+    unsigned char* dest = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_len;
+    int written         = snprintf((char*)dest, cursize, "%s: %s\r\n", name, value);
+    if (written < 0 || (size_t)written >= cursize) {
+        fprintf(stderr, "Header '%s' too long or write error\n", name);
+        return;  // or trigger error response
+    }
+    res->headers_len += written;
 }
 
 void conn_set_content_type(connection_t* conn, const char* content_type) {
@@ -450,30 +490,31 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
     conn_writeheader(conn, "Content-Type", content_type);
 }
 
-// Write data to response body
 int conn_write(connection_t* conn, const void* data, size_t len) {
-    if (unlikely(!data || len == 0))
-        return 0;
+    response_t* res = conn->response;
 
-    response_t* resp     = conn->response;
-    size_t required_size = resp->body_size + len;
-    if (required_size > resp->body_capacity) {
-        size_t new_capacity = resp->body_capacity ? resp->body_capacity * 2 : 1024;
-        while (new_capacity < required_size)
-            new_capacity *= 2;
+    // Check if body segment has space
+    size_t required = RESPONSE_BUFFER_BODY_OFFSET + res->body_len + len;
 
-        char* new_buffer = realloc(resp->body_data, new_capacity);
+    if (required > res->buffer_size) {
+        // Calculate new size more carefully
+        size_t new_size = res->buffer_size;
+        while (new_size < required) {
+            new_size = (new_size < 1024 * 1024) ? new_size * 2 : new_size + 1024 * 1024;
+        }
+
+        unsigned char* new_buffer = realloc(res->buffer, new_size);
         if (!new_buffer) {
             perror("realloc");
             return 0;
         }
-
-        resp->body_data     = new_buffer;
-        resp->body_capacity = new_capacity;
+        res->buffer      = new_buffer;
+        res->buffer_size = new_size;
     }
 
-    memcpy(resp->body_data + resp->body_size, data, len);
-    resp->body_size += len;
+    // Append data
+    memcpy(res->buffer + RESPONSE_BUFFER_BODY_OFFSET + res->body_len, data, len);
+    res->body_len += len;
     return len;
 }
 
@@ -492,7 +533,7 @@ int conn_method_not_allowed(connection_t* conn) {
 }
 
 int conn_write_string(connection_t* conn, const char* str) {
-    return str ? conn_write(conn, str, strlen(str)) : -1;
+    return str ? conn_write(conn, str, strlen(str)) : 0;
 }
 
 __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* fmt, ...) {
@@ -502,12 +543,12 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
     va_end(args);
 
     if (len <= 0)
-        return -1;
+        return 0;  // No data to write
 
     char* buffer = malloc(len + 1);
     if (!buffer) {
         perror("malloc");
-        return -1;
+        return 0;
     }
 
     va_start(args, fmt);
@@ -562,11 +603,30 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 // Build the complete HTTP response
 static void finalize_response(connection_t* conn, HttpMethod method) {
     response_t* resp = conn->response;
-    if (resp->headers_written)
-        return;
 
-    // Make sure we have a response and headers
-    assert(conn->response && conn->response->headers);
+    // Set default status if not set
+    if (resp->status_code <= 0) {
+        conn_set_status(conn, StatusOK);
+    }
+
+    // Default content length is the body length
+    size_t content_length = resp->body_len;
+    char content_length_str[32];
+
+    // OPTIONS method does not have a body, so we set content length to 0.
+    // But HEAD needs to have the same headers as GET.
+    if (method != HTTP_OPTIONS) {
+        // If we are serving a file, use the file size.
+        if (resp->file_fd >= 0) {
+            content_length = resp->file_size;  // Use file size if serving a file
+        }
+    } else {
+        content_length = 0;  // For OPTIONS method, we don't send a body
+    }
+
+    // Set Content-Length header
+    snprintf(content_length_str, sizeof(content_length_str), "%zu", content_length);
+    conn_writeheader(conn, "Content-Length", content_length_str);
 
     // Set server headers.
     conn_writeheader(conn, "Server", "Pulsar/1.0");
@@ -574,82 +634,14 @@ static void finalize_response(connection_t* conn, HttpMethod method) {
     strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&conn->last_activity));
     conn_writeheader(conn, "Date", date_buf);
 
-    // Set default status if not set
-    if (resp->status_code <= 0) {
-        resp->status_code = StatusOK;
-        strlcpy(resp->status_message, "OK", sizeof(resp->status_message));
-    }
+    // This suffices because
+    // RESPONSE_HEADER_CAPACITY = (RESPONSE_BUFFER_BODY_OFFSET - RESPONSE_BUFFER_HEADERS_OFFSET - 2)
+    // So we can safely write \r\n at the end.
+    assert(resp->headers_len <= RESPONSE_HEADER_CAPACITY);
 
-    // Calculate total response size
-    size_t header_size = 512;  // Base headers
-
-    // Calculate space needed for headers
-    header_entry* entry;
-    headers_foreach(resp->headers, entry) {
-        header_size += strlen(entry->name) + strlen(entry->value) + 4;
-    }
-    size_t content_length = resp->body_size;
-    size_t buffer_size    = header_size + content_length;
-    bool sending_file     = resp->file_fd > 0 && resp->file_size > 0;
-
-    if (sending_file) {
-        content_length = resp->file_size;
-        buffer_size    = header_size;
-    }
-
-    // Skip body for HEAD / OPTIONS
-    if (method == HTTP_OPTIONS || method == HTTP_HEAD) {
-        buffer_size = header_size;
-
-        // Override content-length if it only options
-        // Without this the client will hang!
-        if (method == HTTP_OPTIONS) {
-            content_length = 0;  // don't expect body!
-        }
-    }
-
-    resp->buffer = malloc(buffer_size);
-    if (!resp->buffer) {
-        perror("malloc");
-        conn->state = STATE_CLOSING;
-        return;
-    }
-    resp->buffer_size = buffer_size;
-
-    // Build headers
-    int offset = snprintf(resp->buffer, header_size,  // header_size is always <= buffer_size.
-                          "HTTP/1.1 %d %s\r\n"
-                          "Connection: %s\r\n"
-                          "Content-Length: %zu\r\n",
-                          resp->status_code, resp->status_message, conn->keep_alive ? "keep-alive" : "close",
-                          content_length);
-
-    // Check for header truncation
-    if (offset < 0 || offset >= (int)header_size) {
-        fprintf(stderr, "Header truncation during write\n");
-        conn->state = STATE_CLOSING;
-        return;
-    }
-
-    // Add custom headers
-    headers_foreach(resp->headers, entry) {
-        offset +=
-            snprintf(resp->buffer + offset, header_size - offset, "%s: %s\r\n", entry->name, entry->value);
-    }
-
-    // End headers
-    offset += snprintf(resp->buffer + offset, header_size - offset, "\r\n");
-
-    // Add body if present and not a file
-    if (!(method == HTTP_OPTIONS || method == HTTP_HEAD) && !sending_file && resp->body_size > 0 &&
-        resp->body_data) {
-        memcpy(resp->buffer + offset, resp->body_data, resp->body_size);
-        offset += content_length;
-    }
-
-    resp->bytes_to_send   = offset;
-    resp->bytes_sent      = 0;
-    resp->headers_written = true;
+    // Terminate headers with \r\n
+    memcpy(resp->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + resp->headers_len, CRLF, 2);
+    resp->headers_len += 2;
 }
 
 /* ================================================================
@@ -1097,80 +1089,184 @@ static void handle_read(int epoll_fd, connection_t* conn) {
     }
 }
 
-static ssize_t conn_sendfile(connection_t* conn) {
-    off_t size   = (off_t)conn->response->file_size;
-    off_t offset = 0;
-    ssize_t sent;
-    ssize_t total_sent = 0;
-
-    while (offset < size) {
-        sent = sendfile(conn->client_fd, conn->response->file_fd, &offset, size - offset);
-        if (sent < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(1000);
-                continue;
-            }
-            close(conn->response->file_fd);
-            return -1;
-        } else if (sent == 0) {
-            close(conn->response->file_fd);
-            return -1;
-        }
-        total_sent += sent;
-    }
-
-    close(conn->response->file_fd);
-    return total_sent;
-}
-
 static void handle_write(int epoll_fd, connection_t* conn) {
     response_t* res   = conn->response;
     bool sending_file = res->file_fd > 0 && res->file_size > 0;
-    size_t remaining  = res->bytes_to_send - res->bytes_sent;
 
-    // Send headers and contents (except file contents)
-    while (remaining > 0) {
-        ssize_t count = write(conn->client_fd, res->buffer + res->bytes_sent, remaining);
-        if (count <= 1) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                perror("write");
-                conn->state = STATE_CLOSING;
-                return;
-            } else if (count == 0) {
-                perror("write");
-                conn->state = STATE_CLOSING;
-                return;
+    while (1) {
+        ssize_t sent = 0;
+
+        if (sending_file) {
+            /* File transfer mode */
+            if (!res->headers_written) {
+                // Send headers (status + headers)
+                struct iovec iov[2] = {{res->buffer + RESPONSE_BUFFER_STATUS_OFFSET + res->status_sent,
+                                        res->status_len - res->status_sent},
+                                       {res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_sent,
+                                        res->headers_len - res->headers_sent}};
+
+                sent = writev(conn->client_fd, iov, 2);
+                if (sent < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        return;  // Will retry on next EPOLLOUT
+                    }
+                    goto write_error;
+                }
+
+                // Update sent counts
+                if ((size_t)sent <= iov[0].iov_len) {
+                    res->status_sent += sent;
+                } else {
+                    res->status_sent = res->status_len;
+                    res->headers_sent += (sent - iov[0].iov_len);
+                }
+
+                if (res->status_sent == res->status_len && res->headers_sent == res->headers_len) {
+                    res->headers_written = true;
+                }
+                continue;
+            }
+
+            /* Send file data directly */
+            off_t remaining = res->file_size - res->file_offset;
+
+            sent = sendfile(conn->client_fd, res->file_fd, &res->file_offset, remaining);
+            if (sent < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    return;  // Will retry on next EPOLLOUT
+                }
+                perror("sendfile");
+                goto write_error;
+            } else if (sent == 0) {
+                // EOF reached
+                close(res->file_fd);
+                res->file_fd = -1;
+                sending_file = false;
+                continue;
+            }
+
+        } else {
+            /* Normal buffer mode */
+            struct iovec iov[3] = {
+                {res->buffer + RESPONSE_BUFFER_STATUS_OFFSET + res->status_sent,
+                 res->status_len - res->status_sent},
+                {res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_sent,
+                 res->headers_len - res->headers_sent},
+                {res->buffer + RESPONSE_BUFFER_BODY_OFFSET + res->body_sent, res->body_len - res->body_sent}};
+
+            sent = writev(conn->client_fd, iov, 3);
+            if (sent < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    return;  // Will retry on next EPOLLOUT
+                }
+                goto write_error;
+            }
+
+            // Update sent counts
+            size_t remaining = sent;
+            for (int i = 0; i < 3 && remaining > 0; i++) {
+                size_t segment_sent = (remaining < iov[i].iov_len) ? remaining : iov[i].iov_len;
+                if (i == 0)
+                    res->status_sent += segment_sent;
+                else if (i == 1)
+                    res->headers_sent += segment_sent;
+                else
+                    res->body_sent += segment_sent;
+                remaining -= segment_sent;
             }
         }
-        res->bytes_sent += count;
-        remaining -= count;
-    }
 
-    if (sending_file) {
-        res->bytes_to_send += res->file_size;
-        ssize_t sent = conn_sendfile(conn);
-        if (sent <= 0) {
-            conn->state = STATE_CLOSING;
+        // Check completion
+        bool complete =
+            (res->status_sent == res->status_len) && (res->headers_sent == res->headers_len) &&
+            (sending_file ? ((size_t)res->file_offset == res->file_size) : (res->body_sent == res->body_len));
+
+        if (complete) {
+            if (sending_file) {
+                close(res->file_fd);
+                res->file_fd = -1;
+            }
+
+            if (conn->keep_alive) {
+                reset_connection(conn);
+                struct epoll_event event = {.events = EPOLLIN | EPOLLET | EPOLLRDHUP, .data.ptr = conn};
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
+                    perror("epoll_ctl mod to EPOLLIN");
+                    conn->state = STATE_CLOSING;
+                }
+            } else {
+                conn->state = STATE_CLOSING;
+            }
             return;
         }
-        res->bytes_sent += sent;
     }
 
-    if (conn->keep_alive) {
-        reset_connection(conn);
-
-        struct epoll_event event;
-        event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
-        event.data.ptr = conn;
-
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
-            perror("epoll_ctl mod to EPOLLIN");
-            conn->state = STATE_CLOSING;
-        }
-    } else {
+write_error:
+    if (sending_file) {
+        close(res->file_fd);
+        res->file_fd = -1;
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        perror("writev/sendfile");
         conn->state = STATE_CLOSING;
     }
 }
+
+// static void handle_write(int epoll_fd, connection_t* conn) {
+//     response_t* res   = conn->response;
+//     bool sending_file = res->file_fd > 0 && res->file_size > 0;
+
+//     ssize_t sent = 0;
+//     if (sending_file) {
+//         // Use writev to send headers and status, then sendfile for the body.
+//         struct iovec iov[2] = {
+//             {res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, res->status_len},
+//             {res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET, res->headers_len},
+//         };
+//         sent = writev(conn->client_fd, iov, 2);
+//         if (sent < 0) {
+//             goto write_error;
+//         }
+
+//         // Send file with sendfile system call.
+//         ssize_t written = conn_sendfile(conn);
+//         if (written < 0) {
+//             goto write_error;
+//         }
+//         sent += written;
+//     } else {
+//         struct iovec iov[3] = {{res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, res->status_len},
+//                                {res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET, res->headers_len},
+//                                {res->buffer + RESPONSE_BUFFER_BODY_OFFSET, res->body_len}};
+
+//         sent = writev(conn->client_fd, iov, 3);
+//         if (sent < 0) {
+//             goto write_error;
+//         }
+//     }
+
+//     if (conn->keep_alive) {
+//         reset_connection(conn);
+
+//         struct epoll_event event;
+//         event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
+//         event.data.ptr = conn;
+
+//         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
+//             perror("epoll_ctl mod to EPOLLIN");
+//             conn->state = STATE_CLOSING;
+//         }
+//     } else {
+//         conn->state = STATE_CLOSING;
+//     }
+
+// write_error:
+//     if (errno != EAGAIN && errno != EWOULDBLOCK) {
+//         perror("writev/sendfile");
+//         conn->state = STATE_CLOSING;  // Error during write.
+//     }
+//     return;
+// }
 
 /* ================================================================
  * Worker Thread Functions
@@ -1228,6 +1324,8 @@ void* worker_thread(void* arg) {
                         break;
                     case STATE_WRITING_RESPONSE:
                         if (ev & EPOLLOUT) {
+                            printf("Worker %d: Writing response for connection %d\n", worker_id,
+                                   conn->client_fd);
                             handle_write(epoll_fd, conn);
                         }
                         break;
