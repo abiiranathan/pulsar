@@ -93,26 +93,20 @@ typedef struct connection_t {
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
-
-static volatile sig_atomic_t server_running    = 1;
-static volatile sig_atomic_t graceful_shutdown = 0;
-static volatile sig_atomic_t force_shutdown    = 0;
-static int server_fd                           = -1;
-static pthread_mutex_t shutdown_mutex          = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t shutdown_cond            = PTHREAD_COND_INITIALIZER;
-static size_t active_connections               = 0;
-static volatile sig_atomic_t workers_shutdown  = 0;
-
-// Global middleware
+static int server_fd                                = -1;  // Server socket file descriptor
+static volatile sig_atomic_t server_running         = 1;   // Server running flag
+static volatile sig_atomic_t graceful_shutdown      = 0;   // Graceful shutdown flag
+static volatile sig_atomic_t force_shutdown         = 0;   // Force shutdown flag
+static pthread_mutex_t shutdown_mutex               = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t shutdown_cond                 = PTHREAD_COND_INITIALIZER;
+static size_t active_connections                    = 0;   // Number of active connections
+static volatile sig_atomic_t workers_shutdown       = 0;   // Flag to signal workers to shutdown
 static HttpHandler global_mw[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
 static size_t global_mw_count                       = 0;   // Global middleware count
 
 static void finalize_response(connection_t* conn, HttpMethod method);
 
-/* ================================================================
- * Signal Handling Functions
- * ================================================================ */
-
+// Signal handler for graceful shutdown.
 void handle_sigint(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
         pthread_mutex_lock(&shutdown_mutex);
@@ -186,13 +180,13 @@ static response_t* create_response() {
 }
 
 // Free request body. (Request structure is arena-allocated.)
-static inline void free_request(request_t* req) {
+__attribute__((always_inline)) static inline void free_request(request_t* req) {
     if (req && req->body)
         free(req->body);
 }
 
 // Free response buffer and dynmically allocated response itself.
-static inline void free_response(response_t* resp) {
+__attribute__((always_inline)) static inline void free_response(response_t* resp) {
     if (!resp)
         return;
 
@@ -204,7 +198,7 @@ static inline void free_response(response_t* resp) {
     free(resp);
 }
 
-static inline void reset_response(response_t* resp) {
+__attribute__((always_inline)) static inline void reset_response(response_t* resp) {
     // get a reference to the buffer and its size before calling memset.
     size_t current_buffer_size = resp->buffer_size;
     unsigned char* buffer      = resp->buffer;
@@ -222,7 +216,7 @@ static inline void reset_response(response_t* resp) {
     resp->buffer_size = current_buffer_size;
 }
 
-static bool reset_connection(connection_t* conn) {
+__attribute__((always_inline)) static inline bool reset_connection(connection_t* conn) {
     conn->state               = STATE_READING_REQUEST;
     conn->keep_alive          = true;
     conn->user_data           = NULL;
@@ -252,7 +246,7 @@ static bool reset_connection(connection_t* conn) {
     return (conn->request && conn->response);
 }
 
-void close_connection(int epoll_fd, connection_t* conn) {
+__attribute__((always_inline)) static inline void close_connection(int epoll_fd, connection_t* conn) {
     if (!conn)
         return;
 
@@ -279,7 +273,8 @@ void close_connection(int epoll_fd, connection_t* conn) {
 }
 
 // Send an error response during request processing.
-static void send_error_response(connection_t* conn, http_status status) {
+__attribute__((always_inline)) static inline void send_error_response(connection_t* conn,
+                                                                      http_status status) {
     conn_set_status(conn, status);
     conn_set_content_type(conn, CT_PLAIN);
 
@@ -299,7 +294,8 @@ static void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-static bool parse_request_headers(connection_t* conn, HttpMethod method, char* read_buf) {
+__attribute__((always_inline)) static inline bool parse_request_headers(connection_t* conn, HttpMethod method,
+                                                                        char* read_buf) {
     const char* ptr = read_buf;
     const char* end = ptr + conn->request->headers_len;
 
@@ -365,7 +361,7 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
     return true;
 }
 
-static bool parse_query_params(connection_t* conn) {
+__attribute__((always_inline)) static inline bool parse_query_params(connection_t* conn) {
     char* path  = conn->request->path;
     char* query = strchr(path, '?');
     if (!query)
@@ -651,7 +647,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 }
 
 // Build the complete HTTP response
-static void finalize_response(connection_t* conn, HttpMethod method) {
+__attribute__((always_inline)) static inline void finalize_response(connection_t* conn, HttpMethod method) {
     response_t* resp = conn->response;
 
     // Set default status if not set
@@ -802,7 +798,7 @@ const char* get_path_param(connection_t* conn, const char* name) {
  * Middleware Handling Functions
  * ================================================================ */
 
-static inline void execute_all_middleware(connection_t* conn, route_t* route) {
+__attribute__((always_inline)) static inline void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute global middleware
     size_t index = 0;
     if (global_mw_count > 0) {
@@ -939,7 +935,7 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
  * Socket and Connection I/O Functions
  * ================================================================ */
 
-static void set_nonblocking(int fd) {
+__attribute__((always_inline)) static inline void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         perror("fcntl F_GETFL");
@@ -984,7 +980,7 @@ static int create_server_socket(int port) {
     return fd;
 }
 
-static int conn_accept(int worker_id) {
+__attribute__((always_inline)) static inline int conn_accept(int worker_id) {
     (void)worker_id;
 
     int client_fd;
@@ -1045,7 +1041,7 @@ static int conn_accept(int worker_id) {
     return client_fd;
 }
 
-void add_connection_to_worker(int epoll_fd, int client_fd) {
+__attribute__((always_inline)) static inline void add_connection_to_worker(int epoll_fd, int client_fd) {
     connection_t* conn = malloc(sizeof(connection_t));
     if (!conn) {
         perror("calloc");
@@ -1078,7 +1074,7 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
     pthread_mutex_unlock(&shutdown_mutex);
 }
 
-static void handle_read(int epoll_fd, connection_t* conn) {
+__attribute__((always_inline)) static inline void handle_read(int epoll_fd, connection_t* conn) {
     char read_buf[READ_BUFFER_SIZE];
     ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
