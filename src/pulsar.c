@@ -6,7 +6,9 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -503,9 +505,36 @@ void conn_set_status(connection_t* conn, http_status code) {
     res->status_len = len;
 }
 
+// Find for needle in haystack in cas insensitive way.
+__attribute__((always_inline)) static inline char* find_in_string(const char* haystack, const char* needle,
+                                                                  size_t length) {
+    size_t needle_length = strlen(needle);
+    for (size_t i = 0; i < length; i++) {
+        if (i + needle_length > length) {
+            return NULL;
+        }
+        if (strncasecmp(&haystack[i], needle, needle_length) == 0) {
+            return (char*)&haystack[i];
+        }
+    }
+    return NULL;
+}
+
+__attribute__((always_inline)) static inline bool res_header_exists(response_t* res, const char* name) {
+    // Check if header already exists in the buffer
+    unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+    return find_in_string((char*)headers_start, name, res->headers_len);
+}
+
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     // Validate input.
-    if (!name || !value || name[0] == '\0' || value[0] == '\0') {
+    if (unlikely(!name || !value || name[0] == '\0' || value[0] == '\0')) {
+        return;
+    }
+
+    // If header already exists(and is not Set-Cookie), do not overwrite it.
+    if (unlikely(res_header_exists(conn->response, name) && strcasecmp(name, "Set-Cookie") != 0)) {
+        fprintf(stderr, "Header '%s' already exists and will not be overwritten\n", name);
         return;
     }
 

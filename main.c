@@ -19,6 +19,7 @@ void hello_world_handler(connection_t* conn) {
     conn_servefile(conn, __FILE__);
 #else
     conn_set_content_type(conn, "text/plain");
+    conn_writeheader(conn, "content-type", "text/html");
     const char* response = "Hello, World! This is Pulsar HTTP server.\n";
     conn_write(conn, response, strlen(response));
 #endif
