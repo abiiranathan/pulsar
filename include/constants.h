@@ -18,8 +18,11 @@
 #define READ_BUFFER_SIZE 4096
 #endif
 
-// Default buffer size (adjust based on expected max headers)
-#define RESPONSE_BUFFER_DEFAULT_SIZE 8192  // 8KB total buffer
+// Default buffer size for status + headers + body.
+// This resizable with realloc.
+#ifndef WRITE_BUFFER_SIZE
+#define WRITE_BUFFER_SIZE 8192
+#endif
 
 // Keep-Alive connection timeout in seconds
 #ifndef CONNECTION_TIMEOUT
@@ -31,9 +34,9 @@
 #define MAX_BODY_SIZE (2 << 20)
 #endif
 
-// Arena memory per connection(16KB).
+// Arena memory per connection.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY (16 * 1024)
+#define ARENA_CAPACITY (4 * 1024)
 #endif
 
 // Maximum number of routes
@@ -51,8 +54,31 @@
 #define MAX_ROUTE_MIDDLEWARE 4
 #endif
 
+// Maximum number of headers in a request.
 #ifndef HEADERS_CAPACITY
 #define HEADERS_CAPACITY 32
 #endif
+
+// Assertions for all constants
+static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
+static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
+static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
+static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
+static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
+static_assert(HEADERS_CAPACITY > 0, "HEADERS_CAPACITY must be > 0");
+
+// Ensure arena capacity is reasonable
+static_assert(ARENA_CAPACITY >= 1024, "ARENA_CAPACITY must be >= 1024");
+static_assert(ARENA_CAPACITY <= 1024 * 1024, "ARENA_CAPACITY must be <= 1MB");
+
+// Ensure buffer sizes are reasonable
+static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
+static_assert(WRITE_BUFFER_SIZE >= 8192, "WRITE_BUFFER_SIZE must be at least 8KB");
+
+// Ensure timeouts are reasonable
+static_assert(CONNECTION_TIMEOUT >= 10, "CONNECTION_TIMEOUT must be at least 10 seconds");
+
+// Ensure body size is reasonable
+static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
 
 #endif /* CONSTANTS_H */

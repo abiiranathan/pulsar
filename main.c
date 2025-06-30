@@ -16,28 +16,11 @@ void hello_world_handler(connection_t* conn) {
     conn_writeheader(conn, "Set-Cookie", "theme=dark; Path=/; Secure");
 
 #if SENDFILE
-    conn_servefile(conn, __FILE__);  // Serve the current file as a response
+    conn_servefile(conn, __FILE__);
 #else
-    // conn_set_content_type(conn, "text/plain");
-    // const char* response = "Hello, World! This is Pulsar HTTP server.\n";
-    // conn_write(conn, response, strlen(response));
-
-    // test epollout retry by writing a large response
     conn_set_content_type(conn, "text/plain");
-
-#define RESP_SIZE (1 << 20)
-
-    char* response = malloc(RESP_SIZE);  // 10 MB response
-    if (response) {
-        memset(response, 'A', RESP_SIZE - 1);
-        response[RESP_SIZE - 1] = '\0';             // Null-terminate
-        conn_write(conn, response, RESP_SIZE - 1);  // Write 10 MB of data
-        free(response);
-    } else {
-        conn_set_status(conn, StatusInternalServerError);
-        conn_set_content_type(conn, "text/plain");
-        conn_write_string(conn, "Failed to allocate memory for response");
-    }
+    const char* response = "Hello, World! This is Pulsar HTTP server.\n";
+    conn_write(conn, response, strlen(response));
 #endif
 }
 

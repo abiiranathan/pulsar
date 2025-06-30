@@ -77,14 +77,6 @@ typedef enum {
     StatusNetworkAuthenticationRequired = 511
 } http_status;
 
-// http_status_text returns a text for the HTTP status code. It returns the empty
-// string if the code is unknown.
-// https://go.dev/src/net/http/status.go
-
-// http_status_text returns a text for the HTTP status code. It returns the empty
-// string if the code is unknown.
-// https://go.dev/src/net/http/status.go
-
 // Array of status text strings
 static const char* status_texts[] = {
     [StatusContinue]                      = "Continue",
@@ -151,11 +143,14 @@ static const char* status_texts[] = {
     [StatusNetworkAuthenticationRequired] = "Network Authentication Required",
 };
 
+// http_status_text returns a text for the HTTP status code. It returns the empty
+// string if the code is unknown.
+// https://go.dev/src/net/http/status.go
 static inline const char* http_status_text(http_status code) {
     if (code >= StatusContinue && code <= StatusNetworkAuthenticationRequired) {
         return status_texts[code];
     }
-    return "";  // Return empty string for unknown codes
+    return "";
 }
 
 static inline bool http_status_valid(http_status code) {
