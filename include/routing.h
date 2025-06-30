@@ -48,14 +48,14 @@ typedef void (*HttpHandler)(struct connection_t* conn);
 typedef HttpHandler Middleware;  // Middleware function is same as the handler.
 
 typedef struct route_t {
-    int flags;                            // Bit mask for route type. NormalRoute | StaticRoute
-    char* pattern;                        // dynamically allocated route pattern
-    char* dirname;                        // Directory name (for static routes)
-    HttpMethod method;                    // Http method.
-    HttpHandler handler;                  // Handler function pointer
-    PathParams* path_params;              // Path parameters
-    Middleware mw[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
-    size_t mw_count;                      // Number of middleware
+    int flags;                                    // Bit mask for route type. NormalRoute | StaticRoute
+    char* pattern;                                // dynamically allocated route pattern
+    char* dirname;                                // Directory name (for static routes)
+    HttpMethod method;                            // Http method.
+    HttpHandler handler;                          // Handler function pointer
+    PathParams* path_params;                      // Path parameters
+    Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
+    size_t mw_count;                              // Number of middleware
 } route_t;
 
 // Helper to sort routes after registration such that

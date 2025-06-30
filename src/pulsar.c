@@ -1,21 +1,17 @@
 #include <arpa/inet.h>
-#include <assert.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stddef.h>
+#include <stdatomic.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/uio.h>
+#include <unistd.h>
 
 #include "../include/method.h"
 #include "../include/mimetype.h"
@@ -94,33 +90,18 @@ typedef struct connection_t {
     void (*user_data_free_func)(void* ptr);  // Function to free user-data after request
 } connection_t;
 
-// Middleware context types
-typedef enum { MW_TYPE_GLOBAL = 1, MW_TYPE_LOCAL } MW_TYPE;
-
-// Context for middleware functions
-typedef struct MiddlewareContext {
-    union {
-        struct {
-            // Global middleware context
-            size_t g_count;             // Number of global middleware functions
-            size_t g_index;             // Current index in the global middleware array
-            HttpHandler* g_middleware;  // Array of global middleware functions
-        } Global;
-        struct {
-            size_t r_count;             // Number of route middleware functions
-            size_t r_index;             // Current index in the route middleware array
-            HttpHandler* r_middleware;  // Array of route middleware functions
-        } Local;
-    } ctx;
-    MW_TYPE ctx_type;
-} MiddlewareContext;
-
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
 
-// Global flag to keep all workers running
-static volatile sig_atomic_t server_running = 1;
+static volatile sig_atomic_t server_running    = 1;
+static volatile sig_atomic_t graceful_shutdown = 0;
+static volatile sig_atomic_t force_shutdown    = 0;
+static int server_fd                           = -1;
+static pthread_mutex_t shutdown_mutex          = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t shutdown_cond            = PTHREAD_COND_INITIALIZER;
+static size_t active_connections               = 0;
+static volatile sig_atomic_t workers_shutdown  = 0;
 
 // Global middleware
 static HttpHandler global_mw[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
@@ -134,7 +115,27 @@ static void finalize_response(connection_t* conn, HttpMethod method);
 
 void handle_sigint(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
-        server_running = 0;
+        pthread_mutex_lock(&shutdown_mutex);
+
+        if (!graceful_shutdown) {
+            // First signal - initiate graceful shutdown
+            printf("\nInitiating graceful shutdown... (Active connections: %zu)\n", active_connections);
+            graceful_shutdown = 1;
+
+            // Don't set server_running to 0 yet - let workers finish naturally
+            pthread_cond_broadcast(&shutdown_cond);  // Wake up any waiting threads
+        } else if (!force_shutdown) {
+            // Second signal - force immediate shutdown
+            printf("\nForcing immediate shutdown...\n");
+            force_shutdown = 1;
+            server_running = 0;
+            pthread_cond_broadcast(&shutdown_cond);
+        } else {
+            // Third signal - hard exit
+            printf("\nHard exit...\n");
+            exit(EXIT_FAILURE);
+        }
+        pthread_mutex_unlock(&shutdown_mutex);
     }
 }
 
@@ -264,6 +265,16 @@ void close_connection(int epoll_fd, connection_t* conn) {
     if (conn->arena) {
         arena_destroy(conn->arena);
     }
+
+    pthread_mutex_lock(&shutdown_mutex);
+    if (active_connections > 0) {
+        active_connections--;
+        // Signal main thread if this was the last connection during shutdown
+        if (graceful_shutdown && active_connections == 0) {
+            pthread_cond_signal(&shutdown_cond);
+        }
+    }
+    pthread_mutex_unlock(&shutdown_mutex);
     free(conn);
 }
 
@@ -791,60 +802,25 @@ const char* get_path_param(connection_t* conn, const char* name) {
  * Middleware Handling Functions
  * ================================================================ */
 
-static inline void execute_middleware_chain(connection_t* conn, const MiddlewareContext* mw_ctx) {
-    if (conn->abort)
-        return;
-
-    HttpHandler* middlewares;
-    size_t count, index;
-
-    switch (mw_ctx->ctx_type) {
-        case MW_TYPE_GLOBAL:
-            middlewares = mw_ctx->ctx.Global.g_middleware;
-            count       = mw_ctx->ctx.Global.g_count;
-            index       = mw_ctx->ctx.Global.g_index;
-            break;
-        case MW_TYPE_LOCAL:
-            middlewares = mw_ctx->ctx.Local.r_middleware;
-            count       = mw_ctx->ctx.Local.r_count;
-            index       = mw_ctx->ctx.Local.r_index;
-            break;
-        default:
-            assert(0 && "Unknown middleware type");
-    }
-
-    if (!middlewares || count == 0)
-        return;
-
-    while (index < count) {
-        middlewares[index++](conn);
-        if (conn->abort)
-            break;
-    }
-}
-
 static inline void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute global middleware
+    size_t index = 0;
     if (global_mw_count > 0) {
-        MiddlewareContext mw_ctx = {
-            .ctx_type = MW_TYPE_GLOBAL,
-            .ctx      = {.Global = {.g_count = global_mw_count, .g_index = 0, .g_middleware = global_mw}},
-        };
-        execute_middleware_chain(conn, &mw_ctx);
-
-        // If request was aborted, skip route middleware.
-        if (conn->abort) {
-            return;
+        while (index < global_mw_count) {
+            global_mw[index++](conn);
+            if (conn->abort)
+                break;
         }
     }
 
     // Execute route specific middleware.
+    index = 0;
     if (route->mw_count > 0) {
-        MiddlewareContext mw_ctx = {
-            .ctx_type = MW_TYPE_LOCAL,
-            .ctx      = {.Local = {.r_count = route->mw_count, .r_index = 0, .r_middleware = route->mw}},
-        };
-        execute_middleware_chain(conn, &mw_ctx);
+        while (index < route->mw_count) {
+            route->middleware[index++](conn);
+            if (conn->abort)
+                break;
+        }
     }
 }
 
@@ -864,7 +840,7 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
     assert(route->mw_count + count <= MAX_ROUTE_MIDDLEWARE);
 
     for (size_t i = 0; i < count; i++) {
-        route->mw[route->mw_count++] = middleware[i];
+        route->middleware[route->mw_count++] = middleware[i];
     }
 }
 
@@ -1008,7 +984,7 @@ static int create_server_socket(int port) {
     return fd;
 }
 
-static int conn_accept(int server_fd, int worker_id) {
+static int conn_accept(int worker_id) {
     (void)worker_id;
 
     int client_fd;
@@ -1096,6 +1072,10 @@ void add_connection_to_worker(int epoll_fd, int client_fd) {
         conn->state = STATE_CLOSING;
         return;
     }
+
+    pthread_mutex_lock(&shutdown_mutex);
+    active_connections++;
+    pthread_mutex_unlock(&shutdown_mutex);
 }
 
 static void handle_read(int epoll_fd, connection_t* conn) {
@@ -1265,14 +1245,12 @@ write_error:
 typedef struct {
     int epoll_fd;
     int worker_id;
-    int server_fd;
 } WorkerData;
 
 void* worker_thread(void* arg) {
     WorkerData* worker = (WorkerData*)arg;
     int epoll_fd       = worker->epoll_fd;
     int worker_id      = worker->worker_id;
-    int server_fd      = worker->server_fd;
 
     struct epoll_event server_event;
     server_event.events  = EPOLLIN | EPOLLEXCLUSIVE;
@@ -1284,66 +1262,186 @@ void* worker_thread(void* arg) {
     }
 
     struct epoll_event events[MAX_EVENTS] = {};
+
+    printf("Worker %d started\n", worker_id);
+
     while (server_running) {
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
+        if (force_shutdown) {
+            break;
+        }
+
+        int timeout    = graceful_shutdown ? 500 : 1000;  // Shorter timeout during shutdown
+        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, timeout);
+
         if (num_events == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
             perror("epoll_wait");
             continue;
         }
 
+        // During graceful shutdown, don't accept new connections
+        // but continue processing existing ones
+        bool accept_new_connections = !graceful_shutdown;
+
         for (int i = 0; i < num_events; i++) {
-            // Simple prefetch
+            // prefetch next event to improve cache locality.
             if (i + 1 < num_events) {
                 __builtin_prefetch(events[i + 1].data.ptr, 0, 3);
             }
 
             if (events[i].data.fd == server_fd) {
-                int client_fd = conn_accept(server_fd, worker_id);
-                if (client_fd >= 0) {
-                    add_connection_to_worker(epoll_fd, client_fd);
+                if (accept_new_connections) {
+                    // Accept new connection
+                    int client_fd = conn_accept(worker_id);
+                    if (client_fd >= 0) {
+                        add_connection_to_worker(epoll_fd, client_fd);
+                    }
+                } else {
+                    // During shutdown: accept and immediately close to prevent connection backlog
+                    int client_fd = accept(server_fd, NULL, NULL);
+                    if (client_fd >= 0) {
+                        // Send a simple shutdown message
+                        const char* shutdown_msg =
+                            "HTTP/1.1 503 Service Unavailable\r\n"
+                            "Content-Length: 23\r\n"
+                            "Connection: close\r\n\r\n"
+                            "Server is shutting down";
+                        write(client_fd, shutdown_msg, strlen(shutdown_msg));
+                        close(client_fd);
+                    }
                 }
             } else {
                 connection_t* conn = (connection_t*)events[i].data.ptr;
                 int state          = conn->state;
                 uint32_t ev        = events[i].events;
 
-                switch (state) {
-                    case STATE_READING_REQUEST:
-                        if (ev & EPOLLIN) {
-                            handle_read(epoll_fd, conn);
-                        }
-                        break;
-                    case STATE_WRITING_RESPONSE:
-                        if (ev & EPOLLOUT) {
-                            handle_write(epoll_fd, conn);
-                        }
-                        break;
-                    default:
-                        break;
+                // Check for connection errors or hangups
+                if (ev & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+                    conn->state = STATE_CLOSING;
+                } else {
+                    switch (state) {
+                        case STATE_READING_REQUEST:
+                            if (ev & EPOLLIN) {
+                                handle_read(epoll_fd, conn);
+                            }
+                            break;
+                        case STATE_WRITING_RESPONSE:
+                            if (ev & EPOLLOUT) {
+                                handle_write(epoll_fd, conn);
+                            }
+                            break;
+                        default:
+                            break;
+                    }
                 }
 
-                // Check timeouts
-                time_t now = time(NULL);
-                if (now - conn->last_activity > CONNECTION_TIMEOUT) {
-                    state = STATE_CLOSING;
+                // Check timeouts (shorter timeout during shutdown)
+                time_t now          = time(NULL);
+                int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
+                if (now - conn->last_activity > timeout_seconds) {
+                    conn->state = STATE_CLOSING;
                 }
 
-                if (state == STATE_CLOSING) {
+                if (conn->state == STATE_CLOSING) {
                     close_connection(epoll_fd, conn);
                 }
             }
         }
+
+        // During graceful shutdown, check if we should exit
+        if (graceful_shutdown && num_events == 0) {
+            pthread_mutex_lock(&shutdown_mutex);
+            bool no_connections = (active_connections == 0);
+            pthread_mutex_unlock(&shutdown_mutex);
+
+            if (no_connections) {
+                break;
+            }
+        }
     }
 
-    // Cleanup worker resources
+    // Remove server socket from epoll
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, server_fd, NULL) < 0) {
         perror("epoll_ctl DEL for server socket");
     }
+
+    // Force close any remaining connections
+    struct epoll_event evs[MAX_EVENTS];
+    int num_events = epoll_wait(epoll_fd, evs, MAX_EVENTS, 0);  // Non-blocking
+    for (int i = 0; i < num_events; i++) {
+        if (evs[i].data.fd != server_fd) {
+            connection_t* conn = (connection_t*)evs[i].data.ptr;
+            if (conn) {
+                close_connection(epoll_fd, conn);
+            }
+        }
+    }
+
+    close(epoll_fd);
+
+    // Signal that this worker has shut down
+    pthread_mutex_lock(&shutdown_mutex);
+    workers_shutdown++;
+    pthread_cond_signal(&shutdown_cond);
+    pthread_mutex_unlock(&shutdown_mutex);
     return NULL;
 }
 
+// Wait for all workers to shut down gracefully or forcefully.
+void wait_for_workers_shutdown(pthread_t* workers, int timeout_seconds) {
+    // Main server loop - wait for shutdown conditions
+    pthread_mutex_lock(&shutdown_mutex);
+    while (server_running) {
+        if (graceful_shutdown) {
+            // Wait for either all connections to close or force shutdown
+            while (active_connections > 0 && !force_shutdown) {
+                struct timespec timeout;
+                clock_gettime(CLOCK_REALTIME, &timeout);
+                timeout.tv_sec += timeout_seconds;  // Wait up to timeout seconds
+
+                int result = pthread_cond_timedwait(&shutdown_cond, &shutdown_mutex, &timeout);
+                if (result == ETIMEDOUT) {
+                    printf("Shutdown timeout... Active connections: %zu\n", active_connections);
+                    break;
+                }
+            }
+
+            if (active_connections > 0) {
+                printf("Forcing shutdown with %zu active connections\n", active_connections);
+            }
+            server_running = 0;  // Signal workers to stop
+            break;
+        }
+
+        // Wait for shutdown signal
+        pthread_cond_wait(&shutdown_cond, &shutdown_mutex);
+    }
+    pthread_mutex_unlock(&shutdown_mutex);
+
+    // Wait for all workers to shut down
+    pthread_mutex_lock(&shutdown_mutex);
+    while (workers_shutdown < NUM_WORKERS) {
+        struct timespec timeout;
+        clock_gettime(CLOCK_REALTIME, &timeout);
+        timeout.tv_sec += 10;  // 10 second timeout
+
+        if (pthread_cond_timedwait(&shutdown_cond, &shutdown_mutex, &timeout) == ETIMEDOUT) {
+            printf("Timeout waiting for workers, forcing shutdown\n");
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shutdown_mutex);
+
+    // Join all worker threads
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        pthread_join(workers[i], NULL);
+    }
+}
+
 int pulsar_run(int port) {
-    int server_fd = create_server_socket(port);
+    server_fd = create_server_socket(port);
     set_nonblocking(server_fd);
 
     pthread_t workers[NUM_WORKERS];
@@ -1352,6 +1450,7 @@ int pulsar_run(int port) {
     install_signal_handler();
     sort_routes();
 
+    // Initialize worker data and create workers
     for (int i = 0; i < NUM_WORKERS; i++) {
         int epoll_fd = epoll_create1(0);
         if (epoll_fd == -1) {
@@ -1361,7 +1460,6 @@ int pulsar_run(int port) {
 
         worker_data[i].epoll_fd  = epoll_fd;
         worker_data[i].worker_id = i;
-        worker_data[i].server_fd = server_fd;
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
             perror("pthread_create");
@@ -1369,12 +1467,17 @@ int pulsar_run(int port) {
         }
     }
 
+    usleep(1000);  // Give workers time to start
     printf("Server with %d workers listening on port %d\n", NUM_WORKERS, port);
+    printf("Press Ctrl+C once for graceful shutdown, twice for immediate shutdown\n");
 
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        pthread_join(workers[i], NULL);
-    }
+    wait_for_workers_shutdown(workers, SHUTDOWN_TIMEOUT_SECONDS);
 
+    // Close server socket
     close(server_fd);
+
+    // Cleanup the mutext and condition variable
+    pthread_mutex_destroy(&shutdown_mutex);
+    pthread_cond_destroy(&shutdown_cond);
     return 0;
 }

@@ -189,7 +189,7 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 
     // Initialize route middleware
     r->mw_count = 0;
-    memset(r->mw, 0, sizeof(r->mw));
+    memset(r->middleware, 0, sizeof(r->middleware));
 
     // Increment global count
     global_route_count++;

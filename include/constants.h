@@ -59,6 +59,10 @@
 #define HEADERS_CAPACITY 32
 #endif
 
+#ifndef SHUTDOWN_TIMEOUT_SECONDS
+#define SHUTDOWN_TIMEOUT_SECONDS 10
+#endif
+
 // Assertions for all constants
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
@@ -80,5 +84,8 @@ static_assert(CONNECTION_TIMEOUT >= 10, "CONNECTION_TIMEOUT must be at least 10 
 
 // Ensure body size is reasonable
 static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
+
+// Ensure shutdown timeout is reasonable
+static_assert(SHUTDOWN_TIMEOUT_SECONDS > 0, "SHUTDOWN_TIMEOUT_SECONDS must be > 0");
 
 #endif /* CONSTANTS_H */
