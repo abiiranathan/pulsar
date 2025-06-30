@@ -207,15 +207,6 @@ const char* req_path(connection_t* conn);
 size_t req_content_len(connection_t* conn);
 
 /**
- * @brief Gets a response header value
- *
- * @param conn The connection object
- * @param name Header name
- * @return const char* Header value or NULL if not found
- */
-const char* res_header_get(connection_t* conn, const char* name);
-
-/**
  * @brief Gets a path parameter value
  *
  * @param conn The connection object
