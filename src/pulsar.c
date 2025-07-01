@@ -511,42 +511,27 @@ void conn_set_status(connection_t* conn, http_status code) {
     res->status_len = len;
 }
 
-// Find for needle in haystack in cas insensitive way.
-INLINE char* find_in_string(const char* haystack, const char* needle, size_t length) {
-    size_t needle_length = strlen(needle);
-    for (size_t i = 0; i < length; i++) {
-        if (i + needle_length > length) {
-            return NULL;
-        }
-        if (strncasecmp(&haystack[i], needle, needle_length) == 0) {
-            return (char*)&haystack[i];
-        }
-    }
-    return NULL;
-}
-
-INLINE bool res_header_exists(response_t* res, const char* name) {
-    // Check if header already exists in the buffer
+INLINE bool res_header_exists(response_t* res, const char* name, size_t name_len) {
     unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
-    return find_in_string((char*)headers_start, name, res->headers_len);
+    return pulsar_memmem(headers_start, res->headers_len, name, name_len);
 }
 
 // Get the value of a response header. Returns a dynamically allocated char* pointer or NULL
 // If header does not exist or malloc fails.
 char* res_header_get(connection_t* conn, const char* name) {
-    // Check if header already exists in the buffer
-    response_t* res        = conn->response;
-    unsigned char* headers = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+    response_t* res              = conn->response;
+    unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
 
-    char* ptr = find_in_string((char*)headers, name, res->headers_len);
-    if (ptr == NULL)
-        return NULL;
+    char* ptr = memmem(headers_start, res->headers_len, name, strlen(name));
+    if (!ptr) {
+        return NULL;  // Header not found
+    }
 
     // move past name, colon and space
     ptr += (strlen(name) + 2);
 
     // Find the next \r\n to get the response value.
-    char* value_end = find_in_string(ptr, "\r\n", res->headers_len);
+    char* value_end = memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
     if (!value_end)
         return NULL;
 
@@ -559,8 +544,6 @@ char* res_header_get(connection_t* conn, const char* name) {
 
     memcpy(header, ptr, len);
     header[len] = '\0';
-
-    printf("Allocating header: %p, name: %s, value: %s\n", (void*)header, name, header);
     return header;
 }
 
@@ -568,22 +551,24 @@ char* res_header_get(connection_t* conn, const char* name) {
 // Returns true on success or false if buffer is very small or header not found.
 bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size) {
     // Check if header already exists in the buffer
-    response_t* res        = conn->response;
-    unsigned char* headers = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+    response_t* res              = conn->response;
+    unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
 
-    char* ptr = find_in_string((char*)headers, name, res->headers_len);
-    if (ptr == NULL)
-        return false;
+    char* ptr = memmem(headers_start, res->headers_len, name, strlen(name));
+    if (!ptr) {
+        return NULL;  // Header not found
+    }
 
     // move past name, colon and space
     ptr += (strlen(name) + 2);
 
     // Find the next \r\n to get the response value.
-    char* value_end = find_in_string(ptr, "\r\n", res->headers_len);
+    char* value_end = memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
     if (!value_end)
-        return false;
+        return NULL;
 
     size_t len = value_end - ptr;
+    assert(len > 0);
 
     // Destination buffer is too small.
     if (dest_size <= len + 1) {
@@ -601,28 +586,25 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
         return;
     }
 
+    response_t* res = conn->response;
+    size_t name_len = strlen(name);
+
+#if DETECT_DUPLICATE_RES_HEADERS
     // If header already exists(and is not Set-Cookie), do not overwrite it.
-    if (unlikely(res_header_exists(conn->response, name) && strcasecmp(name, "Set-Cookie") != 0)) {
-        // fprintf(stderr, "Header '%s' already exists and will not be overwritten\n", name);
+    if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0)
         return;
-    }
+#endif
 
-    response_t* res     = conn->response;
-    size_t required_len = strlen(name) + strlen(value) + 4;  // 4 for ": ", "\r\n"
-
-    // Fail if header exceeds available space
-    if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY) {
-        // fprintf(stderr, "Header '%s' rejected (no space in headers segment)\n", name);
-        return;
-    }
+    size_t required_len = name_len + strlen(value) + 4;  // 4 for ": ", "\r\n"
+    if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY)
+        return;  // Header too large to fit in the buffer
 
     // Write directly to headers segment
     size_t cursize      = RESPONSE_HEADER_CAPACITY - res->headers_len;
     unsigned char* dest = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_len;
     int written         = snprintf((char*)dest, cursize, "%s: %s\r\n", name, value);
     if (written < 0 || (size_t)written >= cursize) {
-        // fprintf(stderr, "Header '%s' too long or write error\n", name);
-        return;
+        return;  // Error formatting header or buffer too small
     }
     res->headers_len += written;
 }

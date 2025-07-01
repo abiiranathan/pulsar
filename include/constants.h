@@ -3,6 +3,12 @@
 
 #include <stddef.h>
 
+// If 1, duplicate response headers are detected and ignored.
+// However this may have a small performance impact.
+#ifndef DETECT_DUPLICATE_RES_HEADERS
+#define DETECT_DUPLICATE_RES_HEADERS 0
+#endif
+
 // Number of workers
 #ifndef NUM_WORKERS
 #define NUM_WORKERS 8

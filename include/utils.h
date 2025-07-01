@@ -15,6 +15,10 @@ extern "C" {
 #include <sys/stat.h>
 #include <unistd.h>
 
+// Fast memmem implementation
+// Uses AVX intrinsics for better performance on x86/x86_64.
+#include "memmem.h"
+
 #define UNUSED(var) ((void)var)
 
 #if defined(__GNUC__) || defined(__clang__)
