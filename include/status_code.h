@@ -146,14 +146,14 @@ static const char* status_texts[] = {
 // http_status_text returns a text for the HTTP status code. It returns the empty
 // string if the code is unknown.
 // https://go.dev/src/net/http/status.go
-static inline const char* http_status_text(http_status code) {
+__attribute__((always_inline)) static inline const char* http_status_text(http_status code) {
     if (code >= StatusContinue && code <= StatusNetworkAuthenticationRequired) {
         return status_texts[code];
     }
     return "";
 }
 
-static inline bool http_status_valid(http_status code) {
+__attribute__((always_inline)) inline bool http_status_valid(http_status code) {
     return code >= StatusContinue && code <= StatusNetworkAuthenticationRequired;
 }
 

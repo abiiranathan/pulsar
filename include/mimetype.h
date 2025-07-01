@@ -275,8 +275,9 @@ static unsigned int hash_func(const char* str) {
     return hash & (HASH_TABLE_SIZE - 1);  // Fast alternative to modulo
 }
 
-// Initialize hashes at runtime
-static inline void init_mime_table() {
+// Initialize hashes for mime types. Must be called before calling
+// get_mimetype.
+void init_mimetypes() {
     for (size_t i = 0; i < MIME_MAPPING_SIZE; i++) {
         unsigned int hash    = hash_func(mime_entries[i].ext);
         mime_entries[i].next = hash_table[hash];
@@ -285,12 +286,6 @@ static inline void init_mime_table() {
 }
 
 static inline const char* get_mimetype(char* filename) {
-    static int initialized = 0;
-    if (!initialized) {
-        init_mime_table();
-        initialized = 1;
-    }
-
     if (!filename)
         return DEFAULT_CONTENT_TYPE;
 

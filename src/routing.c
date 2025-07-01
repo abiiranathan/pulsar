@@ -4,9 +4,6 @@
 // if a constraint is violated.
 
 #include "../include/routing.h"
-#include <linux/limits.h>
-#include <stddef.h>
-#include <stdio.h>
 #include "../include/method.h"
 #include "../include/utils.h"
 
@@ -19,7 +16,7 @@ static size_t global_route_count         = 0;
 
 // Count the number of path parameters in pattern.
 // If there is an invalid (unterminated) parameter, valid is updated to false.
-static inline size_t count_path_params(const char* pattern, bool* valid) {
+INLINE size_t count_path_params(const char* pattern, bool* valid) {
     const char* ptr = pattern;
     size_t count    = 0;
     *valid          = true;
@@ -249,6 +246,8 @@ static int compare_routes(const void* a, const void* b) {
 }
 
 static int global_sort_state = 0;
+
+// Sort defined routes so we can use binary search.
 void sort_routes(void) {
     if (global_sort_state == 0 && global_route_count > 0) {
         qsort(global_routes, global_route_count, sizeof(route_t), compare_routes);
@@ -264,7 +263,7 @@ typedef struct {
 static RouteCacheEntry route_cache[ROUTE_CACHE_SIZE];
 
 // Generate a uint32_t hash of the method and url using FNV-1a hash.
-static inline uint32_t hash_route_key(HttpMethod method, const char* url) {
+INLINE uint32_t hash_route_key(HttpMethod method, const char* url) {
     // FNV-1a hash.
     uint32_t hash = 2166136261u;
 
@@ -284,7 +283,7 @@ static inline uint32_t hash_route_key(HttpMethod method, const char* url) {
 }
 
 // Helper function to check if a route matches a URL
-static inline bool route_matches(route_t* route, const char* url, size_t url_length) {
+INLINE bool route_matches(route_t* route, const char* url, size_t url_length) {
     if ((route->flags & NORMAL_ROUTE_FLAG) != 0) {
         return match_path_parameters(route->pattern, url, route->path_params);
     } else if ((route->flags & STATIC_ROUTE_FLAG) != 0) {
@@ -357,8 +356,7 @@ route_t* route_match(const char* path, HttpMethod method) {
     }
     return matched_route;
 }
-
-static inline void free_path_params(PathParams* path_params) {
+INLINE void free_path_params(PathParams* path_params) {
     if (!path_params)
         return;
 

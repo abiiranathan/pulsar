@@ -95,16 +95,16 @@ typedef struct connection_t {
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
-static int server_fd                                = -1;  // Server socket file descriptor
-static volatile sig_atomic_t server_running         = 1;   // Server running flag
-static volatile sig_atomic_t graceful_shutdown      = 0;   // Graceful shutdown flag
-static volatile sig_atomic_t force_shutdown         = 0;   // Force shutdown flag
-static pthread_mutex_t shutdown_mutex               = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t shutdown_cond                 = PTHREAD_COND_INITIALIZER;
-static size_t active_connections                    = 0;   // Number of active connections
-static volatile sig_atomic_t workers_shutdown       = 0;   // Flag to signal workers to shutdown
-static HttpHandler global_mw[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
-static size_t global_mw_count                       = 0;   // Global middleware count
+static int server_fd                                        = -1;  // Server socket file descriptor
+static volatile sig_atomic_t server_running                 = 1;   // Server running flag
+static volatile sig_atomic_t graceful_shutdown              = 0;   // Graceful shutdown flag
+static volatile sig_atomic_t force_shutdown                 = 0;   // Force shutdown flag
+static pthread_mutex_t shutdown_mutex                       = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t shutdown_cond                         = PTHREAD_COND_INITIALIZER;
+static size_t active_connections                            = 0;   // Number of active connections
+static volatile sig_atomic_t workers_shutdown               = 0;   // Flag to signal workers to shutdown
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
+static size_t global_mw_count                               = 0;   // Global middleware count
 
 static void finalize_response(connection_t* conn, HttpMethod method);
 
@@ -149,21 +149,26 @@ static void install_signal_handler(void) {
  * Connection Management Functions
  * ================================================================ */
 
-static request_t* create_request(Arena* arena) {
+INLINE request_t* create_request(Arena* arena) {
     request_t* req = arena_alloc(arena, sizeof(request_t));
-    if (!req)
+    if (unlikely(!req))
         return NULL;
 
+    // Initialize request structure
     memset(req, 0, sizeof(request_t));
+
     req->headers = headers_new(arena);
-    if (!req->headers)
+    if (unlikely(!req->headers))
         return NULL;
+
+    req->query_params = NULL;          // No query params initially
+    req->method_type  = HTTP_INVALID;  // Initial method is not valid
     return req;
 }
 
-static response_t* create_response() {
+INLINE response_t* create_response() {
     response_t* resp = malloc(sizeof(response_t));
-    if (!resp)
+    if (unlikely(!resp))
         return NULL;
 
     memset(resp, 0, sizeof(response_t));  // Initialize response structure
@@ -172,23 +177,26 @@ static response_t* create_response() {
 
     // Allocate a a resizble buffer for the response.
     resp->buffer = malloc(WRITE_BUFFER_SIZE);
-    if (!resp->buffer) {
+    if (unlikely(!resp->buffer)) {
         perror("malloc response buffer");
         return NULL;
     }
+
     resp->buffer_size = WRITE_BUFFER_SIZE;
     memset(resp->buffer, 0, WRITE_BUFFER_SIZE);
     return resp;
 }
 
 // Free request body. (Request structure is arena-allocated.)
-__attribute__((always_inline)) static inline void free_request(request_t* req) {
-    if (req && req->body)
+INLINE void free_request(request_t* req) {
+    if (req && req->body) {
         free(req->body);
+        req->body = NULL;
+    }
 }
 
 // Free response buffer and dynmically allocated response itself.
-__attribute__((always_inline)) static inline void free_response(response_t* resp) {
+INLINE void free_response(response_t* resp) {
     if (!resp)
         return;
 
@@ -200,25 +208,25 @@ __attribute__((always_inline)) static inline void free_response(response_t* resp
     free(resp);
 }
 
-__attribute__((always_inline)) static inline void reset_response(response_t* resp) {
+INLINE void reset_response(response_t* resp) {
     // get a reference to the buffer and its size before calling memset.
-    size_t current_buffer_size = resp->buffer_size;
-    unsigned char* buffer      = resp->buffer;
+    size_t buffer_size    = resp->buffer_size;
+    unsigned char* buffer = resp->buffer;
 
     // Reset the buffer.
-    memset(buffer, 0, current_buffer_size);
+    memset(buffer, 0, buffer_size);
 
     // Reset the structure.
     memset(resp, 0, sizeof(response_t));
 
-    // Reset resp state.
+    // Reset response state.
     resp->buffer      = buffer;
     resp->file_fd     = -1;
     resp->status_code = StatusOK;
-    resp->buffer_size = current_buffer_size;
+    resp->buffer_size = buffer_size;
 }
 
-__attribute__((always_inline)) static inline bool reset_connection(connection_t* conn) {
+INLINE bool reset_connection(connection_t* conn) {
     conn->state               = STATE_READING_REQUEST;
     conn->keep_alive          = true;
     conn->user_data           = NULL;
@@ -236,7 +244,7 @@ __attribute__((always_inline)) static inline bool reset_connection(connection_t*
 
     if (unlikely(!conn->arena)) {
         conn->arena = arena_create(ARENA_CAPACITY);
-        if (!conn->arena)
+        if (unlikely(!conn->arena))
             return false;
     } else {
         arena_reset(conn->arena);
@@ -248,8 +256,8 @@ __attribute__((always_inline)) static inline bool reset_connection(connection_t*
     return (conn->request && conn->response);
 }
 
-__attribute__((always_inline)) static inline void close_connection(int epoll_fd, connection_t* conn) {
-    if (!conn)
+INLINE void close_connection(int epoll_fd, connection_t* conn) {
+    if (unlikely(!conn))
         return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
@@ -258,7 +266,7 @@ __attribute__((always_inline)) static inline void close_connection(int epoll_fd,
     free_request(conn->request);
     free_response(conn->response);
 
-    if (conn->arena) {
+    if (likely(conn->arena)) {
         arena_destroy(conn->arena);
     }
 
@@ -275,8 +283,7 @@ __attribute__((always_inline)) static inline void close_connection(int epoll_fd,
 }
 
 // Send an error response during request processing.
-__attribute__((always_inline)) static inline void send_error_response(connection_t* conn,
-                                                                      http_status status) {
+INLINE void send_error_response(connection_t* conn, http_status status) {
     conn_set_status(conn, status);
     conn_set_content_type(conn, CT_PLAIN);
 
@@ -285,35 +292,32 @@ __attribute__((always_inline)) static inline void send_error_response(connection
     conn_write_string(conn, msg);
     finalize_response(conn, conn->request->method_type);
 
-    if (conn->response->buffer) {
-        conn->state = STATE_WRITING_RESPONSE;
-    } else {
-        conn->state = STATE_CLOSING;
-    }
+    // Switch to writing the response.
+    conn->state         = STATE_WRITING_RESPONSE;
+    conn->last_activity = time(NULL);
 }
 
 /* ================================================================
  * Request Parsing Functions
  * ================================================================ */
 
-__attribute__((always_inline)) static inline bool parse_request_headers(connection_t* conn, HttpMethod method,
-                                                                        char* read_buf) {
+INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* read_buf) {
     const char* ptr = read_buf;
     const char* end = ptr + conn->request->headers_len;
 
-    bool clset         = false;
-    bool keepalive_set = false;
-    bool is_safe       = (method == HTTP_GET || method == HTTP_OPTIONS);
+    bool content_len_set = false;
+    bool keepalive_set   = false;
+    bool is_safe         = (method == HTTP_GET || method == HTTP_OPTIONS);
 
     while (ptr < end) {
         // Parse header name
         const char* colon = (const char*)memchr(ptr, ':', end - ptr);
         if (!colon)
-            break;
+            break;  // We are done with headers.
 
         size_t name_len = colon - ptr;
         char* name      = arena_alloc(conn->arena, name_len + 1);
-        if (!name)
+        if (unlikely(!name))
             return false;
 
         memcpy(name, ptr, name_len);
@@ -331,21 +335,21 @@ __attribute__((always_inline)) static inline bool parse_request_headers(connecti
 
         size_t value_len = eol - ptr;
         char* value      = arena_alloc(conn->arena, value_len + 1);
-        if (!value)
+        if (unlikely(!value))
             return false;
 
         memcpy(value, ptr, value_len);
         value[value_len] = '\0';
 
         // Set content length
-        if (!clset && !is_safe && strncasecmp(name, "Content-Length", 14) == 0) {
+        if (!content_len_set && !is_safe && strncasecmp(name, "Content-Length", 14) == 0) {
             bool valid;
             conn->request->content_length = parse_ulong(value, &valid);
-            if (!valid) {
+            if (unlikely(!valid)) {
                 fprintf(stderr, "Invalid content-length header\n");
                 return false;
             }
-            clset = true;
+            content_len_set = true;
         }
 
         if (!keepalive_set && strcasecmp(name, "Connection") == 0) {
@@ -363,7 +367,7 @@ __attribute__((always_inline)) static inline bool parse_request_headers(connecti
     return true;
 }
 
-__attribute__((always_inline)) static inline bool parse_query_params(connection_t* conn) {
+INLINE bool parse_query_params(connection_t* conn) {
     char* path  = conn->request->path;
     char* query = strchr(path, '?');
     if (!query)
@@ -506,8 +510,7 @@ void conn_set_status(connection_t* conn, http_status code) {
 }
 
 // Find for needle in haystack in cas insensitive way.
-__attribute__((always_inline)) static inline char* find_in_string(const char* haystack, const char* needle,
-                                                                  size_t length) {
+INLINE char* find_in_string(const char* haystack, const char* needle, size_t length) {
     size_t needle_length = strlen(needle);
     for (size_t i = 0; i < length; i++) {
         if (i + needle_length > length) {
@@ -520,7 +523,7 @@ __attribute__((always_inline)) static inline char* find_in_string(const char* ha
     return NULL;
 }
 
-__attribute__((always_inline)) static inline bool res_header_exists(response_t* res, const char* name) {
+INLINE bool res_header_exists(response_t* res, const char* name) {
     // Check if header already exists in the buffer
     unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
     return find_in_string((char*)headers_start, name, res->headers_len);
@@ -534,7 +537,7 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
 
     // If header already exists(and is not Set-Cookie), do not overwrite it.
     if (unlikely(res_header_exists(conn->response, name) && strcasecmp(name, "Set-Cookie") != 0)) {
-        fprintf(stderr, "Header '%s' already exists and will not be overwritten\n", name);
+        // fprintf(stderr, "Header '%s' already exists and will not be overwritten\n", name);
         return;
     }
 
@@ -543,7 +546,7 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
 
     // Fail if header exceeds available space
     if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY) {
-        fprintf(stderr, "Header '%s' rejected (no space in headers segment)\n", name);
+        // fprintf(stderr, "Header '%s' rejected (no space in headers segment)\n", name);
         return;
     }
 
@@ -552,7 +555,7 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     unsigned char* dest = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_len;
     int written         = snprintf((char*)dest, cursize, "%s: %s\r\n", name, value);
     if (written < 0 || (size_t)written >= cursize) {
-        fprintf(stderr, "Header '%s' too long or write error\n", name);
+        // fprintf(stderr, "Header '%s' too long or write error\n", name);
         return;
     }
     res->headers_len += written;
@@ -676,7 +679,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 }
 
 // Build the complete HTTP response
-__attribute__((always_inline)) static inline void finalize_response(connection_t* conn, HttpMethod method) {
+INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     response_t* resp = conn->response;
 
     // Set default status if not set
@@ -827,14 +830,15 @@ const char* get_path_param(connection_t* conn, const char* name) {
  * Middleware Handling Functions
  * ================================================================ */
 
-__attribute__((always_inline)) static inline void execute_all_middleware(connection_t* conn, route_t* route) {
+INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute global middleware
     size_t index = 0;
     if (global_mw_count > 0) {
         while (index < global_mw_count) {
-            global_mw[index++](conn);
-            if (conn->abort)
-                break;
+            global_middleware[index++](conn);
+            if (conn->abort) {
+                return;
+            }
         }
     }
 
@@ -843,19 +847,22 @@ __attribute__((always_inline)) static inline void execute_all_middleware(connect
     if (route->mw_count > 0) {
         while (index < route->mw_count) {
             route->middleware[index++](conn);
-            if (conn->abort)
-                break;
+            if (conn->abort) {
+                return;
+            }
         }
     }
 }
 
 void use_global_middleware(HttpHandler* middleware, size_t count) {
-    if (count == 0)
+    if (count == 0) {
         return;
+    }
+
     assert(count + global_mw_count <= MAX_GLOBAL_MIDDLEWARE);
 
     for (size_t i = 0; i < count; i++) {
-        global_mw[global_mw_count++] = middleware[i];
+        global_middleware[global_mw_count++] = middleware[i];
     }
 }
 
@@ -876,7 +883,7 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
 static void process_request(connection_t* conn, char* read_buf, size_t read_bytes) {
     char* end_of_headers = strstr(read_buf, "\r\n\r\n");
     if (!end_of_headers) {
-        send_error_response(conn, StatusBadRequest);  // Invalid Http payload.
+        send_error_response(conn, StatusBadRequest);
         return;
     }
 
@@ -884,6 +891,7 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
 
     char path[1024];
     char http_protocol[16];
+
     // Parse method, path and HTTP version
     if (sscanf(read_buf, "%7s %1023s %15s", conn->request->method, path, http_protocol) != 3) {
         send_error_response(conn, StatusBadRequest);
@@ -952,19 +960,16 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
         conn->user_data_free_func(conn->user_data);
     }
 
-    if (conn->response->buffer) {
-        conn->state         = STATE_WRITING_RESPONSE;
-        conn->last_activity = time(NULL);
-    } else {
-        conn->state = STATE_CLOSING;
-    }
+    // Switch to writing response.
+    conn->state         = STATE_WRITING_RESPONSE;
+    conn->last_activity = time(NULL);
 }
 
 /* ================================================================
  * Socket and Connection I/O Functions
  * ================================================================ */
 
-__attribute__((always_inline)) static inline void set_nonblocking(int fd) {
+INLINE void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         perror("fcntl F_GETFL");
@@ -1009,7 +1014,7 @@ static int create_server_socket(int port) {
     return fd;
 }
 
-__attribute__((always_inline)) static inline int conn_accept(int worker_id) {
+INLINE int conn_accept(int worker_id) {
     (void)worker_id;
 
     int client_fd;
@@ -1070,7 +1075,7 @@ __attribute__((always_inline)) static inline int conn_accept(int worker_id) {
     return client_fd;
 }
 
-__attribute__((always_inline)) static inline void add_connection_to_worker(int epoll_fd, int client_fd) {
+INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
     connection_t* conn = malloc(sizeof(connection_t));
     if (!conn) {
         perror("calloc");
@@ -1103,7 +1108,7 @@ __attribute__((always_inline)) static inline void add_connection_to_worker(int e
     pthread_mutex_unlock(&shutdown_mutex);
 }
 
-__attribute__((always_inline)) static inline void handle_read(int epoll_fd, connection_t* conn) {
+INLINE void handle_read(int epoll_fd, connection_t* conn) {
     char read_buf[READ_BUFFER_SIZE];
     ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
@@ -1474,6 +1479,7 @@ int pulsar_run(int port) {
 
     install_signal_handler();
     sort_routes();
+    init_mimetypes();
 
     // Initialize worker data and create workers
     for (int i = 0; i < NUM_WORKERS; i++) {

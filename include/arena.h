@@ -1,15 +1,16 @@
 #ifndef ARENA_H
 #define ARENA_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "utils.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // Single threaded Linear (bump) allocator.
 typedef struct {
@@ -18,12 +19,9 @@ typedef struct {
     size_t capacity;   // Capacity of the arena
 } Arena;
 
-// Create a new arena with given capacity.
-// If capacity is 0, 1024 bytes are allocated.
-static inline Arena* arena_create(size_t capacity) {
-    if (capacity == 0) {
-        capacity = 1024;  // Default is 1KB
-    }
+// Create a new arena with given capacity. Capacity must be > 0.
+INLINE Arena* arena_create(size_t capacity) {
+    assert(capacity > 0);
 
     Arena* arena = malloc(sizeof(Arena));
     if (!arena) {
@@ -37,13 +35,14 @@ static inline Arena* arena_create(size_t capacity) {
         free(arena);
         return NULL;
     }
+
     arena->allocated = 0;
     arena->capacity  = capacity;
     return arena;
 }
 
 // Destroty arena and free memory.
-static inline void arena_destroy(Arena* arena) {
+INLINE void arena_destroy(Arena* arena) {
     if (!arena)
         return;
     free(arena->memory);
@@ -51,9 +50,8 @@ static inline void arena_destroy(Arena* arena) {
 }
 
 // Allocate pointer of given size in arena.
-// Size is aligned to 8 bytes.
 // Returns NULL if arena is out of memory.
-static inline void* arena_alloc(Arena* arena, size_t size) {
+INLINE void* arena_alloc(Arena* arena, size_t size) {
     size = (size + 7) & ~7;
     if (arena->allocated + size > arena->capacity) {
         return NULL;
@@ -65,7 +63,7 @@ static inline void* arena_alloc(Arena* arena, size_t size) {
 
 // Copy char *str, allocating it in arena.
 // Returns NULL if out of memory.
-static inline char* arena_strdup(Arena* arena, const char* str) {
+INLINE char* arena_strdup(Arena* arena, const char* str) {
     size_t cap = strlen(str) + 1;
     char* dst  = arena_alloc(arena, cap);
     if (!dst) {
@@ -78,8 +76,7 @@ static inline char* arena_strdup(Arena* arena, const char* str) {
 }
 
 // Reset arena memory offset to 0.
-// memset is not called to zero the memory.
-static inline void arena_reset(Arena* arena) {
+INLINE void arena_reset(Arena* arena) {
     arena->allocated = 0;
     // memset(arena->memory, 0, arena->capacity);
 }

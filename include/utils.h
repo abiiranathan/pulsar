@@ -20,12 +20,16 @@ extern "C" {
 #if defined(__GNUC__) || defined(__clang__)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
+#define INLINE __attribute__((always_inline)) static inline
+#define STATIC_INLINE INLINE static
 #else
 #define likely(x) (x)
 #define unlikely(x) (x)
+#define INLINE
+#define STATIC_INLINE
 #endif
 
-static inline unsigned long parse_ulong(const char* value, bool* valid) {
+INLINE unsigned long parse_ulong(const char* value, bool* valid) {
     assert(valid && "NULL pointer for bool *valid");
 
     *valid        = false;
@@ -51,7 +55,7 @@ static inline unsigned long parse_ulong(const char* value, bool* valid) {
  * Check if path is a directory
  * Returns true if path exists AND is a directory, false otherwise
  */
-static inline bool is_dir(const char* path) {
+INLINE bool is_dir(const char* path) {
     if (!path || !*path) {  // Handle NULL or empty string
         errno = EINVAL;
         return false;
@@ -68,7 +72,7 @@ static inline bool is_dir(const char* path) {
  * Check if a path exists (file or directory)
  * Returns true if path exists, false otherwise (and sets errno)
  */
-static inline bool path_exists(const char* path) {
+INLINE bool path_exists(const char* path) {
     if (!path || !*path) {  // Handle NULL or empty string
         errno = EINVAL;
         return false;
@@ -76,7 +80,7 @@ static inline bool path_exists(const char* path) {
     return access(path, F_OK) == 0;
 }
 
-static inline void url_percent_decode(const char* src, char* dst, size_t dst_size) {
+INLINE void url_percent_decode(const char* src, char* dst, size_t dst_size) {
     char a, b;
     size_t written = 0;
     size_t src_len = strlen(src);
@@ -113,7 +117,7 @@ static inline void url_percent_decode(const char* src, char* dst, size_t dst_siz
     *dst = '\0';
 }
 
-static inline bool is_malicious_path(const char* path) {
+INLINE bool is_malicious_path(const char* path) {
     // List of dangerous patterns
     static const char* patterns[] = {"../", "/./", "//", "/~", "%2e%2e", NULL};
     for (int i = 0; patterns[i]; i++) {
