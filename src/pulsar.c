@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <assert.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -8,6 +9,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -527,6 +529,70 @@ INLINE bool res_header_exists(response_t* res, const char* name) {
     // Check if header already exists in the buffer
     unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
     return find_in_string((char*)headers_start, name, res->headers_len);
+}
+
+// Get the value of a response header. Returns a dynamically allocated char* pointer or NULL
+// If header does not exist or malloc fails.
+char* res_header_get(connection_t* conn, const char* name) {
+    // Check if header already exists in the buffer
+    response_t* res        = conn->response;
+    unsigned char* headers = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+
+    char* ptr = find_in_string((char*)headers, name, res->headers_len);
+    if (ptr == NULL)
+        return NULL;
+
+    // move past name, colon and space
+    ptr += (strlen(name) + 2);
+
+    // Find the next \r\n to get the response value.
+    char* value_end = find_in_string(ptr, "\r\n", res->headers_len);
+    if (!value_end)
+        return NULL;
+
+    size_t len = value_end - ptr;
+    assert(len > 0);
+
+    char* header = malloc(len + 1);
+    if (!header)
+        return NULL;
+
+    memcpy(header, ptr, len);
+    header[len] = '\0';
+
+    printf("Allocating header: %p, name: %s, value: %s\n", (void*)header, name, header);
+    return header;
+}
+
+// Get the value of a response header, copying it into the buffer of size dest_size.
+// Returns true on success or false if buffer is very small or header not found.
+bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size) {
+    // Check if header already exists in the buffer
+    response_t* res        = conn->response;
+    unsigned char* headers = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+
+    char* ptr = find_in_string((char*)headers, name, res->headers_len);
+    if (ptr == NULL)
+        return false;
+
+    // move past name, colon and space
+    ptr += (strlen(name) + 2);
+
+    // Find the next \r\n to get the response value.
+    char* value_end = find_in_string(ptr, "\r\n", res->headers_len);
+    if (!value_end)
+        return false;
+
+    size_t len = value_end - ptr;
+
+    // Destination buffer is too small.
+    if (dest_size <= len + 1) {
+        return false;
+    }
+
+    memcpy(dest, ptr, len);
+    dest[len] = '\0';
+    return dest;
 }
 
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {

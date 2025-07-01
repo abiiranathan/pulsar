@@ -18,7 +18,10 @@ def auth_middleware(req: Request, res: Response):
 
 @app.GET("/")
 def hello(req: Request, res: Response):
-    res.send("Hello, World!")
+    res.set_header("Content-Type", "text/plain")
+    content_type = res.get_header("Content-Type")
+
+    res.send(f"Hello, World! Content-Type: {content_type}\n")
 
 @app.GET("/greet/{name}")
 def greet(req: Request, res: Response):

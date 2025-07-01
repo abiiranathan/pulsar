@@ -3,6 +3,7 @@ Pulsar Web Server.
 
 This is a python wrapper around the C pulsar API.
 """
+
 import sys
 import ctypes
 import enum
@@ -14,27 +15,30 @@ import json
 # Get package directory
 PACKAGE_DIR = Path(__file__).parent.resolve()
 
+
 def _load_library():
     lib_dir = Path(__file__).parent / "lib"
-    
+
     # Platform-specific filenames
     libnames = {
-        'linux': 'libpulsar.so',
-        'darwin': 'libpulsar.dylib',
-        'win32': 'pulsar.dll'
+        "linux": "libpulsar.so",
+        "darwin": "libpulsar.dylib",
+        "win32": "pulsar.dll",
     }
-    
+
     libname = libnames.get(sys.platform)
     if not libname:
         raise OSError(f"Unsupported platform: {sys.platform}")
-    
+
     libpath = lib_dir / libname
     if not libpath.exists():
         raise FileNotFoundError(f"Library not found at {libpath}")
-    
+
     return ctypes.CDLL(str(libpath))
 
+
 lib = _load_library()
+
 
 # Type definitions
 class HttpMethod(enum.IntEnum):
@@ -46,6 +50,7 @@ class HttpMethod(enum.IntEnum):
     DELETE = 4
     HEAD = 5
     OPTIONS = 6
+
 
 class HttpStatus(enum.IntEnum):
     # Informational
@@ -135,27 +140,38 @@ HandlerFunc = ctypes.CFUNCTYPE(None, Connection)
 # Middleware type (same as handler)
 MiddlewareFunc = ctypes.CFUNCTYPE(None, Connection)
 
-def _setup_function(name: str, argtypes: List[Any], restype: Any) -> None: # type: ignore
+
+def _setup_function(name: str, argtypes: List[Any], restype: Any):
     """Helper to setup ctypes function signatures"""
     func = getattr(lib, name)
     func.argtypes = argtypes
     func.restype = restype
 
+
 # Setup all function signatures
-_setup_function("route_register", 
-    [ctypes.c_char_p, ctypes.c_int, HandlerFunc], Route)
-_setup_function("register_static_route", 
-    [ctypes.c_char_p, ctypes.c_char_p], Route)
-_setup_function("use_global_middleware", 
-    [ctypes.POINTER(MiddlewareFunc), ctypes.c_int, ], None)
-_setup_function("use_route_middleware", 
-    [Route, ctypes.POINTER(MiddlewareFunc), ctypes.c_int], None)
+_setup_function("route_register", [ctypes.c_char_p, ctypes.c_int, HandlerFunc], Route)
+_setup_function("register_static_route", [ctypes.c_char_p, ctypes.c_char_p], Route)
+_setup_function(
+    "use_global_middleware",
+    [
+        ctypes.POINTER(MiddlewareFunc),
+        ctypes.c_int,
+    ],
+    None,
+)
+_setup_function(
+    "use_route_middleware", [Route, ctypes.POINTER(MiddlewareFunc), ctypes.c_int], None
+)
 
 # Response functions
 _setup_function("conn_servefile", [Connection, ctypes.c_char_p], ctypes.c_bool)
 _setup_function("conn_write_string", [Connection, ctypes.c_char_p], ctypes.c_int)
-_setup_function("conn_write", [Connection, ctypes.c_void_p, ctypes.c_size_t], ctypes.c_int)
-_setup_function("conn_send", [Connection, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t], None)
+_setup_function(
+    "conn_write", [Connection, ctypes.c_void_p, ctypes.c_size_t], ctypes.c_int
+)
+_setup_function(
+    "conn_send", [Connection, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t], None
+)
 _setup_function("conn_writef", [Connection, ctypes.c_char_p], ctypes.c_int)
 _setup_function("conn_abort", [Connection], None)
 _setup_function("conn_notfound", [Connection], ctypes.c_int)
@@ -172,16 +188,26 @@ _setup_function("get_path_param", [Connection, ctypes.c_char_p], ctypes.c_char_p
 
 # Header functions
 _setup_function("req_header_get", [Connection, ctypes.c_char_p], ctypes.c_char_p)
-_setup_function("res_header_get", [Connection, ctypes.c_char_p], ctypes.c_char_p)
+_setup_function(
+    "res_header_get_buf",
+    [Connection, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t],
+    ctypes.c_bool,
+)
+_setup_function("res_free_header", [ctypes.c_char_p], None)
 
 # Status/header setters
 _setup_function("conn_set_status", [Connection, ctypes.c_int], None)
 _setup_function("conn_set_content_type", [Connection, ctypes.c_char_p], None)
-_setup_function("conn_writeheader", [Connection, ctypes.c_char_p, ctypes.c_char_p], None)
+_setup_function(
+    "conn_writeheader", [Connection, ctypes.c_char_p, ctypes.c_char_p], None
+)
 
 # User data functions
-_setup_function("set_userdata", 
-    [Connection, ctypes.c_void_p, ctypes.CFUNCTYPE(None, ctypes.c_void_p)], None)
+_setup_function(
+    "set_userdata",
+    [Connection, ctypes.c_void_p, ctypes.CFUNCTYPE(None, ctypes.c_void_p)],
+    None,
+)
 _setup_function("get_userdata", [Connection], ctypes.c_void_p)
 
 # Method conversion
@@ -190,117 +216,127 @@ _setup_function("http_method_to_string", [ctypes.c_int], ctypes.c_char_p)
 _setup_function("http_method_valid", [ctypes.c_int], ctypes.c_bool)
 _setup_function("is_safe_method", [ctypes.c_int], ctypes.c_bool)
 
+
 class Request:
     """Wrapper for request-related operations"""
+
     def __init__(self, conn: Connection):
         self._conn = conn
-    
+
     @property
     def method(self) -> str:
         """Get request method"""
         return lib.req_method(self._conn).decode()
-    
+
     @property
     def path(self) -> str:
         """Get request path"""
         return lib.req_path(self._conn).decode()
-    
+
     @property
     def body(self) -> bytes:
         """Get request body"""
         body = lib.req_body(self._conn)
-        return ctypes.string_at(body) if body else b''
-    
+        return ctypes.string_at(body) if body else b""
+
     @property
     def content_length(self) -> int:
         """Get content length"""
         return lib.req_content_len(self._conn)
-    
+
     def get_query_param(self, name: str) -> Optional[str]:
         """Get query parameter by name"""
         param = lib.query_get(self._conn, name.encode())
         return param.decode() if param else None
-    
+
     def get_path_param(self, name: str) -> Optional[str]:
         """Get path parameter by name"""
         param = lib.get_path_param(self._conn, name.encode())
         return param.decode() if param else None
-    
+
     def get_header(self, name: str) -> Optional[str]:
         """Get request header by name"""
         header = lib.req_header_get(self._conn, name.encode())
         return header.decode() if header else None
-    
+
     @property
     def query_params(self) -> Dict[str, str]:
         """Get all query parameters as a dictionary"""
         # This would need to parse the query string
         # Implementation depends on how query params are stored in Pulsar
         return {}
-    
+
     @property
     def headers(self) -> Dict[str, str]:
         """Get all headers as a dictionary"""
         # Implementation depends on how headers are stored in Pulsar
         return {}
 
+
 class Response:
     """Wrapper for response-related operations"""
+
     def __init__(self, conn: Connection):
         self._conn = conn
-    
+
     def set_status(self, status: HttpStatus) -> None:
         """Set response status code"""
         lib.conn_set_status(self._conn, status)
 
     def abort(self):
         lib.conn_abort(self._conn)
-    
-    def set_content_type(self, content_type: str) -> bool:
+
+    def set_content_type(self, content_type: str):
         """Set response content type"""
-        return lib.conn_set_content_type(self._conn, content_type.encode())
-    
-    def set_header(self, name: str, value: str) -> bool:
+        lib.conn_set_content_type(self._conn, content_type.encode())
+
+    def set_header(self, name: str, value: str):
         """Set response header"""
-        return lib.conn_writeheader(self._conn, name.encode(), value.encode())
-    
+        lib.conn_writeheader(self._conn, name.encode(), value.encode())
+
+    def get_header(self, name: str, buffer_size=1024) -> Optional[str]:
+        """Get response header by name"""
+        buf = ctypes.create_string_buffer(buffer_size)
+        if lib.res_header_get_buf(self._conn, name.encode(), buf, ctypes.sizeof(buf)):
+            return buf.value.decode("utf-8")
+        return None
+
     def write(self, data: Union[bytes, str]) -> int:
         """Write response data"""
         if isinstance(data, str):
             return lib.conn_write_string(self._conn, data.encode())
-        
+
         return lib.conn_write(self._conn, data, len(data))
-    
-    def send(self, content: Union[str, bytes],
-             status: HttpStatus = HttpStatus.OK):
+
+    def send(self, content: Union[str, bytes], status: HttpStatus = HttpStatus.OK):
         """Write a response with status code and content-type"""
         if isinstance(content, str):
             lib.conn_send(self._conn, status, content.encode(), len(content))
         else:
             lib.conn_send(self._conn, status, content, len(content))
-    
+
     def send_json(self, data: Any, status: HttpStatus = HttpStatus.OK) -> int:
         """Send JSON response"""
         self.set_status(status)
         self.set_content_type("application/json")
         return self.write(json.dumps(data))
-    
+
     def send_file(self, filename: str, content_type: str | None = None) -> bool:
         """Serve a file"""
         if content_type:
             self.set_content_type(content_type)
 
         return lib.conn_servefile(self._conn, filename.encode())
-    
-    def not_found(self) -> int:
+
+    def not_found(self):
         """Serve 404 response"""
-        return lib.conn_notfound(self._conn)
-    
+        lib.conn_notfound(self._conn)
+
 
 # Type variables for request/response
-Req = TypeVar('Req', bound=Request)
-Res = TypeVar('Res', bound=Response)
-Conn = TypeVar('Conn', bound=ctypes.c_void_p)
+Req = TypeVar("Req", bound=Request)
+Res = TypeVar("Res", bound=Response)
+Conn = TypeVar("Conn", bound=ctypes.c_void_p)
 
 # Middleware type: takes request and response, returns bool
 Middleware = Callable[[Request, Response], None]
@@ -312,66 +348,69 @@ Handler = Callable[[Request, Response], None]
 ErrorHandler = Callable[[Exception, Request, Response], None]
 
 # Global dictionary to maintain callback references
-_CALLBACK_STORE : Dict[int, Union[Middleware, Handler]]= {}
+_CALLBACK_STORE: Dict[int, Union[Middleware, Handler]] = {}
+
 
 def _create_handler_wrapper(c_handler: HandlerFunc):  # type: ignore
     """Wrapper that keeps Python handler alive and handles exceptions"""
+
     @HandlerFunc
     def wrapped_handler(conn: Connection):
         try:
-            c_handler(conn) 
+            c_handler(conn)
         except Exception as e:
             print(f"Handler error: {e} ", file=sys.stderr)
             return
 
     # Prevent GC
-    _CALLBACK_STORE[id(c_handler)] = wrapped_handler # type: ignore
+    _CALLBACK_STORE[id(c_handler)] = wrapped_handler  # type: ignore
     return wrapped_handler
+
 
 def _create_middleware_wrapper(py_middleware: Middleware):
     @MiddlewareFunc
     def wrapped_middleware(conn: Connection):
         req = Request(conn)
         res = Response(conn)
-        py_middleware(req, res) 
+        py_middleware(req, res)
 
     # Prevent GC
     _CALLBACK_STORE[id(py_middleware)] = wrapped_middleware
     return wrapped_middleware
 
+
 class Pulsar:
     """Pulsar web server application class."""
-    
+
     def __init__(self):
         self._error_handler: Optional[ErrorHandler] = None
 
     def run(self, port: int = 8080, host: str = "0.0.0.0") -> int:
         """Start the server on specified port"""
         return lib.pulsar_run(port)
-    
+
     def route(self, path: str, method: str, *middleware: Middleware):
         """Decorator for registering routes"""
+
         def decorator(handler: Handler):
             @wraps(handler)
             def wrapped_handler(conn: ctypes.c_void_p):
                 req = Request(conn)
                 res = Response(conn)
                 handler(req, res)
-                
+
             # Register the route for method
             method_enum = lib.http_method_from_string(method.upper().encode())
             if method_enum == HttpMethod.INVALID:
                 raise ValueError(f"Invalid HTTP method: {method}")
-            
+
             route = lib.route_register(
-                path.encode(),
-                method_enum,
-                _create_handler_wrapper(wrapped_handler)
+                path.encode(), method_enum, _create_handler_wrapper(wrapped_handler)
             )
-        
+
             if not route:
                 raise RuntimeError(f"Failed to register route {method} {path}")
-            
+
             # Register route-specific middleware if provided
             if middleware:
                 # Create array of middleware function pointers
@@ -379,7 +418,7 @@ class Pulsar:
                 for i, mw in enumerate(middleware):
                     wrapped_mw = _create_middleware_wrapper(mw)
                     mw_array[i] = wrapped_mw
-                
+
                 # Pass the array and its length
                 lib.use_route_middleware(
                     route,
@@ -388,8 +427,9 @@ class Pulsar:
                 )
 
             return wrapped_handler
+
         return decorator
-    
+
     def use(self, *middleware: Middleware):
         if middleware:
             # Create array of middleware function pointers
@@ -398,45 +438,43 @@ class Pulsar:
                 wrapped_mw = _create_middleware_wrapper(mw)
                 mw_array[i] = wrapped_mw
             lib.use_global_middleware(mw_array, len(middleware))
-       
+
     def GET(self, path: str, *middleware: Middleware):
         """Decorator for GET routes"""
         return self.route(path, "GET", *middleware)
-    
+
     def POST(self, path: str, *middleware: Middleware):
         """Decorator for POST routes"""
         return self.route(path, "POST", *middleware)
-    
+
     def PUT(self, path: str, *middleware: Middleware):
         """Decorator for PUT routes"""
         return self.route(path, "PUT", *middleware)
-    
+
     def DELETE(self, path: str, *middleware: Middleware):
         """Decorator for DELETE routes"""
         return self.route(path, "DELETE", *middleware)
-    
+
     def PATCH(self, path: str, *middleware: Middleware):
         """Decorator for PATCH routes"""
         return self.route(path, "PATCH", *middleware)
-    
+
     def OPTIONS(self, path: str, *middleware: Middleware):
         """Decorator for OPTIONS routes"""
         return self.route(path, "OPTIONS", *middleware)
-    
+
     def HEAD(self, path: str, *middleware: Middleware):
         """Decorator for HEAD routes"""
         return self.route(path, "HEAD", *middleware)
-    
 
     def errorhandler(self, func: ErrorHandler):
         """Decorator for error handling"""
         self._error_handler = func
         return func
-    
+
     def static(self, url_prefix: str, directory: str):
         """Register static file route. Files served efficiently with sendfile syscall."""
-        route = lib.register_static_route(url_prefix.encode(),directory.encode())
+        route = lib.register_static_route(url_prefix.encode(), directory.encode())
         if not route:
             raise RuntimeError("Failed to register static route")
         return route
-

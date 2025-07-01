@@ -175,6 +175,26 @@ headers_t* query_params(connection_t* conn);
 const char* req_header_get(connection_t* conn, const char* name);
 
 /**
+ * @brief Gets a response header value
+ *
+ * @param conn The connection object
+ * @param name Header name
+ * @return A dynamically allocated header value (char *) if it exists or NULL otherwise.
+ */
+char* res_header_get(connection_t* conn, const char* name);
+
+/**
+ * @brief Gets a response header value
+ *
+ * @param conn The connection object
+ * @param name Header name
+ * @param dest The destination buffer to write the header value.
+ * @param dest_size The destination buffer size.
+ * @return true on success or false if buffer is small or header does not exist.
+ */
+bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size);
+
+/**
  * @brief Gets the request body
  *
  * @param conn The connection object

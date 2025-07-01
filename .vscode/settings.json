@@ -1,5 +1,7 @@
 {
     "python.analysis.extraPaths": [
         "${workspaceFolder}/python/pulsar"
-    ]
+    ],
+    "editor.formatOnSave": true,
+    "python.defaultInterpreterPath": "${workspaceFolder}/python/.venv/bin/python"
 }
