@@ -2,9 +2,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "include/content_types.h"
 #include "include/forms.h"
 #include "include/headers.h"
 #include "include/pulsar.h"
+#include "include/status_code.h"
 
 #define SENDFILE 0
 
@@ -57,18 +59,20 @@ void echo_handler(connection_t* conn) {
 void pathparams_query_params_handler(connection_t* conn) {
     const char* userId   = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
+    assert(userId && username);
 
     // Should exist, otherwise our router is broken
     printf("Path Params: \n");
     printf("User ID: %s and username: %s\n", userId, username);
 
-    assert(userId && username);
-
-    // Check for query params.
-    printf("Query Params: \n");
-    header_entry* entry;
-    headers_foreach(query_params(conn), entry) {
-        printf("%s = %s\n", entry->name, entry->value);
+    headers_t* params = query_params(conn);
+    if (params) {
+        // Check for query params.
+        printf("Query Params: \n");
+        header_entry* entry = NULL;
+        headers_foreach(params, entry) {
+            printf("%s = %s\n", entry->name, entry->value);
+        }
     }
     conn_writef(conn, "Your user_id is %s and username %s\n", userId, username);
 }
@@ -124,6 +128,16 @@ void handle_form(connection_t* conn) {
     multipart_cleanup(&form);
 }
 
+void serve_movie(connection_t* conn) {
+    const char* html =
+        "<html><body style='max-width: 1000px; margin: 20px;'><video src='/static/Flight Risk.mp4' "
+        "controls width='720' height='480'></video></body></html>";
+
+    conn_set_status(conn, StatusOK);
+    conn_set_content_type(conn, CT_HTML);
+    conn_write_string(conn, html);
+}
+
 void mw1(connection_t* conn) {
     // Pass a user-data ptr
     int* ptr = malloc(sizeof(int));
@@ -149,8 +163,9 @@ int main() {
     route_register("/json", HTTP_GET, json_handler);
     route_register("/echo", HTTP_GET, echo_handler);
     route_register("/echo", HTTP_POST, echo_handler);
-    route_register("/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);
+    route_register("/params/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);
     route_register("/form", HTTP_POST, handle_form);
+    route_register("/movie", HTTP_GET, serve_movie);
 
     register_static_route("/static", "./");
 

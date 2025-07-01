@@ -6,8 +6,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,9 +26,9 @@
 #define RESPONSE_BUFFER_HEADERS_OFFSET 256  // Reserve 256B for status line
 #define RESPONSE_BUFFER_BODY_OFFSET 4355    // Reserve 4096 for headers (4355 - 256) + 3 for \r\n\0
 
-// Actual size available for headers without terminating \r\n and null byte.
+// Actual size available for headers without terminating \r\n (no NULL terminator)
 #define RESPONSE_HEADER_CAPACITY                                                                             \
-    (RESPONSE_BUFFER_BODY_OFFSET - RESPONSE_BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
+    (RESPONSE_BUFFER_BODY_OFFSET - RESPONSE_BUFFER_HEADERS_OFFSET - 3)  // -3 \r\n
 
 // Size available for status line with terminating \r\n.
 #define RESPONSE_STATUS_CAPACITY RESPONSE_BUFFER_HEADERS_OFFSET
@@ -43,11 +43,11 @@ typedef struct response_t {
     http_status status_code;  // HTTP status code
 
     // Buffer segments and sizes.
-    unsigned char* buffer;  // Single response buffer: [STATUS | HEADERS | BODY]
-    size_t buffer_size;     // Total size of the response buffer
-    size_t status_len;      // Actual length of status line
-    size_t headers_len;     // Actual length of headers
-    size_t body_len;        // Actual length of body
+    uint8_t* buffer;     // Single response buffer: [STATUS | HEADERS | BODY]
+    size_t buffer_size;  // Total size of the response buffer
+    size_t status_len;   // Actual length of status line
+    size_t headers_len;  // Actual length of headers
+    size_t body_len;     // Actual length of body
 
     // Buffer offsets for writing the response with retries(each EPOLLOUT event).
     size_t status_sent;   // Bytes of status line sent
@@ -55,11 +55,15 @@ typedef struct response_t {
     size_t body_sent;     // Bytes of body sent
 
     // File transfer state
-    size_t file_size;       // Size of file to send (if applicable)
-    off_t file_offset;      // Offset in file for sendfile
-    int file_fd;            // File descriptor for file to send (if applicable)
+    size_t file_size;   // Size of file to send (if applicable)
+    off_t file_offset;  // Offset in file for sendfile
+    off_t max_range;    // Maximum range of requested bytes in range request.
+    int file_fd;        // File descriptor for file to send (if applicable)
+
+    // Flags
     bool content_type_set;  // Flag to indicate if Content-Type header is set
     bool headers_written;   // Flag to indicate if headers have been written
+    bool range_request;     // Has header "Range"
 } response_t;
 
 // HTTP Request structure
@@ -69,8 +73,6 @@ typedef struct request_t {
     char* path;               // Requested path (arena allocated)
     char* body;               // Request body (dynamically allocated)
     size_t content_length;    // Content-Length header value
-    size_t body_received;     // Bytes of body received
-    size_t headers_len;       // Length of headers text in connection buffer
     headers_t* headers;       // Request headers
     headers_t* query_params;  // Query parameters
     struct route_t* route;    // Matched route (has static lifetime)
@@ -224,7 +226,7 @@ INLINE void reset_response(response_t* resp) {
     // Reset response state.
     resp->buffer      = buffer;
     resp->file_fd     = -1;
-    resp->status_code = StatusOK;
+    resp->status_code = 0;
     resp->buffer_size = buffer_size;
 }
 
@@ -303,9 +305,9 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* read_buf) {
+INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* read_buf, size_t headers_len) {
     const char* ptr = read_buf;
-    const char* end = ptr + conn->request->headers_len;
+    const char* end = ptr + headers_len;
 
     bool content_len_set = false;
     bool keepalive_set   = false;
@@ -416,6 +418,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, char* rea
         return false;
     }
 
+    // Allocate full request body (+ null byte for safety).
     req->body = malloc(content_length + 1);
     if (!req->body) {
         perror("malloc body");
@@ -423,24 +426,24 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, char* rea
     }
 
     memcpy(req->body, read_buf + headers_len, body_available);
-    req->body_received        = body_available;
     req->body[body_available] = '\0';
 
-    while (req->body_received < content_length) {
-        size_t remaining = content_length - req->body_received;
-        ssize_t count    = read(conn->client_fd, req->body + req->body_received, remaining);
-
+    size_t body_received = body_available;
+    while (body_received < content_length) {
+        size_t remaining = content_length - body_received;
+        ssize_t count    = read(conn->client_fd, req->body + body_received, remaining);
         if (count == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(1000);
+                usleep(500);
                 continue;
             }
             perror("read");
             return false;
         } else if (count == 0) {
+            perror("read");
             return false;
         }
-        req->body_received += count;
+        body_received += count;
     }
     return true;
 }
@@ -488,7 +491,7 @@ size_t req_content_len(connection_t* conn) {
 
 // Set HTTP status code and message
 void conn_set_status(connection_t* conn, http_status code) {
-    assert(code > StatusContinue && code <= StatusNetworkAuthenticationRequired);
+    assert(code >= StatusContinue && code <= StatusNetworkAuthenticationRequired);
 
     response_t* res = conn->response;
     char status_line[RESPONSE_STATUS_CAPACITY];
@@ -501,10 +504,9 @@ void conn_set_status(connection_t* conn, http_status code) {
     }
 
     int len = snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d %s\r\n", code, http_status_text(code));
-    if (len < 0 || (size_t)len >= sizeof(status_line)) {
-        fprintf(stderr, "Failed to format status line for code %d\n", code);
-        return;  // Error formatting status line
-    }
+
+    // Just to be sure, but we should crash if something unexpected happens.
+    assert(len > 0 && (size_t)len < sizeof(status_line));
 
     // Write to fixed status segment
     memcpy(res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, status_line, len);
@@ -535,9 +537,7 @@ char* res_header_get(connection_t* conn, const char* name) {
     if (!value_end)
         return NULL;
 
-    size_t len = value_end - ptr;
-    assert(len > 0);
-
+    size_t len   = value_end - ptr;
     char* header = malloc(len + 1);
     if (!header)
         return NULL;
@@ -568,7 +568,6 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
         return NULL;
 
     size_t len = value_end - ptr;
-    assert(len > 0);
 
     // Destination buffer is too small.
     if (dest_size <= len + 1) {
@@ -695,6 +694,70 @@ void conn_send(connection_t* conn, http_status status, const void* data, size_t 
     conn_write(conn, data, length);
 }
 
+// Parses the Range header and extracts start and end values
+INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end, bool* has_end_range) {
+    if (strstr(range_header, "bytes=") != NULL) {
+        if (sscanf(range_header, "bytes=%ld-%ld", start, end) == 2) {
+            *has_end_range = true;
+            return true;
+        } else if (sscanf(range_header, "bytes=%ld-", start) == 1) {
+            *has_end_range = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Validates the requested range against the file size
+bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off64_t file_size) {
+    if (!start || !end)
+        return false;
+
+    ssize_t start_byte = *start, end_byte = *end;
+    ssize_t chunk_size = (4 * 1024 * 1024) - 1;  // 4 MB chunks.
+
+    if (!has_end_range && start_byte >= 0) {
+        end_byte = start_byte + chunk_size;
+    } else if (start_byte < 0) {
+        // Http range requests can be negative :) Wieird but true
+        // I had to read the RFC to understand this, who would have thought?
+        // https://datatracker.ietf.org/doc/html/rfc7233
+        start_byte = file_size + start_byte;   // subtract from the file size
+        end_byte   = start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
+    } else if (end_byte < 0) {
+        // Even the end range can be negative. Deal with it!
+        end_byte = file_size + end_byte;
+    }
+
+    // Ensure the end of the range doesn't exceed the file size.
+    if (end_byte >= file_size) {
+        end_byte = file_size - 1;
+    }
+
+    // Ensure the start and end range are within the file size
+    if (start_byte < 0 || end_byte < 0) {
+        return false;
+    }
+
+    *start = start_byte;
+    *end   = end_byte;
+    return true;
+}
+
+// Write headers for the Content-Range and Accept-Ranges.
+// Also sets the status code for partial content.
+INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, off64_t file_size) {
+    char content_length[128];
+    char content_range[512];
+
+    snprintf(content_length, sizeof(content_length), "%ld", end - start + 1);
+    snprintf(content_range, sizeof(content_range), "bytes %ld-%ld/%ld", start, end, file_size);
+
+    conn_writeheader(conn, "Accept-Ranges", "bytes");
+    conn_writeheader(conn, "Content-Length", content_length);
+    conn_writeheader(conn, "Content-Range", content_range);
+}
+
 bool conn_servefile(connection_t* conn, const char* filename) {
     if (!filename)
         return false;
@@ -721,38 +784,73 @@ bool conn_servefile(connection_t* conn, const char* filename) {
         const char* mimetype = get_mimetype((char*)filename);
         conn_set_content_type(conn, mimetype);
     }
-    conn->response->file_fd   = fd;
-    conn->response->file_size = stat_buf.st_size;
+
+    conn->response->file_fd     = fd;
+    conn->response->file_size   = stat_buf.st_size;
+    conn->response->file_offset = 0;
+
+    printf("Serving file: %s\n", filename);
+
+    const char* range_header = headers_get(conn->request->headers, "Range");
+    if (!range_header) {
+        return true;
+    }
+
+    printf("Range: %s\n", range_header);
+
+    // If we have a "Range" request, modify offset and file size to serve correct range.
+    ssize_t start_offset = 0, end_offset = 0;
+    bool range_valid, has_end_range;
+    if (parse_range(range_header, &start_offset, &end_offset, &has_end_range)) {
+        range_valid = validate_range(has_end_range, &start_offset, &end_offset, stat_buf.st_size);
+        if (!range_valid) {
+            close(fd);
+            conn_set_status(conn, StatusRequestedRangeNotSatisfiable);
+            return false;
+        }
+
+        // Set status code
+        conn_set_status(conn, StatusPartialContent);
+
+        // Write range response headers.
+        send_range_headers(conn, start_offset, end_offset, stat_buf.st_size);
+
+        // Update file offset and size.
+        conn->response->file_offset   = start_offset;
+        conn->response->file_size     = stat_buf.st_size;
+        conn->response->range_request = true;
+        conn->response->max_range     = end_offset - start_offset + 1;
+    }
+
     return true;
 }
 
 // Build the complete HTTP response
 INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     response_t* resp = conn->response;
-
-    // Set default status if not set
-    if (resp->status_code <= 0) {
+    if (resp->status_len == 0)
         conn_set_status(conn, StatusOK);
-    }
 
-    // Default content length is the body length
-    size_t content_length = resp->body_len;
-    char content_length_str[32];
+    if (likely(!resp->range_request)) {
+        // Default content length is the body length
+        size_t content_length = resp->body_len;
+        char content_length_str[32];
 
-    // OPTIONS method does not have a body, so we set content length to 0.
-    // But HEAD needs to have the same headers as GET.
-    if (method != HTTP_OPTIONS) {
-        // If we are serving a file, use the file size.
-        if (resp->file_fd >= 0) {
-            content_length = resp->file_size;  // Use file size if serving a file
+        // OPTIONS method does not have a body, so we set content length to 0.
+        // But HEAD needs to have the same headers as GET.
+        if (method != HTTP_OPTIONS) {
+            // If we are serving a file, use the file size.
+            if (resp->file_fd >= 0) {
+                content_length = resp->file_size;  // Use file size if serving a file
+            }
+        } else {
+            content_length = 0;  // For OPTIONS method, we don't send a body
         }
-    } else {
-        content_length = 0;  // For OPTIONS method, we don't send a body
-    }
 
-    // Set Content-Length header
-    snprintf(content_length_str, sizeof(content_length_str), "%zu", content_length);
-    conn_writeheader(conn, "Content-Length", content_length_str);
+        // Set Content-Length header
+        snprintf(content_length_str, sizeof(content_length_str), "%zu", content_length);
+        conn_writeheader(conn, "Content-Length", content_length_str);
+    }
 
     // Set server headers.
     conn_writeheader(conn, "Server", "Pulsar/1.0");
@@ -935,7 +1033,7 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
         return;
     }
 
-    conn->request->headers_len = end_of_headers - read_buf + 4;
+    size_t headers_len = end_of_headers - read_buf + 4;
 
     char path[1024];
     char http_protocol[16];
@@ -982,12 +1080,12 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
     if (route) {
         conn->request->route = route;
 
-        if (!parse_request_headers(conn, method, read_buf)) {
+        if (!parse_request_headers(conn, method, read_buf, headers_len)) {
             send_error_response(conn, StatusInternalServerError);
             return;
         };
 
-        if (!parse_request_body(conn, conn->request->headers_len, read_buf, read_bytes)) {
+        if (!parse_request_body(conn, headers_len, read_buf, read_bytes)) {
             send_error_response(conn, StatusInternalServerError);
             return;
         }
@@ -1228,10 +1326,19 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             }
 
             /* Send file data directly */
-            off_t remaining = res->file_size - res->file_offset;
+            off_t buffer_size;
+            if (res->range_request) {
+                // send file will handle position based on offset.
+                buffer_size = 1 << 20;
+                buffer_size = res->max_range < buffer_size ? res->max_range : buffer_size;
+            } else {
+                // Send appropriate position of file.
+                buffer_size = res->file_size - res->file_offset;  // remaining bytes.
+                lseek(res->file_fd, 0, SEEK_SET);
+            }
 
             errno = 0;  // Reset errno before sendfile.
-            sent  = sendfile(conn->client_fd, res->file_fd, &res->file_offset, remaining);
+            sent  = sendfile(conn->client_fd, res->file_fd, &res->file_offset, buffer_size);
             if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT

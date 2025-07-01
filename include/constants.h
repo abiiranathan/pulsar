@@ -3,29 +3,29 @@
 
 #include <stddef.h>
 
-// If 1, duplicate response headers are detected and ignored.
-// However this may have a small performance impact.
+// If "truthy", duplicate response headers are detected and ignored.
+// However this may have a small performance impact of calling memmem or alternative.
 #ifndef DETECT_DUPLICATE_RES_HEADERS
 #define DETECT_DUPLICATE_RES_HEADERS 0
 #endif
 
-// Number of workers
+// Number of workers. Should be ideally == ncpus.
 #ifndef NUM_WORKERS
 #define NUM_WORKERS 8
 #endif
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 4096
+#define MAX_EVENTS 1024
 #endif
 
-// Buffer size for incoming statusline + headers +/-(part/all of body)
+// Buffer size for incoming statusline + headers.
 #ifndef READ_BUFFER_SIZE
 #define READ_BUFFER_SIZE 4096
 #endif
 
 // Default buffer size for status + headers + body.
-// This resizable with realloc.
+// This is resizable with realloc but must be atleast 8K.
 #ifndef WRITE_BUFFER_SIZE
 #define WRITE_BUFFER_SIZE 8192
 #endif
@@ -40,12 +40,12 @@
 #define MAX_BODY_SIZE (2 << 20)
 #endif
 
-// Arena memory per connection.
+// Arena memory per connection for request headers, query params and path params.
 #ifndef ARENA_CAPACITY
 #define ARENA_CAPACITY (4 * 1024)
 #endif
 
-// Maximum number of routes
+// Maximum number of routes to statically allocated for.
 #ifndef MAX_ROUTES
 #define MAX_ROUTES 64
 #endif
@@ -65,6 +65,7 @@
 #define HEADERS_CAPACITY 32
 #endif
 
+// Timeout in seconds for graceful shutdown on SIGINT/SIGTERM before forceful shutdown.
 #ifndef SHUTDOWN_TIMEOUT_SECONDS
 #define SHUTDOWN_TIMEOUT_SECONDS 10
 #endif

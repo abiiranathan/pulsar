@@ -9,3 +9,5 @@ forms_test
 __pycache__
 dist
 *.egg-info
+*.mp4
+*.pdf
