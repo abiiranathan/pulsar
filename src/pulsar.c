@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <fcntl.h>
+#include <netdb.h>  // For getaddrinfo()
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -402,7 +403,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, char* rea
     request_t* req        = conn->request;
     size_t content_length = req->content_length;
     size_t body_available = read_bytes - headers_len;
-    assert(body_available <= content_length);
+    ASSERT(body_available <= content_length);
 
     if (content_length > MAX_BODY_SIZE) {
         conn_set_status(conn, StatusRequestEntityTooLarge);
@@ -595,7 +596,7 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
 }
 
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {
-    assert(name && value);
+    ASSERT(name && value);
 
     response_t* res     = conn->response;
     size_t name_len     = strlen(name);
@@ -903,7 +904,7 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 
     // Note that: RESPONSE_HEADER_CAPACITY = (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)
     // So we can safely write \r\n at the end.
-    assert(resp->headers_len <= RESPONSE_HEADER_CAPACITY);
+    ASSERT(resp->headers_len <= RESPONSE_HEADER_CAPACITY);
 
     // Terminate headers with \r\n
     memcpy(resp->buffer + BUFFER_HEADERS_OFFSET + resp->headers_len, CRLF, 2);
@@ -916,7 +917,7 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 
 void static_file_handler(connection_t* conn) {
     route_t* route = conn->request->route;
-    assert((route->flags & STATIC_ROUTE_FLAG) != 0 && route);
+    ASSERT((route->flags & STATIC_ROUTE_FLAG) != 0 && route);
 
     const char* dirname = route->dirname;
     size_t dirlen       = strlen(dirname);
@@ -989,7 +990,7 @@ path_toolong:
  * ================================================================ */
 
 void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr)) {
-    assert(conn && ptr);
+    ASSERT(conn && ptr);
     conn->user_data           = ptr;
     conn->user_data_free_func = free_func;
 }
@@ -1047,7 +1048,7 @@ void use_global_middleware(HttpHandler* middleware, size_t count) {
         return;
     }
 
-    assert(count + global_mw_count <= MAX_GLOBAL_MIDDLEWARE);
+    ASSERT(count + global_mw_count <= MAX_GLOBAL_MIDDLEWARE);
 
     for (size_t i = 0; i < count; i++) {
         global_middleware[global_mw_count++] = middleware[i];
@@ -1057,7 +1058,7 @@ void use_global_middleware(HttpHandler* middleware, size_t count) {
 void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count) {
     if (count == 0)
         return;
-    assert(route->mw_count + count <= MAX_ROUTE_MIDDLEWARE);
+    ASSERT(route->mw_count + count <= MAX_ROUTE_MIDDLEWARE);
 
     for (size_t i = 0; i < count; i++) {
         route->middleware[route->mw_count++] = middleware[i];
@@ -1170,32 +1171,64 @@ INLINE void set_nonblocking(int fd) {
     }
 }
 
-static int create_server_socket(int port) {
+static int create_server_socket(const char* host, int port) {
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %d\n", port);
+        exit(EXIT_FAILURE);
+    }
+
     int fd;
-    struct sockaddr_in address;
-    int opt = 1;
+    int opt               = 1;
+    struct addrinfo hints = {0};
+    struct addrinfo *result, *rp;
 
-    if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed");
+    hints.ai_family    = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
+    hints.ai_socktype  = SOCK_STREAM;  // TCP
+    hints.ai_flags     = AI_PASSIVE;   // For wildcard IP address
+    hints.ai_protocol  = 0;            /* Any protocol */
+    hints.ai_canonname = NULL;
+    hints.ai_addr      = NULL;
+    hints.ai_next      = NULL;
+
+    // Convert port to string for getaddrinfo
+    char port_str[6];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    // Resolve host (or use INADDR_ANY if NULL)
+    int ret = getaddrinfo(host, port_str, &hints, &result);
+    if (ret != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ret));
         exit(EXIT_FAILURE);
     }
 
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
+    // Try each address until we successfully bind
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd == -1)
+            continue;
+
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+            perror("setsockopt");
+            close(fd);
+            continue;
+        }
+
+        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0)
+            break;  // Success
+
+        close(fd);
     }
 
-    address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port        = htons(port);
+    freeaddrinfo(result);
 
-    if (bind(fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        perror("bind failed");
+    if (rp == NULL) {
+        fprintf(stderr, "Could not bind to %s:%d\n", host ? host : "*", port);
         exit(EXIT_FAILURE);
     }
 
     if (listen(fd, SOMAXCONN) < 0) {
         perror("listen");
+        close(fd);
         exit(EXIT_FAILURE);
     }
 
@@ -1662,8 +1695,8 @@ void wait_for_workers_shutdown(pthread_t* workers, int timeout_seconds) {
     }
 }
 
-int pulsar_run(int port) {
-    server_fd = create_server_socket(port);
+int pulsar_run(const char* addr, int port) {
+    server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
     pthread_t workers[NUM_WORKERS];
@@ -1691,7 +1724,7 @@ int pulsar_run(int port) {
     }
 
     usleep(1000);  // Give workers time to start
-    printf("Server with %d workers listening on port %d\n", NUM_WORKERS, port);
+    printf("Server with %d workers listening on http://%s:%d\n", NUM_WORKERS, addr ? addr : "0.0.0.0", port);
     printf("Press Ctrl+C once for graceful shutdown, twice for immediate shutdown\n");
 
     wait_for_workers_shutdown(workers, SHUTDOWN_TIMEOUT_SECONDS);

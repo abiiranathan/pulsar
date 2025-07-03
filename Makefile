@@ -1,26 +1,40 @@
-# $^: expands to all prerequisites
-# $@: expands to the target name
-# $<: first prerequisite
-
 # Detect platform
 UNAME := $(shell uname -s)
 ARCH := $(shell uname -m)
 
-# Compiler and Flags
+# Build mode: release (default) or debug
+BUILD ?= release
+
+# Compiler
 CC := gcc
-CFLAGS := -Wall -Werror -Wextra -pedantic -O3 -mavx2 -flto -std=c23 -mtune=native -D_GNU_SOURCE
+
+# Base compiler flags
+BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC
+
+# Mode-specific flags and directories
+ifeq ($(BUILD),debug)
+    CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG -fsanitize=address -fsanitize=undefined -fanalyzer
+    BUILD_DIR := build/debug
+else ifeq ($(BUILD),release)
+    CFLAGS := $(BASE_CFLAGS) -O3 -DNDEBUG -flto -mavx2 -mtune=native -march=native
+    BUILD_DIR := build/release
+else
+    $(error Invalid BUILD type: $(BUILD))
+endif
+
+# Linker flags
 LDFLAGS := -lpthread
+
+# Installation path
 INSTALL_PREFIX := /usr/local
 
 # Platform-specific adjustments
 ifeq ($(UNAME), Darwin)
-    # Universal binary flags for macOS (Intel + ARM)
     CFLAGS += -arch x86_64 -arch arm64
     LIBEXT := dylib
     SONAME_FLAG := -install_name
     SHARED_FLAG := -dynamiclib
 else ifeq ($(UNAME), Linux)
-    CFLAGS += -mtune=native -march=native
     LIBEXT := so
     SONAME_FLAG := -soname
     SHARED_FLAG := -shared
@@ -28,38 +42,40 @@ else
     $(error Unsupported platform: $(UNAME))
 endif
 
-# Target Executables
-TARGET := server
-TEST_TARGET := forms_test
+# Targets
+TARGET := $(BUILD_DIR)/server
+TEST_TARGET := $(BUILD_DIR)/forms_test
 
-# Source Files
+# Source and header directories
 SRC_DIR := src
-BASE_SRC := $(SRC_DIR)/routing.c $(SRC_DIR)/method.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
 HEADERS_DIR := include
+
+# Source files
+BASE_SRC := $(SRC_DIR)/routing.c $(SRC_DIR)/method.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
+TEST_SRCS := $(SRC_DIR)/forms_test.c $(SRC_DIR)/forms.c
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 
-SRC := main.c $(BASE_SRC)
-TEST_SRCS := $(SRC_DIR)/forms_test.c $(SRC_DIR)/forms.c
-LIB_SRCS := $(BASE_SRC)
+# Object files (placed in build dir)
+LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(BASE_SRC))
 
 # Library names
-STATIC_LIB := libpulsar.a
-SHARED_LIB := libpulsar.$(LIBEXT)
+STATIC_LIB := $(BUILD_DIR)/libpulsar.a
+SHARED_LIB := $(BUILD_DIR)/libpulsar.$(LIBEXT)
 LIB_VERSION := 1.0.0
-SONAME := $(SHARED_LIB).1
-
-# Object files
-LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,%.o,$(LIB_SRCS))
+SONAME := libpulsar.$(LIBEXT).1
 
 # Default target
 all: $(TARGET)
 
-# Main application build rule
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+# Build the main application
+MAIN_SRC := main.c
+$(TARGET): $(MAIN_SRC) $(LIB_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(MAIN_SRC) $(LIB_OBJS) -o $@ $(LDFLAGS)
 
-# Test binary build rule
+# Build the test application
 $(TEST_TARGET): $(HEADERS) $(TEST_SRCS)
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Run tests
@@ -70,6 +86,7 @@ test: $(TEST_TARGET)
 static: $(STATIC_LIB)
 
 $(STATIC_LIB): $(LIB_OBJS)
+	@mkdir -p $(dir $@)
 	ar rcs $@ $^
 	ranlib $@
 
@@ -77,37 +94,40 @@ $(STATIC_LIB): $(LIB_OBJS)
 shared: $(SHARED_LIB)
 
 $(SHARED_LIB): $(LIB_OBJS)
+	@mkdir -p $(dir $@)
 	$(CC) $(SHARED_FLAG) -Wl,$(SONAME_FLAG),$(SONAME) -o $@.$(LIB_VERSION) $^ $(LDFLAGS)
 	ln -sf $@.$(LIB_VERSION) $@
-	ln -sf $@.$(LIB_VERSION) $(SONAME)
+	ln -sf $@.$(LIB_VERSION) $(BUILD_DIR)/$(SONAME)
 
-# Pattern rule for object files
-%.o: $(SRC_DIR)/%.c $(HEADERS)
-	$(CC) $(CFLAGS) -fPIC -c $< -o $@
+# Object file rule
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Build both libraries
+# Build both static and shared libraries
 lib: static shared
 
+# Install binaries, libraries, and headers
 install: lib
-	# Install static library
+	# Install static lib
 	install -d $(INSTALL_PREFIX)/lib
 	install -m 644 $(STATIC_LIB) $(INSTALL_PREFIX)/lib/
-	
-	# Install shared library
+
+	# Install shared lib
 	install -m 755 $(SHARED_LIB).$(LIB_VERSION) $(INSTALL_PREFIX)/lib/
-	ln -sf $(SHARED_LIB).$(LIB_VERSION) $(INSTALL_PREFIX)/lib/$(SHARED_LIB)
+	ln -sf $(SHARED_LIB).$(LIB_VERSION) $(INSTALL_PREFIX)/lib/libpulsar.$(LIBEXT)
 	ln -sf $(SHARED_LIB).$(LIB_VERSION) $(INSTALL_PREFIX)/lib/$(SONAME)
-	
+
 	# Install headers
 	install -d $(INSTALL_PREFIX)/include/pulsar
 	install -m 644 $(HEADERS) $(INSTALL_PREFIX)/include/pulsar/
-	
+
 	# Update linker cache (Linux only)
 ifeq ($(UNAME), Linux)
 	ldconfig
 endif
 
-# Platform-specific verification
+# Verify built library
 verify:
 ifeq ($(UNAME), Darwin)
 	@echo "Verifying universal binary..."
@@ -120,13 +140,20 @@ endif
 # Python package preparation
 pyupdate: lib
 	mkdir -p python/pulsar/lib
-	cp -f $(SHARED_LIB)* python/pulsar/lib
+	cp -fP $(SHARED_LIB)* python/pulsar/lib
 ifeq ($(UNAME), Darwin)
-	cp -f $(STATIC_LIB) python/pulsar/lib
+	cp -fP $(STATIC_LIB) python/pulsar/lib
 endif
 
-# Clean up build artifacts
+# Clean build artifacts
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(STATIC_LIB) $(SHARED_LIB)* $(SONAME) *.o perf.data*
+	rm -rf build *.o *.a *.so* *.dylib* $(TARGET) $(TEST_TARGET)
 
-.PHONY: all test static shared lib install verify pyupdate clean
+# Explicit targets for debug and release
+debug:
+	$(MAKE) BUILD=debug all
+
+release:
+	$(MAKE) BUILD=release all
+
+.PHONY: all test static shared lib install verify pyupdate clean debug release

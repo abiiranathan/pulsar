@@ -156,28 +156,28 @@ malloc_fail:
 }
 
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
-    assert(global_route_count < MAX_ROUTES && http_method_valid(method) && pattern && handler &&
+    ASSERT(global_route_count < MAX_ROUTES && http_method_valid(method) && pattern && handler &&
            "Invalid arguments");
 
     route_t* r = &global_routes[global_route_count];
     r->pattern = strdup(pattern);
-    assert(r->pattern && "strdup failed to allocate pattern");
+    ASSERT(r->pattern && "strdup failed to allocate pattern");
 
     r->method      = method;
     r->handler     = handler;
     r->path_params = malloc(sizeof(PathParams));
-    assert(r->path_params && "malloc failed to allocate PathParams");
+    ASSERT(r->path_params && "malloc failed to allocate PathParams");
 
     bool valid;
     size_t nparams = count_path_params(pattern, &valid);
-    assert(valid && "Invalid path parameters in pattern");
+    ASSERT(valid && "Invalid path parameters in pattern");
 
     r->path_params->match_count  = 0;        // Init the match count
     r->path_params->total_params = nparams;  // Set the expected path parameters
     r->path_params->params       = NULL;
     if (nparams > 0) {
         r->path_params->params = calloc(nparams, sizeof(PathParam));
-        assert(r->path_params->params && "calloc failed to allocate array of PathParam's");
+        ASSERT(r->path_params->params && "calloc failed to allocate array of PathParam's");
     }
 
     // default to normal route.
@@ -194,14 +194,14 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 }
 
 route_t* register_static_route(const char* pattern, const char* dir) {
-    assert(pattern && dir && "pattern and dir must not be NULL");
+    ASSERT(pattern && dir && "pattern and dir must not be NULL");
 
     if (strcmp(".", dir) == 0)
         dir = "./";
     if (strcmp("..", dir) == 0)
         dir = "../";
     size_t dirlen = strlen(dir);
-    assert((dirlen + 1 < PATH_MAX) && "Directory name is too long");
+    ASSERT((dirlen + 1 < PATH_MAX) && "Directory name is too long");
 
     char* dirname = NULL;  // will be malloc'd
     if ((dirname = realpath(dir, NULL)) == NULL) {
@@ -210,7 +210,7 @@ route_t* register_static_route(const char* pattern, const char* dir) {
     }
 
     // We must have a valid directory
-    assert(is_dir(dirname) && "dir must be a valid path to an existing directory");
+    ASSERT(is_dir(dirname) && "dir must be a valid path to an existing directory");
 
     if (dirname[dirlen - 1] == '/') {
         dirname[dirlen - 1] = '\0';  // Remove trailing slash

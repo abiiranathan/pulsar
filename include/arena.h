@@ -97,4 +97,4 @@ INLINE void arena_reset(Arena* arena) {
 }
 #endif
 
-#endif  // ARENA_H
+#endif /* ARENA_H */

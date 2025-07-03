@@ -33,6 +33,13 @@ extern "C" {
 #define STATIC_INLINE
 #endif
 
+#ifdef NDEBUG
+#define ASSERT(expr) ((void)(expr))  // evaluates but discards, avoids "unused"
+#else
+#include <assert.h>
+#define ASSERT(expr) assert((expr))
+#endif
+
 INLINE unsigned long parse_ulong(const char* value, bool* valid) {
     assert(valid && "NULL pointer for bool *valid");
 

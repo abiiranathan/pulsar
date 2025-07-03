@@ -28,7 +28,7 @@ Pulsar follows these key architectural principles:
    - Uses EPOLLEXCLUSIVE to avoid thundering herd
 
 2. **Connection lifecycle**:
-   - Each connection is handled by a single worker
+   - Each connection is handled by a single worker.
    - Connections can be kept alive (Keep-Alive)
    - Timeout for idle connections
 
@@ -48,9 +48,10 @@ Pulsar follows these key architectural principles:
 ### Server Management
 
 ```c
-int pulsar_run(int port);
+int pulsar_run(const char *addr, int port);
 ```
-Starts the server on the specified port. Runs until SIGINT/SIGTERM is received.
+Starts the server on the specified address (or IP address) and port. 
+Runs until SIGINT/SIGTERM is received and then graceful shutdown is performed.
 
 ### Routing
 
@@ -148,7 +149,7 @@ int main() {
     register_static_route("/static/", "./public");
     
     // Start server
-    return pulsar_run(8080);
+    return pulsar_run(NULL, 8080);
 }
 ```
 
@@ -194,27 +195,115 @@ sudo make install
 make clean
 ```
 
-
-
 ## Linking
 Link your binary with `-lpulsar` flag after installation.
 
-## Configuration
+# Configuration
 
-Various constants can be adjusted in pulsar.h:
+Here's a comprehensive README section documenting these constants:
 
+---
+
+## Configuration Constants
+
+This document explains the compile-time configuration options available in the server.
+
+## Table of Contents
+1. [Performance Tuning](#performance-tuning)
+2. [Memory Management](#memory-management)
+3. [Network Settings](#network-settings)
+4. [Security Limits](#security-limits)
+5. [Middleware & Routing](#middleware--routing)
+6. [Debugging Features](#debugging-features)
+
+---
+
+## Performance Tuning
+
+| Constant             | Default | Description                                         |
+| -------------------- | ------- | --------------------------------------------------- |
+| `NUM_WORKERS`        | 8       | Number of worker processes (should match CPU cores) |
+| `MAX_EVENTS`         | 1024    | Maximum ready events processed per epoll iteration  |
+| `CONNECTION_TIMEOUT` | 30      | Keep-Alive timeout in seconds                       |
+
+**Recommendations:**
+- Set `NUM_WORKERS` to your CPU core count
+- Increase `MAX_EVENTS` for high connection loads (requires more RAM)
+
+---
+
+## Memory Management
+
+| Constant            | Default | Description                                    |
+| ------------------- | ------- | ---------------------------------------------- |
+| `READ_BUFFER_SIZE`  | 4096    | Buffer for incoming request headers (bytes)    |
+| `WRITE_BUFFER_SIZE` | 8192    | Initial buffer for responses (grows as needed) |
+| `ARENA_CAPACITY`    | 4096    | Per-connection memory pool size (bytes)        |
+
+**Constraints:**
 ```c
-#define NUM_WORKERS 8             // Number of workers.
-#define MAX_EVENTS 2048           // Maximum events for epoll->ready queue.
-#define READ_BUFFER_SIZE 819      // Buffer size for request data.
-#define CONNECTION_TIMEOUT 30     // Keep-Alive connection timeout in seconds
-#define MAX_BODY_SIZE (2 << 20)   // Max Request body allowed(2MB default)
-#define ARENA_CAPACITY 8 * 1024   // Arena memory per connection(8KB default).
-#define MAX_ROUTES 64             // Maximum number of routes
-#define MAX_GLOBAL_MIDDLEWARE 32  // maximum number of global middleware.
-#define MAX_ROUTE_MIDDLEWARE 4    // Maximum number of route middleware.
-
+static_assert(READ_BUFFER_SIZE >= 1024);
+static_assert(WRITE_BUFFER_SIZE >= 8192);
+static_assert(ARENA_CAPACITY between 1KB-1MB);
 ```
+
+---
+
+## Network Settings
+
+| Constant                   | Default | Description                       |
+| -------------------------- | ------- | --------------------------------- |
+| `MAX_BODY_SIZE`            | 2MB     | Maximum allowed request body size |
+| `SHUTDOWN_TIMEOUT_SECONDS` | 10      | Graceful shutdown window          |
+
+**Security Note:**
+- `MAX_BODY_SIZE` prevents memory exhaustion attacks
+- Minimum 10-second shutdown ensures clean exit
+
+---
+
+## Middleware & Routing
+
+| Constant                | Default | Description                |
+| ----------------------- | ------- | -------------------------- |
+| `MAX_ROUTES`            | 64      | Maximum registered routes  |
+| `MAX_GLOBAL_MIDDLEWARE` | 32      | Global middleware slots    |
+| `MAX_ROUTE_MIDDLEWARE`  | 4       | Per-route middleware slots |
+| `HEADERS_CAPACITY`      | 32      | Maximum request headers    |
+
+**Architecture:**
+- Middleware executes in registration order
+- Exceeding header capacity returns `431 Request Header Fields Too Large`
+
+---
+
+## Debugging Features
+
+| Constant                       | Default | Description                       |
+| ------------------------------ | ------- | --------------------------------- |
+| `DETECT_DUPLICATE_RES_HEADERS` | 0       | Filter duplicate response headers |
+| `WRITE_SERVER_HEADERS`         | 0       | Auto-add Server/Date headers      |
+
+**Performance Tradeoffs:**
+```text
+DETECT_DUPLICATE_RES_HEADERS=1 adds ~2% overhead
+WRITE_SERVER_HEADERS=1 adds ~1% overhead
+```
+
+---
+
+## Build Configuration
+
+Override defaults during compilation:
+```bash
+# Example: 16 workers, 8MB max body
+make CFLAGS="-DNUM_WORKERS=16 -DMAX_BODY_SIZE=$((8<<20))"
+```
+
+
+---
+
+See [constants.h](src/constants.h) for implementation details.
 
 ## Kernel Tuning (sysctl)
 

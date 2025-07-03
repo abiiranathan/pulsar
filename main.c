@@ -59,7 +59,7 @@ void echo_handler(connection_t* conn) {
 void pathparams_query_params_handler(connection_t* conn) {
     const char* userId   = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
-    assert(userId && username);
+    ASSERT(userId && username);
 
     // Should exist, otherwise our router is broken
     printf("Path Params: \n");
@@ -169,5 +169,5 @@ int main() {
 
     register_static_route("/static", "./");
 
-    return pulsar_run(8080);
+    return pulsar_run("localhost", 8080);
 }

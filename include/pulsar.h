@@ -35,10 +35,11 @@ typedef struct request_t request_t;
 /**
  * @brief Starts the Pulsar HTTP server event loop
  *
- * @param port The TCP port to listen on
+ * @param addr The IP address to bind to (NULL for all interfaces)
+ * @param port The TCP port to listen on. Valid range is 1-65535.
  * @return int 0 on success, non-zero on error
  */
-int pulsar_run(int port);
+int pulsar_run(const char* addr, int port);
 
 /**
  * @brief Registers global middleware functions
