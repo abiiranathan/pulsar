@@ -22,16 +22,11 @@
 #include "../include/pulsar.h"
 
 // Buffer segment offsets (fixed positions)
-#define RESPONSE_BUFFER_STATUS_OFFSET 0
-#define RESPONSE_BUFFER_HEADERS_OFFSET 256  // Reserve 256B for status line
-#define RESPONSE_BUFFER_BODY_OFFSET 4355    // Reserve 4096 for headers (4355 - 256) + 3 for \r\n\0
-
-// Actual size available for headers without terminating \r\n (no NULL terminator)
-#define RESPONSE_HEADER_CAPACITY                                                                             \
-    (RESPONSE_BUFFER_BODY_OFFSET - RESPONSE_BUFFER_HEADERS_OFFSET - 3)  // -3 \r\n
-
-// Size available for status line with terminating \r\n.
-#define RESPONSE_STATUS_CAPACITY RESPONSE_BUFFER_HEADERS_OFFSET
+#define BUFFER_STATUS_OFFSET 0
+#define BUFFER_HEADERS_OFFSET 64                               // Reserve 64B for status line
+#define BUFFER_BODY_OFFSET (BUFFER_HEADERS_OFFSET + 4096 + 2)  // Reserve 4096 for headers+\r\n
+#define RESPONSE_HEADER_CAPACITY (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
+#define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
 
 /* ================================================================
  * Data Structures and Type Definitions
@@ -193,9 +188,11 @@ INLINE response_t* create_response() {
 
 // Free request body. (Request structure is arena-allocated.)
 INLINE void free_request(request_t* req) {
-    if (req && req->body) {
+    if (unlikely(!req))
+        return;
+
+    if (unlikely(req->body)) {
         free(req->body);
-        req->body = NULL;
     }
 }
 
@@ -204,11 +201,9 @@ INLINE void free_response(response_t* resp) {
     if (!resp)
         return;
 
-    if (resp->buffer) {
+    if (likely(resp->buffer)) {
         free(resp->buffer);
-        resp->buffer = NULL;
     }
-
     free(resp);
 }
 
@@ -491,30 +486,54 @@ size_t req_content_len(connection_t* conn) {
 
 // Set HTTP status code and message
 void conn_set_status(connection_t* conn, http_status code) {
-    assert(code >= StatusContinue && code <= StatusNetworkAuthenticationRequired);
+    static_assert(RESPONSE_STATUS_CAPACITY >= 64, "Response status buffer must be at least 64 bytes");
 
-    response_t* res = conn->response;
-    char status_line[RESPONSE_STATUS_CAPACITY];
+    // Validate the status code.
+    if (code < StatusContinue || code > StatusNetworkAuthenticationRequired) {
+        fprintf(stderr, "Invalid HTTP status code: %d\n", code);
+        exit(EXIT_FAILURE);  // Invalid status code, abort the program.
+    }
+
+    // Status line: // "HTTP/1.1 <code> <status text>\r\n"
+    //                [8 bytes ][1 B][3B][1B][32 B max][2 bytes] = 47 bytes max
+    response_t* res  = conn->response;
     res->status_code = code;
 
     // Clear only the status line segment if it was already set
     if (res->status_len > 0) {
-        memset(res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, 0, res->status_len);
-        res->status_len = 0;  // Reset length
+        memset(res->buffer + BUFFER_STATUS_OFFSET, 0, res->status_len);
+        res->status_len = 0;
     }
 
-    int len = snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d %s\r\n", code, http_status_text(code));
+    // Write directly to status segment
+    unsigned char* dest = res->buffer + BUFFER_STATUS_OFFSET;
+    size_t i            = 0;
 
-    // Just to be sure, but we should crash if something unexpected happens.
-    assert(len > 0 && (size_t)len < sizeof(status_line));
+    // Write "HTTP/1.1 "
+    memcpy(dest + i, "HTTP/1.1 ", 9);
+    i += 9;
 
-    // Write to fixed status segment
-    memcpy(res->buffer + RESPONSE_BUFFER_STATUS_OFFSET, status_line, len);
-    res->status_len = len;
+    // Write 3-digit status code
+    dest[i++] = (code / 100) % 10 + '0';
+    dest[i++] = (code / 10) % 10 + '0';
+    dest[i++] = (code % 10) + '0';
+    dest[i++] = ' ';
+
+    // status text is guaranteed to be null-terminated and less than 32 bytes.
+    const char* status_text = http_status_text(code);
+    while (*status_text && i < RESPONSE_STATUS_CAPACITY - 2) {  // -2 for \r\n
+        dest[i++] = (unsigned char)*status_text++;
+    }
+
+    // Write \r\n
+    dest[i++] = '\r';
+    dest[i++] = '\n';
+
+    res->status_len = i;
 }
 
 INLINE bool res_header_exists(response_t* res, const char* name, size_t name_len) {
-    unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+    unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
     return pulsar_memmem(headers_start, res->headers_len, name, name_len);
 }
 
@@ -522,7 +541,7 @@ INLINE bool res_header_exists(response_t* res, const char* name, size_t name_len
 // If header does not exist or malloc fails.
 char* res_header_get(connection_t* conn, const char* name) {
     response_t* res              = conn->response;
-    unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+    unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
 
     char* ptr = memmem(headers_start, res->headers_len, name, strlen(name));
     if (!ptr) {
@@ -552,7 +571,7 @@ char* res_header_get(connection_t* conn, const char* name) {
 bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size) {
     // Check if header already exists in the buffer
     response_t* res              = conn->response;
-    unsigned char* headers_start = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET;
+    unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
 
     char* ptr = memmem(headers_start, res->headers_len, name, strlen(name));
     if (!ptr) {
@@ -580,32 +599,38 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
 }
 
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {
-    // Validate input.
-    if (unlikely(!name || !value || name[0] == '\0' || value[0] == '\0')) {
-        return;
-    }
+    assert(name && value);
 
-    response_t* res = conn->response;
-    size_t name_len = strlen(name);
+    response_t* res     = conn->response;
+    size_t name_len     = strlen(name);
+    size_t value_len    = strlen(value);
+    size_t required_len = name_len + value_len + 4;  // ": \r\n"
 
 #if DETECT_DUPLICATE_RES_HEADERS
-    // If header already exists(and is not Set-Cookie), do not overwrite it.
     if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0)
         return;
 #endif
 
-    size_t required_len = name_len + strlen(value) + 4;  // 4 for ": ", "\r\n"
     if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY)
-        return;  // Header too large to fit in the buffer
+        return;
 
-    // Write directly to headers segment
-    size_t cursize      = RESPONSE_HEADER_CAPACITY - res->headers_len;
-    unsigned char* dest = res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_len;
-    int written         = snprintf((char*)dest, cursize, "%s: %s\r\n", name, value);
-    if (written < 0 || (size_t)written >= cursize) {
-        return;  // Error formatting header or buffer too small
-    }
-    res->headers_len += written;
+    unsigned char* dest = res->buffer + BUFFER_HEADERS_OFFSET + res->headers_len;
+
+    // copy name + ": "
+    memcpy(dest, name, name_len);
+    dest += name_len;
+    *dest++ = ':';
+    *dest++ = ' ';
+
+    // copy value
+    memcpy(dest, value, value_len);
+    dest += value_len;
+
+    // Terminate with CRLF
+    *dest++ = '\r';
+    *dest++ = '\n';
+
+    res->headers_len += required_len;
 }
 
 void conn_set_content_type(connection_t* conn, const char* content_type) {
@@ -615,17 +640,41 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
     conn->response->content_type_set = true;
 }
 
+static inline size_t grow_buffer(size_t current_size, size_t required) {
+    static const size_t kInitialSize = 1024;
+    static const size_t kThreshold   = 1024 * 1024;   // 1MB
+    static const size_t kMaxSize     = SIZE_MAX / 2;  // Safety cap
+
+    if (required > kMaxSize) {
+        return 0;  // Buffer growth would overflow
+    }
+
+    size_t new_size = current_size > 0 ? current_size : kInitialSize;
+    while (new_size < required) {
+        if (new_size < kThreshold) {
+            if (new_size > kMaxSize / 2) {
+                return 0;  // Buffer growth would overflow (doubling)
+            }
+            new_size *= 2;  // exponential growth
+        } else {
+            if (new_size > kMaxSize - kThreshold) {
+                return 0;  // Buffer growth would overflow (linear)
+            }
+            new_size += kThreshold;  // linear growth
+        }
+    }
+    return new_size;
+}
+
 int conn_write(connection_t* conn, const void* data, size_t len) {
     response_t* res = conn->response;
-
-    // Check if body segment has space
-    size_t required = RESPONSE_BUFFER_BODY_OFFSET + res->body_len + len;
+    size_t required = BUFFER_BODY_OFFSET + res->body_len + len;
 
     if (required > res->buffer_size) {
-        // Calculate new size more carefully
-        size_t new_size = res->buffer_size;
-        while (new_size < required) {
-            new_size = (new_size < 1024 * 1024) ? new_size * 2 : new_size + 1024 * 1024;
+        size_t new_size = grow_buffer(res->buffer_size, required);
+        if (new_size == 0) {
+            fprintf(stderr, "Failed to grow response buffer\n");
+            return 0;  // Failed to allocate more memory
         }
 
         unsigned char* new_buffer = realloc(res->buffer, new_size);
@@ -633,12 +682,13 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
             perror("realloc");
             return 0;
         }
+
         res->buffer      = new_buffer;
         res->buffer_size = new_size;
     }
 
     // Append data
-    memcpy(res->buffer + RESPONSE_BUFFER_BODY_OFFSET + res->body_len, data, len);
+    memcpy(res->buffer + BUFFER_BODY_OFFSET + res->body_len, data, len);
     res->body_len += len;
     return len;
 }
@@ -789,14 +839,10 @@ bool conn_servefile(connection_t* conn, const char* filename) {
     conn->response->file_size   = stat_buf.st_size;
     conn->response->file_offset = 0;
 
-    printf("Serving file: %s\n", filename);
-
     const char* range_header = headers_get(conn->request->headers, "Range");
     if (!range_header) {
         return true;
     }
-
-    printf("Range: %s\n", range_header);
 
     // If we have a "Range" request, modify offset and file size to serve correct range.
     ssize_t start_offset = 0, end_offset = 0;
@@ -859,12 +905,12 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     conn_writeheader(conn, "Date", date_buf);
 
     // This suffices because
-    // RESPONSE_HEADER_CAPACITY = (RESPONSE_BUFFER_BODY_OFFSET - RESPONSE_BUFFER_HEADERS_OFFSET - 2)
+    // RESPONSE_HEADER_CAPACITY = (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)
     // So we can safely write \r\n at the end.
     assert(resp->headers_len <= RESPONSE_HEADER_CAPACITY);
 
     // Terminate headers with \r\n
-    memcpy(resp->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + resp->headers_len, CRLF, 2);
+    memcpy(resp->buffer + BUFFER_HEADERS_OFFSET + resp->headers_len, CRLF, 2);
     resp->headers_len += 2;
 }
 
@@ -1296,9 +1342,9 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             if (!res->headers_written) {
                 // Send headers (status + headers)
                 struct iovec iov[2] = {
-                    {res->buffer + RESPONSE_BUFFER_STATUS_OFFSET + res->status_sent,
+                    {res->buffer + BUFFER_STATUS_OFFSET + res->status_sent,
                      res->status_len - res->status_sent},
-                    {res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_sent,
+                    {res->buffer + BUFFER_HEADERS_OFFSET + res->headers_sent,
                      res->headers_len - res->headers_sent},
                 };
 
@@ -1337,8 +1383,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
                 lseek(res->file_fd, 0, SEEK_SET);
             }
 
-            errno = 0;  // Reset errno before sendfile.
-            sent  = sendfile(conn->client_fd, res->file_fd, &res->file_offset, buffer_size);
+            sent = sendfile(conn->client_fd, res->file_fd, &res->file_offset, buffer_size);
             if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT
@@ -1357,15 +1402,13 @@ static void handle_write(int epoll_fd, connection_t* conn) {
         } else {
             /* Normal buffer mode */
             struct iovec iov[3] = {
-                {res->buffer + RESPONSE_BUFFER_STATUS_OFFSET + res->status_sent,
-                 res->status_len - res->status_sent},
-                {res->buffer + RESPONSE_BUFFER_HEADERS_OFFSET + res->headers_sent,
+                {res->buffer + BUFFER_STATUS_OFFSET + res->status_sent, res->status_len - res->status_sent},
+                {res->buffer + BUFFER_HEADERS_OFFSET + res->headers_sent,
                  res->headers_len - res->headers_sent},
-                {res->buffer + RESPONSE_BUFFER_BODY_OFFSET + res->body_sent, res->body_len - res->body_sent},
+                {res->buffer + BUFFER_BODY_OFFSET + res->body_sent, res->body_len - res->body_sent},
             };
 
-            errno = 0;  // Reset errno before writev
-            sent  = writev(conn->client_fd, iov, 3);
+            sent = writev(conn->client_fd, iov, 3);
             if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT
@@ -1499,21 +1542,19 @@ void* worker_thread(void* arg) {
                 }
             } else {
                 connection_t* conn = (connection_t*)events[i].data.ptr;
-                int state          = conn->state;
-                uint32_t ev        = events[i].events;
 
                 // Check for connection errors or hangups
-                if (ev & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+                if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
                     conn->state = STATE_CLOSING;
                 } else {
-                    switch (state) {
+                    switch (conn->state) {
                         case STATE_READING_REQUEST:
-                            if (ev & EPOLLIN) {
+                            if (events[i].events & EPOLLIN) {
                                 handle_read(epoll_fd, conn);
                             }
                             break;
                         case STATE_WRITING_RESPONSE:
-                            if (ev & EPOLLOUT) {
+                            if (events[i].events & EPOLLOUT) {
                                 handle_write(epoll_fd, conn);
                             }
                             break;

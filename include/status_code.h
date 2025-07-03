@@ -1,6 +1,7 @@
 #ifndef STATUS_CODE_H
 #define STATUS_CODE_H
 
+#include <assert.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -143,10 +144,14 @@ static const char* status_texts[] = {
     [StatusNetworkAuthenticationRequired] = "Network Authentication Required",
 };
 
+static_assert(sizeof(status_texts) / sizeof(status_texts[0]) == StatusNetworkAuthenticationRequired + 1,
+              "Status texts array must match the number of status codes");
+
 // http_status_text returns a text for the HTTP status code. It returns the empty
-// string if the code is unknown.
+// string if the code is unknown. The maximum length of the returned string is 32 bytes.
 // https://go.dev/src/net/http/status.go
 __attribute__((always_inline)) static inline const char* http_status_text(http_status code) {
+    // Validate the status code range
     if (code >= StatusContinue && code <= StatusNetworkAuthenticationRequired) {
         return status_texts[code];
     }

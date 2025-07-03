@@ -132,8 +132,8 @@ void conn_send(connection_t* conn, http_status status, const void* data, size_t 
 void conn_set_content_type(connection_t* conn, const char* content_type);
 
 /**
- * @brief Adds a header to the response
- *
+ * @brief Adds a header to the response. name and value MUST be valid
+ * null-terminated strings and not empty.
  * @param conn The connection object
  * @param name Header name
  * @param value Header value
