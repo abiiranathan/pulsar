@@ -9,6 +9,12 @@
 #define DETECT_DUPLICATE_RES_HEADERS 0
 #endif
 
+// If "truthy", server headers are written to the response.
+// This includes "Server" and "Date" headers.
+#ifndef WRITE_SERVER_HEADERS
+#define WRITE_SERVER_HEADERS 0
+#endif
+
 // Number of workers. Should be ideally == ncpus.
 #ifndef NUM_WORKERS
 #define NUM_WORKERS 8

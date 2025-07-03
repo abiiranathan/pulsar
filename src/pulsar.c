@@ -539,7 +539,7 @@ char* res_header_get(connection_t* conn, const char* name) {
     response_t* res              = conn->response;
     unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
 
-    char* ptr = memmem(headers_start, res->headers_len, name, strlen(name));
+    char* ptr = pulsar_memmem(headers_start, res->headers_len, name, strlen(name));
     if (!ptr) {
         return NULL;  // Header not found
     }
@@ -548,7 +548,7 @@ char* res_header_get(connection_t* conn, const char* name) {
     ptr += (strlen(name) + 2);
 
     // Find the next \r\n to get the response value.
-    char* value_end = memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
+    char* value_end = pulsar_memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
     if (!value_end)
         return NULL;
 
@@ -569,7 +569,7 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
     response_t* res              = conn->response;
     unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
 
-    char* ptr = memmem(headers_start, res->headers_len, name, strlen(name));
+    char* ptr = pulsar_memmem(headers_start, res->headers_len, name, strlen(name));
     if (!ptr) {
         return NULL;  // Header not found
     }
@@ -578,7 +578,7 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
     ptr += (strlen(name) + 2);
 
     // Find the next \r\n to get the response value.
-    char* value_end = memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
+    char* value_end = pulsar_memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
     if (!value_end)
         return NULL;
 
@@ -874,7 +874,6 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
         conn_set_status(conn, StatusOK);
 
     if (likely(!resp->range_request)) {
-        // Default content length is the body length
         size_t content_length = resp->body_len;
         char content_length_str[32];
 
@@ -883,7 +882,7 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
         if (method != HTTP_OPTIONS) {
             // If we are serving a file, use the file size.
             if (resp->file_fd >= 0) {
-                content_length = resp->file_size;  // Use file size if serving a file
+                content_length = resp->file_size;
             }
         } else {
             content_length = 0;  // For OPTIONS method, we don't send a body
@@ -894,14 +893,15 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
         conn_writeheader(conn, "Content-Length", content_length_str);
     }
 
+#if WRITE_SERVER_HEADERS
     // Set server headers.
     conn_writeheader(conn, "Server", "Pulsar/1.0");
     char date_buf[64];
     strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&conn->last_activity));
     conn_writeheader(conn, "Date", date_buf);
+#endif
 
-    // This suffices because
-    // RESPONSE_HEADER_CAPACITY = (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)
+    // Note that: RESPONSE_HEADER_CAPACITY = (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)
     // So we can safely write \r\n at the end.
     assert(resp->headers_len <= RESPONSE_HEADER_CAPACITY);
 
