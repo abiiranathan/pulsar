@@ -166,23 +166,19 @@ INLINE request_t* create_request(Arena* arena) {
 }
 
 INLINE response_t* create_response() {
-    response_t* resp = malloc(sizeof(response_t));
+    response_t* resp = calloc(1, sizeof(response_t));
     if (unlikely(!resp))
         return NULL;
 
-    memset(resp, 0, sizeof(response_t));  // Initialize response structure
-    resp->file_fd     = -1;               // No file descriptor initially
-    resp->status_code = StatusOK;         // Default status code
-
     // Allocate a a resizble buffer for the response.
-    resp->buffer = malloc(WRITE_BUFFER_SIZE);
+    resp->buffer = calloc(1, WRITE_BUFFER_SIZE);
     if (unlikely(!resp->buffer)) {
-        perror("malloc response buffer");
+        free(resp);
         return NULL;
     }
 
     resp->buffer_size = WRITE_BUFFER_SIZE;
-    memset(resp->buffer, 0, WRITE_BUFFER_SIZE);
+    resp->file_fd     = -1;
     return resp;
 }
 

@@ -8,34 +8,32 @@
 #include <string.h>
 #include "utils.h"
 
+// Faster alignment for 64-bit systems
+#define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // Single threaded Linear (bump) allocator.
 typedef struct {
-    uint8_t* memory;   // Arena memory
     size_t allocated;  // Allocated memory
     size_t capacity;   // Capacity of the arena
+    uint8_t memory[];  // Arena memory as a flexible array member
 } Arena;
 
 // Create a new arena with given capacity. Capacity must be > 0.
 INLINE Arena* arena_create(size_t capacity) {
-    assert(capacity > 0);
+    if (capacity == 0) {
+        return NULL;
+    }
 
-    Arena* arena = malloc(sizeof(Arena));
+    // Allocate arena structure with enough space for memory.
+    Arena* arena = calloc(1, sizeof(Arena) + capacity);
     if (!arena) {
-        perror("malloc: arena_create failed");
-        return NULL;
-    }
-
-    arena->memory = calloc(1, capacity);
-    if (!arena->memory) {
         perror("calloc: arena_create failed");
-        free(arena);
         return NULL;
     }
-
     arena->allocated = 0;
     arena->capacity  = capacity;
     return arena;
@@ -45,40 +43,41 @@ INLINE Arena* arena_create(size_t capacity) {
 INLINE void arena_destroy(Arena* arena) {
     if (!arena)
         return;
-    free(arena->memory);
     free(arena);
 }
 
 // Allocate pointer of given size in arena.
 // Returns NULL if arena is out of memory.
 INLINE void* arena_alloc(Arena* arena, size_t size) {
-    size = (size + 7) & ~7;
-    if (arena->allocated + size > arena->capacity) {
+    size = ALIGN_UP(size, 16);  // Use 16-byte alignment for SSE/AVX
+
+    if (unlikely(arena->allocated + size > arena->capacity)) {
         return NULL;
     }
     void* ptr = &arena->memory[arena->allocated];
     arena->allocated += size;
+
+    // Prefetch next allocation slot
+    __builtin_prefetch(&arena->memory[arena->allocated], 1, 3);
+
     return ptr;
 }
 
 // Copy char *str, allocating it in arena.
 // Returns NULL if out of memory.
 INLINE char* arena_strdup(Arena* arena, const char* str) {
-    size_t cap = strlen(str) + 1;
+    size_t len = strlen(str);
+    size_t cap = len + 1;
     char* dst  = arena_alloc(arena, cap);
-    if (!dst) {
-        return NULL;
+    if (dst) {
+        memcpy(dst, str, len + 1);  // +1 to include null terminator
     }
-
-    // copy string including NULL terminator.
-    (void)strlcpy(dst, str, cap);
     return dst;
 }
 
 // Reset arena memory offset to 0.
 INLINE void arena_reset(Arena* arena) {
     arena->allocated = 0;
-    // memset(arena->memory, 0, arena->capacity);
 }
 
 #ifdef __cplusplus
