@@ -16,111 +16,10 @@ typedef enum {
     STATE_FILE_BODY,         ///< Parsing file contents
 } State;
 
-/**
- * @struct FormArena
- * @brief Arena allocator for efficient memory management
- *
- * This arena allocator provides contiguous memory allocation for all form data.
- * Once allocated, the arena cannot be resized to maintain pointer validity.
- */
-typedef struct FormArena {
-    char* memory;  ///< Base pointer to allocated memory block
-    size_t size;   ///< Total size of arena in bytes
-    size_t used;   ///< Currently used bytes
-} FormArena;
-
-// =============== Arena Allocator Functions ========================
-// Initialize a new arena with the given initial size
-FormArena* form_arena_create(size_t initial_size) {
-    FormArena* arena = (FormArena*)malloc(sizeof(FormArena));
-    if (!arena) {
-        perror("malloc form_arena_create");
-        return NULL;
-    }
-
-    arena->memory = (char*)malloc(initial_size);
-    if (!arena->memory) {
-        free(arena);
-        perror("malloc form_arena_create");
-        return NULL;
-    }
-
-    arena->size = initial_size;
-    arena->used = 0;
-    return arena;
-}
-
-// Allocate memory from the arena
-void* form_arena_alloc(FormArena* arena, size_t size) {
-    if (!arena || size == 0)
-        return NULL;
-
-    // Align to 8-byte boundary
-    size = (size + 7) & ~7;
-
-    if (arena->used + size > arena->size) {
-        // We are out of memory
-        fprintf(stderr, "form arena out of memory: Pass larger memory to multipart_init_form\n");
-        return NULL;
-    }
-
-    void* ptr = arena->memory + arena->used;
-    arena->used += size;
-    return ptr;
-}
-
-// Allocate and copy string to arena.
-// Length is passed explicitly here because str may not be NULL-terminated.
-char* form_arena_strdup(FormArena* arena, const char* str, size_t len) {
-    if (!arena || !str)
-        return NULL;
-
-    char* new_str = (char*)form_arena_alloc(arena, len + 1);
-    if (!new_str)
-        return NULL;
-
-    if (len > 0) {
-        memcpy(new_str, str, len);
-    }
-    new_str[len] = '\0';
-    return new_str;
-}
-
-// Free the entire arena
-void arena_destroy(FormArena* arena) {
-    if (!arena)
-        return;
-    free(arena->memory);
-    free(arena);
-}
-
-// Reset arena without freeing memory (for reuse)
-void form_arena_reset(FormArena* arena) {
-    if (arena) {
-        arena->used = 0;
-    }
-}
-
-// =============== Helper Functions ========================
-// A simple implementation of strstr that takes a length parameter.
-char* sstrstr(const char* haystack, const char* needle, size_t length) {
-    size_t needle_length = strlen(needle);
-    size_t i;
-    for (i = 0; i < length; i++) {
-        if (i + needle_length > length) {
-            return NULL;
-        }
-        if (strncmp(&haystack[i], needle, needle_length) == 0) {
-            return (char*)&haystack[i];
-        }
-    }
-    return NULL;
-}
-
 // Helper function to grow the files array
 static bool grow_files_array(MultipartForm* form) {
     size_t new_capacity    = form->files_capacity * 2;
-    FileHeader** new_files = (FileHeader**)form_arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
+    FileHeader** new_files = (FileHeader**)arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
     if (!new_files)
         return false;
 
@@ -137,7 +36,7 @@ static bool grow_files_array(MultipartForm* form) {
 // Helper function to grow the fields array
 static bool grow_fields_array(MultipartForm* form) {
     size_t new_capacity   = form->fields_capacity * 2;
-    FormField* new_fields = (FormField*)form_arena_alloc(form->arena, new_capacity * sizeof(FormField));
+    FormField* new_fields = (FormField*)arena_alloc(form->arena, new_capacity * sizeof(FormField));
     if (!new_fields)
         return false;
 
@@ -152,8 +51,9 @@ static bool grow_fields_array(MultipartForm* form) {
 }
 
 MpCode multipart_init(MultipartForm* form, size_t memory) {
-    if (!form)
+    if (!form) {
         return MEMORY_ALLOC_ERROR;
+    }
 
     // Make sure we have minimum memory
     static const size_t minMemory = 1024;
@@ -163,19 +63,23 @@ MpCode multipart_init(MultipartForm* form, size_t memory) {
     memset(form, 0, sizeof(MultipartForm));
 
     // Create arena
-    form->arena = form_arena_create(memory);
-    if (!form->arena)
+    form->arena = arena_create(memory);
+    if (!form->arena) {
         return MEMORY_ALLOC_ERROR;
+    }
 
     // Allocate initial arrays from arena
-    form->files = (FileHeader**)form_arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
-    if (!form->files)
+    form->files = (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
+    if (!form->files) {
         return ARENA_ALLOC_ERROR;
-    form->files_capacity = INITIAL_FILE_CAPACITY;
+    }
 
-    form->fields = (FormField*)form_arena_alloc(form->arena, INITIAL_FIELD_CAPACITY * sizeof(FormField));
-    if (!form->fields)
+    form->fields = (FormField*)arena_alloc(form->arena, INITIAL_FIELD_CAPACITY * sizeof(FormField));
+    if (!form->fields) {
         return ARENA_ALLOC_ERROR;
+    }
+
+    form->files_capacity  = INITIAL_FILE_CAPACITY;
     form->fields_capacity = INITIAL_FIELD_CAPACITY;
 
     return MP_OK;
@@ -237,7 +141,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
 
             case STATE_HEADER: {
                 if (strncmp(ptr, "Content-Disposition:", 20) == 0) {
-                    ptr = sstrstr(ptr, "name=\"", size - (ptr - data));
+                    ptr = memmem(ptr, size - (ptr - data), "name=\"", 6);
                     if (!ptr) {
                         code = INVALID_FORM_BOUNDARY;
                         goto cleanup;
@@ -257,13 +161,12 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                     // Check if this is a file field
                     if (strncmp(ptr, "\"; filename=\"", 13) == 0) {
                         // Allocate field name from arena
-                        current_header.field_name = form_arena_strdup(form->arena, key_start, key_length);
+                        current_header.field_name = arena_strdup2(form->arena, key_start, key_length);
                         if (!current_header.field_name) {
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
                         }
-
-                        ptr = sstrstr(ptr, "\"; filename=\"", size - (ptr - data));
+                        ptr = memmem(ptr, size - (ptr - data), "\"; filename=\"", 13);
                         if (!ptr) {
                             code = INVALID_FORM_BOUNDARY;
                             goto cleanup;
@@ -295,7 +198,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                         }
 
                         form->fields[form->num_fields].name =
-                            form_arena_strdup(form->arena, key_start, key_length);
+                            arena_strdup2(form->arena, key_start, key_length);
                         if (!form->fields[form->num_fields].name) {
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
@@ -313,7 +216,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
 
                     // Allocate value from arena
                     form->fields[form->num_fields].value =
-                        form_arena_strdup(form->arena, value_start, value_length);
+                        arena_strdup2(form->arena, value_start, value_length);
                     if (!form->fields[form->num_fields].value) {
                         code = ARENA_ALLOC_ERROR;
                         goto cleanup;
@@ -336,7 +239,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                     size_t filename_length = ptr - key_start;
 
                     // Allocate filename from arena
-                    current_header.filename = form_arena_strdup(form->arena, key_start, filename_length);
+                    current_header.filename = arena_strdup2(form->arena, key_start, filename_length);
                     if (!current_header.filename) {
                         code = ARENA_ALLOC_ERROR;
                         goto cleanup;
@@ -379,7 +282,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                 size_t mimetype_len = ptr - value_start;
 
                 // Allocate mimetype from arena
-                current_header.mimetype = form_arena_strdup(form->arena, value_start, mimetype_len);
+                current_header.mimetype = arena_strdup2(form->arena, value_start, mimetype_len);
                 if (!current_header.mimetype) {
                     code = ARENA_ALLOC_ERROR;
                     goto cleanup;
@@ -434,7 +337,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                 current_header.size = file_size;
 
                 // Allocate FileHeader from arena and copy data
-                FileHeader* header = (FileHeader*)form_arena_alloc(form->arena, sizeof(FileHeader));
+                FileHeader* header = (FileHeader*)arena_alloc(form->arena, sizeof(FileHeader));
                 if (!header) {
                     code = ARENA_ALLOC_ERROR;
                     goto cleanup;
@@ -482,7 +385,7 @@ bool parse_boundary(const char* content_type, char* boundary, size_t size) {
         return false;
     }
 
-    char* start = sstrstr(content_type, "boundary=", total_length);
+    char* start = memmem(content_type, total_length, "boundary=", 9);
     if (!start)
         return false;
 

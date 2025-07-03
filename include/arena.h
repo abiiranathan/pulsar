@@ -63,7 +63,7 @@ INLINE void* arena_alloc(Arena* arena, size_t size) {
     return ptr;
 }
 
-// Copy char *str, allocating it in arena.
+// Copy char *str (null-terminated), allocating it in arena.
 // Returns NULL if out of memory.
 INLINE char* arena_strdup(Arena* arena, const char* str) {
     size_t len = strlen(str);
@@ -71,6 +71,19 @@ INLINE char* arena_strdup(Arena* arena, const char* str) {
     char* dst  = arena_alloc(arena, cap);
     if (dst) {
         memcpy(dst, str, len + 1);  // +1 to include null terminator
+    }
+    return dst;
+}
+
+// Copy char *str that is possibly not null-terminated, allocating it in arena.
+// It is assumed that str has a length of len.
+// Returns NULL if out of memory.
+INLINE char* arena_strdup2(Arena* arena, const char* str, size_t len) {
+    size_t cap = len + 1;
+    char* dst  = arena_alloc(arena, cap);
+    if (dst) {
+        memcpy(dst, str, len);
+        dst[len] = '\0';  // Ensure null termination
     }
     return dst;
 }

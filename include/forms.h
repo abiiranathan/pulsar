@@ -20,6 +20,8 @@ extern "C" {
 #include <string.h>
 #include <strings.h>
 
+#include "arena.h"
+
 /* Configuration Constants ***************************************************/
 
 /**
@@ -73,15 +75,12 @@ typedef struct FormField {
     char* value;  ///< Field value (arena-allocated)
 } FormField;
 
-// Opaque structure for the FormArena
-typedef struct FormArena FormArena;
-
 /**
  * @struct MultipartForm
  * @brief Container for parsed form data
  */
 typedef struct MultipartForm {
-    FormArena* arena;  ///< Memory arena for all allocations
+    Arena* arena;  ///< Memory arena for all allocations
 
     FileHeader** files;     ///< Array of file pointers (arena-allocated)
     size_t num_files;       ///< Number of valid files
