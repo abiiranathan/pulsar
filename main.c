@@ -139,7 +139,9 @@ void serve_movie(connection_t* conn) {
     conn_write_string(conn, html);
 }
 
-void logger(connection_t* conn, struct timespec latency) {
+// Example syncronous logger.
+// Note this is not ideal in production as it can seriously impair server performance.
+void pulsar_callback(connection_t* conn, struct timespec latency) {
     const char* method = req_method(conn);
     const char* path   = req_path(conn);
     char* ua           = (char*)req_header_get(conn, "User-Agent");
@@ -164,12 +166,12 @@ void logger(connection_t* conn, struct timespec latency) {
         snprintf(latency_str, sizeof(latency_str), "%5.2fs", total_ns / 1000000000.0);
     }
 
-    // Format the log line with aligned columns
-    printf("[Pulsar] %-2s %-10s %3d %8s %s\n", method, path, code, latency_str, ua);
+    // Format the log line.
+    printf("[Pulsar] %-2s %-3s %3d %8s %s\n", method, path, code, latency_str, ua);
 }
 
 int main() {
-    // conn_set_logger_callback(logger);
+    pulsar_set_callback(pulsar_callback);
 
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);

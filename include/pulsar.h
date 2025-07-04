@@ -33,7 +33,9 @@ typedef struct connection_t connection_t;
  */
 typedef struct request_t request_t;
 
-typedef void (*LoggerCallback)(connection_t* conn, struct timespec latency);
+// Callback function pointer called after the handler runs before writing
+// data to the socket. Ideal for logging.
+typedef void (*PulsarCallback)(connection_t* conn, struct timespec latency);
 
 /**
  * @brief Starts the Pulsar HTTP server event loop
@@ -61,10 +63,10 @@ void use_global_middleware(HttpHandler* middleware, size_t count);
  */
 void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count);
 
-/** @brief Set a post_handler callback.
- * This is called when the response has been sent through the socket.
+/** @brief Set a post_handler callback that is called after the handler runs
+ * before writing data to the socket.
  */
-void conn_set_logger_callback(LoggerCallback cb);
+void pulsar_set_callback(PulsarCallback cb);
 
 /**
  * @brief Serves a file as the response

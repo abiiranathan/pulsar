@@ -109,7 +109,7 @@ static size_t active_connections                            = 0;     // Number o
 static volatile sig_atomic_t workers_shutdown               = 0;     // Flag to signal workers to shutdown
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
 static size_t global_mw_count                               = 0;     // Global middleware count
-static LoggerCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
+static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
 static void finalize_response(connection_t* conn, HttpMethod method);
 
@@ -1075,7 +1075,7 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
     }
 }
 
-void conn_set_logger_callback(LoggerCallback cb) {
+void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
