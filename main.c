@@ -130,7 +130,7 @@ void handle_form(connection_t* conn) {
 
 void serve_movie(connection_t* conn) {
     const char* html =
-        "<html><body style='max-width: 1000px; margin: 20px;'><video src='/static/Flight Risk.mp4' "
+        "<html><body style='max-width: 1000px; margin: 20px;'><video src='/static/FlightRisk.mp4' "
         "controls width='720' height='480'></video></body></html>";
 
     conn_set_status(conn, StatusOK);
@@ -138,25 +138,7 @@ void serve_movie(connection_t* conn) {
     conn_write_string(conn, html);
 }
 
-void mw1(connection_t* conn) {
-    // Pass a user-data ptr
-    int* ptr = malloc(sizeof(int));
-    if (ptr) {
-        *ptr = 100;
-        set_userdata(conn, ptr, free);
-    }
-}
-
-void mw2(connection_t* conn) {
-    // Print the user-data pointer
-    int* userId = get_userdata(conn);
-    UNUSED(userId);
-}
-
 int main() {
-    HttpHandler mw[2] = {mw1, mw2};
-    use_global_middleware(mw, 2);
-
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
     route_register("/hello", HTTP_GET, hello_world_handler);

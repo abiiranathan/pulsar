@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <asm-generic/errno-base.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <netdb.h>  // For getaddrinfo()
@@ -1417,7 +1418,6 @@ static void handle_write(int epoll_fd, connection_t* conn) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT
                 }
-                perror("sendfile");
                 goto write_error;
             } else if (sent == 0) {
                 // Client disconnected or no more data to send.
@@ -1489,8 +1489,11 @@ write_error:
         close(res->file_fd);
         res->file_fd = -1;
     }
+
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        perror("writev/sendfile");
+        if (errno != EPIPE) {
+            perror("write failed");
+        }
         conn->state = STATE_CLOSING;
     }
 }
