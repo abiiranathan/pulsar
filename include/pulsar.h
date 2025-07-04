@@ -1,6 +1,7 @@
 #ifndef PULSAR_H
 #define PULSAR_H
 
+#include <time.h>
 #include "constants.h"
 #include "content_types.h"
 #include "routing.h"
@@ -32,6 +33,8 @@ typedef struct connection_t connection_t;
  */
 typedef struct request_t request_t;
 
+typedef void (*LoggerCallback)(connection_t* conn, struct timespec latency);
+
 /**
  * @brief Starts the Pulsar HTTP server event loop
  *
@@ -57,6 +60,11 @@ void use_global_middleware(HttpHandler* middleware, size_t count);
  * @param count Number of middleware functions in array
  */
 void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count);
+
+/** @brief Set a post_handler callback.
+ * This is called when the response has been sent through the socket.
+ */
+void conn_set_logger_callback(LoggerCallback cb);
 
 /**
  * @brief Serves a file as the response
@@ -194,6 +202,9 @@ char* res_header_get(connection_t* conn, const char* name);
  * @return true on success or false if buffer is small or header does not exist.
  */
 bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size);
+
+/** @brief Returns the response status code. */
+http_status res_get_status(connection_t* conn);
 
 /**
  * @brief Gets the request body

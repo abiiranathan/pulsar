@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <asm-generic/errno-base.h>
 #include <assert.h>
+#include <bits/time.h>
 #include <fcntl.h>
 #include <netdb.h>  // For getaddrinfo()
 #include <netinet/in.h>
@@ -17,6 +18,7 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../include/method.h"
@@ -84,6 +86,7 @@ typedef struct connection_t {
     } state;                                 // Connection state
     int client_fd;                           // Client socket file descriptor
     time_t last_activity;                    // Timestamp of last I/O activity
+    struct timespec start;                   // Timestamp of first request
     bool keep_alive;                         // Keep-alive flag
     bool abort;                              // Abort handler/middleware processing
     struct request_t* request;               // HTTP request data (arena allocated)
@@ -102,10 +105,11 @@ static volatile sig_atomic_t graceful_shutdown              = 0;   // Graceful s
 static volatile sig_atomic_t force_shutdown                 = 0;   // Force shutdown flag
 static pthread_mutex_t shutdown_mutex                       = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t shutdown_cond                         = PTHREAD_COND_INITIALIZER;
-static size_t active_connections                            = 0;   // Number of active connections
-static volatile sig_atomic_t workers_shutdown               = 0;   // Flag to signal workers to shutdown
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
-static size_t global_mw_count                               = 0;   // Global middleware count
+static size_t active_connections                            = 0;     // Number of active connections
+static volatile sig_atomic_t workers_shutdown               = 0;     // Flag to signal workers to shutdown
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
+static size_t global_mw_count                               = 0;     // Global middleware count
+static LoggerCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
 static void finalize_response(connection_t* conn, HttpMethod method);
 
@@ -224,6 +228,7 @@ INLINE void reset_response(response_t* resp) {
 }
 
 INLINE bool reset_connection(connection_t* conn) {
+    clock_gettime(CLOCK_MONOTONIC, &conn->start);
     conn->state               = STATE_READING_REQUEST;
     conn->keep_alive          = true;
     conn->user_data           = NULL;
@@ -594,6 +599,10 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
     memcpy(dest, ptr, len);
     dest[len] = '\0';
     return dest;
+}
+
+http_status res_get_status(connection_t* conn) {
+    return conn->response->status_code;
 }
 
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {
@@ -1066,6 +1075,10 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
     }
 }
 
+void conn_set_logger_callback(LoggerCallback cb) {
+    LOGGER_CALLBACK = cb;
+}
+
 /* ================================================================
  * Request Processing Functions
  * ================================================================ */
@@ -1107,28 +1120,27 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
         return;
     }
 
-    if (!parse_query_params(conn)) {
-        send_error_response(conn, StatusInternalServerError);
-        return;
-    }
-
     HttpMethod method = http_method_from_string(conn->request->method);
     if (!http_method_valid(method)) {
         send_error_response(conn, StatusMethodNotAllowed);
         return;
     }
-
     conn->request->method_type = method;
+
+    if (!parse_query_params(conn)) {
+        send_error_response(conn, StatusInternalServerError);
+        return;
+    }
+
+    // We need to parse the headers even for 404.
+    if (!parse_request_headers(conn, method, read_buf, headers_len)) {
+        send_error_response(conn, StatusInternalServerError);
+        return;
+    };
 
     route_t* route = route_match(conn->request->path, method);
     if (route) {
         conn->request->route = route;
-
-        if (!parse_request_headers(conn, method, read_buf, headers_len)) {
-            send_error_response(conn, StatusInternalServerError);
-            return;
-        };
-
         if (!parse_request_body(conn, headers_len, read_buf, read_bytes)) {
             send_error_response(conn, StatusInternalServerError);
             return;
@@ -1364,6 +1376,19 @@ static void handle_write(int epoll_fd, connection_t* conn) {
     response_t* res   = conn->response;
     bool sending_file = res->file_fd > 0 && res->file_size > 0;
 
+    // Call the logger callback after the response is sent.
+    if (res->status_sent == 0) {
+        struct timespec end;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        if (LOGGER_CALLBACK) {
+            LOGGER_CALLBACK(conn, (struct timespec){
+                                      .tv_sec  = end.tv_sec - conn->start.tv_sec,
+                                      .tv_nsec = end.tv_nsec - conn->start.tv_nsec,
+                                  });
+        }
+    }
+
     while (1) {
         ssize_t sent = 0;
 
@@ -1480,6 +1505,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             } else {
                 conn->state = STATE_CLOSING;
             }
+
             return;  // we are done.
         }
     }
@@ -1502,15 +1528,29 @@ write_error:
  * Worker Thread Functions
  * ================================================================ */
 
+void pin_current_thread_to_core(int core_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+
+    if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == -1) {
+        perror("sched_setaffinity failed");
+    }
+}
+
 typedef struct {
     int epoll_fd;
     int worker_id;
+    int designated_core;
 } WorkerData;
 
 void* worker_thread(void* arg) {
     WorkerData* worker = (WorkerData*)arg;
     int epoll_fd       = worker->epoll_fd;
     int worker_id      = worker->worker_id;
+    int cpu_core       = worker->designated_core;
+
+    pin_current_thread_to_core(cpu_core);
 
     struct epoll_event server_event;
     server_event.events  = EPOLLIN | EPOLLEXCLUSIVE;
@@ -1698,6 +1738,10 @@ void wait_for_workers_shutdown(pthread_t* workers, int timeout_seconds) {
     }
 }
 
+int get_num_available_cores() {
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
+
 int pulsar_run(const char* addr, int port) {
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
@@ -1709,6 +1753,10 @@ int pulsar_run(const char* addr, int port) {
     sort_routes();
     init_mimetypes();
 
+    // When creating worker threads
+    int num_cores      = get_num_available_cores();
+    int reserved_cores = 1;  // Leave one core free
+
     // Initialize worker data and create workers
     for (int i = 0; i < NUM_WORKERS; i++) {
         int epoll_fd = epoll_create1(0);
@@ -1717,8 +1765,9 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].epoll_fd  = epoll_fd;
-        worker_data[i].worker_id = i;
+        worker_data[i].epoll_fd        = epoll_fd;
+        worker_data[i].worker_id       = i;
+        worker_data[i].designated_core = i % (num_cores - reserved_cores);
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
             perror("pthread_create");

@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "include/content_types.h"
 #include "include/forms.h"
@@ -138,7 +139,38 @@ void serve_movie(connection_t* conn) {
     conn_write_string(conn, html);
 }
 
+void logger(connection_t* conn, struct timespec latency) {
+    const char* method = req_method(conn);
+    const char* path   = req_path(conn);
+    char* ua           = (char*)req_header_get(conn, "User-Agent");
+    if (!ua) {
+        ua = "-";
+    }
+
+    http_status code = res_get_status(conn);
+
+    // Calculate total nanoseconds
+    uint64_t total_ns = (uint64_t)latency.tv_sec * 1000000000 + latency.tv_nsec;
+
+    // Format latency with appropriate unit
+    char latency_str[32];
+    if (total_ns < 1000) {
+        snprintf(latency_str, sizeof(latency_str), "%3luns", total_ns);
+    } else if (total_ns < 1000000) {
+        snprintf(latency_str, sizeof(latency_str), "%5.2fµs", total_ns / 1000.0);
+    } else if (total_ns < 1000000000) {
+        snprintf(latency_str, sizeof(latency_str), "%5.2fms", total_ns / 1000000.0);
+    } else {
+        snprintf(latency_str, sizeof(latency_str), "%5.2fs", total_ns / 1000000000.0);
+    }
+
+    // Format the log line with aligned columns
+    printf("[Pulsar] %-2s %-10s %3d %8s %s\n", method, path, code, latency_str, ua);
+}
+
 int main() {
+    // conn_set_logger_callback(logger);
+
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
     route_register("/hello", HTTP_GET, hello_world_handler);
