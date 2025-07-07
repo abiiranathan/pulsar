@@ -58,12 +58,12 @@ static inline bool headers_set(headers_t* headers, const char* name, const char*
 
 new_header:
     // Add new header with copied strings
-    char* new_name  = arena_strdup(headers->arena, name);
+    char* new_name = arena_strdup(headers->arena, name);
     char* new_value = arena_strdup(headers->arena, value);
     if (unlikely(!new_name || !new_value))
         return false;
 
-    headers->entries[headers->count].name  = new_name;
+    headers->entries[headers->count].name = new_name;
     headers->entries[headers->count].value = new_value;
     headers->count++;
     return true;

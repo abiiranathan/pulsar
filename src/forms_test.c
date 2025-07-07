@@ -65,7 +65,7 @@ int main() {
 
         // Verify fields
         const char* username = multipart_field_value(&form, "username");
-        const char* email    = multipart_field_value(&form, "email");
+        const char* email = multipart_field_value(&form, "email");
 
         printf("Username: %s\n", username);
         printf("Email: %s\n", email);
@@ -124,7 +124,7 @@ int main() {
         printf("File saved successfully to test_output/saved_test.txt\n");
 
         // Verify file content
-        size_t file_size   = 0;
+        size_t file_size = 0;
         char* file_content = read_file("test_output/saved_test.txt", &file_size);
         ASSERT(file_content != NULL && "Failed to read saved file");
         printf("File content:\n%.*s\n", (int)file_size, file_content);

@@ -35,7 +35,7 @@ INLINE Arena* arena_create(size_t capacity) {
         return NULL;
     }
     arena->allocated = 0;
-    arena->capacity  = capacity;
+    arena->capacity = capacity;
     return arena;
 }
 
@@ -68,7 +68,7 @@ INLINE void* arena_alloc(Arena* arena, size_t size) {
 INLINE char* arena_strdup(Arena* arena, const char* str) {
     size_t len = strlen(str);
     size_t cap = len + 1;
-    char* dst  = arena_alloc(arena, cap);
+    char* dst = arena_alloc(arena, cap);
     if (dst) {
         memcpy(dst, str, len + 1);  // +1 to include null terminator
     }
@@ -80,7 +80,7 @@ INLINE char* arena_strdup(Arena* arena, const char* str) {
 // Returns NULL if out of memory.
 INLINE char* arena_strdup2(Arena* arena, const char* str, size_t len) {
     size_t cap = len + 1;
-    char* dst  = arena_alloc(arena, cap);
+    char* dst = arena_alloc(arena, cap);
     if (dst) {
         memcpy(dst, str, len);
         dst[len] = '\0';  // Ensure null termination

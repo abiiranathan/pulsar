@@ -43,9 +43,9 @@ extern "C" {
 INLINE unsigned long parse_ulong(const char* value, bool* valid) {
     assert(valid && "NULL pointer for bool *valid");
 
-    *valid        = false;
-    char* endptr  = NULL;
-    errno         = 0;
+    *valid = false;
+    char* endptr = NULL;
+    errno = 0;
     uintmax_t num = strtoumax(value, &endptr, 10);
 
     // Overflow or underflow.
