@@ -39,9 +39,9 @@ void echo_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "text/plain");
 
-    const char* method    = req_method(conn);
-    const char* path      = req_path(conn);
-    const char* body      = req_body(conn);
+    const char* method = req_method(conn);
+    const char* path = req_path(conn);
+    const char* body = req_body(conn);
     size_t content_length = req_content_len(conn);
 
     // Echo request method and path
@@ -58,7 +58,7 @@ void echo_handler(connection_t* conn) {
 }
 
 void pathparams_query_params_handler(connection_t* conn) {
-    const char* userId   = get_path_param(conn, "user_id");
+    const char* userId = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
     ASSERT(userId && username);
 
@@ -105,7 +105,7 @@ void handle_form(connection_t* conn) {
         return;
     }
 
-    const char* body      = req_body(conn);
+    const char* body = req_body(conn);
     size_t content_length = req_content_len(conn);
 
     code = multipart_parse(body, content_length, boundary, &form);
@@ -143,8 +143,8 @@ void serve_movie(connection_t* conn) {
 // Note this is not ideal in production as it can seriously impair server performance.
 void pulsar_callback(connection_t* conn, struct timespec latency) {
     const char* method = req_method(conn);
-    const char* path   = req_path(conn);
-    char* ua           = (char*)req_header_get(conn, "User-Agent");
+    const char* path = req_path(conn);
+    char* ua = (char*)req_header_get(conn, "User-Agent");
     if (!ua) {
         ua = "-";
     }
@@ -183,7 +183,7 @@ int main() {
     route_register("/form", HTTP_POST, handle_form);
     route_register("/movie", HTTP_GET, serve_movie);
 
-    register_static_route("/static", "./");
+    route_static("/static", "./");
 
     return pulsar_run("localhost", 8080);
 }

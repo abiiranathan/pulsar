@@ -69,7 +69,7 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 // dir must exist and pattern not NULL.
 // Handles serving of index.html at root of directory. File System Traversal
 // `should` be blocked.
-route_t* register_static_route(const char* pattern, const char* dir);
+route_t* route_static(const char* pattern, const char* dir);
 
 // Entry Point to router.
 // Matches request path and method to a registered route and parses and populates the path
