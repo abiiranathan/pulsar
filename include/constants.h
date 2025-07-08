@@ -76,6 +76,10 @@
 #define SHUTDOWN_TIMEOUT_SECONDS 10
 #endif
 
+#ifndef LOCALS_CAPACITY
+#define LOCALS_CAPACITY 16
+#endif
+
 // Assertions for all constants
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");

@@ -51,7 +51,7 @@ SRC_DIR := src
 HEADERS_DIR := include
 
 # Source files
-BASE_SRC := $(SRC_DIR)/routing.c $(SRC_DIR)/method.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
+BASE_SRC := $(SRC_DIR)/routing.c $(SRC_DIR)/hashmap.c $(SRC_DIR)/method.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
 TEST_SRCS := $(SRC_DIR)/forms_test.c $(SRC_DIR)/forms.c
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 

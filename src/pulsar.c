@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <asm-generic/errno-base.h>
 #include <assert.h>
 #include <bits/time.h>
 #include <fcntl.h>
@@ -83,17 +82,17 @@ typedef struct connection_t {
         STATE_READING_REQUEST,
         STATE_WRITING_RESPONSE,
         STATE_CLOSING,
-    } state;                                 // Connection state
-    int client_fd;                           // Client socket file descriptor
-    time_t last_activity;                    // Timestamp of last I/O activity
-    struct timespec start;                   // Timestamp of first request
-    bool keep_alive;                         // Keep-alive flag
-    bool abort;                              // Abort handler/middleware processing
-    struct request_t* request;               // HTTP request data (arena allocated)
-    response_t* response;                    // HTTP response data (arena allocated)
-    Arena* arena;                            // Memory arena for allocations
-    void* user_data;                         // User data pointer per connection
-    void (*user_data_free_func)(void* ptr);  // Function to free user-data after request
+    } state;                    // Connection state
+    int client_fd;              // Client socket file descriptor
+    time_t last_activity;       // Timestamp of last I/O activity
+    struct timespec start;      // Timestamp of first request
+    bool keep_alive;            // Keep-alive flag
+    bool abort;                 // Abort handler/middleware processing
+    struct request_t* request;  // HTTP request data (arena allocated)
+    response_t* response;       // HTTP response data (arena allocated)
+    Arena* arena;               // Memory arena for allocations
+    hashmap_t* locals;          // Per-request context variables set by the user.
+    void* userptr;              // Global user pointer passed to each e.g A database connection
 } connection_t;
 
 /* ================================================================
@@ -231,8 +230,15 @@ INLINE bool reset_connection(connection_t* conn) {
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
     conn->state = STATE_READING_REQUEST;
     conn->keep_alive = true;
-    conn->user_data = NULL;
-    conn->user_data_free_func = NULL;
+
+    if (conn->locals) {
+        hashmap_clear(conn->locals);
+    } else {
+        conn->locals = hashmap_create();
+        if (!conn->locals) {
+            return false;
+        }
+    }
 
     // Free request body before resetting arena.
     free_request(conn->request);
@@ -271,6 +277,9 @@ INLINE void close_connection(int epoll_fd, connection_t* conn) {
     if (likely(conn->arena)) {
         arena_destroy(conn->arena);
     }
+
+    // Free locals map.
+    hashmap_destroy(conn->locals);
 
     pthread_mutex_lock(&shutdown_mutex);
     if (active_connections > 0) {
@@ -995,20 +1004,6 @@ path_toolong:
     conn_write_string(conn, "<h1>Path too long</h1>");
 }
 
-/* ================================================================
- * User Data and Route Parameter Functions
- * ================================================================ */
-
-void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr)) {
-    ASSERT(conn && ptr);
-    conn->user_data = ptr;
-    conn->user_data_free_func = free_func;
-}
-
-void* get_userdata(connection_t* conn) {
-    return conn ? conn->user_data : NULL;
-}
-
 const char* get_path_param(connection_t* conn, const char* name) {
     if (!name)
         return NULL;
@@ -1077,6 +1072,30 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
 
 void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
+}
+
+// Set the context value by key.
+void pulsar_set_context_value(connection_t* conn, const char* key, void* value) {
+    if (!conn)
+        return;
+    hashmap_error_t code;
+    code = hashmap_put(conn->locals, key, value);
+    if (code != HASHMAP_OK) {
+        fprintf(stderr, "pulsar_set_value failed: %s\n", hashmap_error_string(code));
+    }
+}
+
+// Get a context value. The user controlled value is written to value.
+// Its your responsibility to free it if no longer required.
+void pulsar_get_context_value(connection_t* conn, const char* key, void** value) {
+    if (!conn)
+        return;
+
+    hashmap_error_t code;
+    code = hashmap_get(conn->locals, key, value);
+    if (code != HASHMAP_OK) {
+        fprintf(stderr, "pulsar_get_value failed: %s\n", hashmap_error_string(code));
+    }
 }
 
 /* ================================================================
@@ -1158,9 +1177,8 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
 
     finalize_response(conn, method);
 
-    if (conn->user_data && conn->user_data_free_func) {
-        conn->user_data_free_func(conn->user_data);
-    }
+    // Clear context variables.
+    hashmap_clear(conn->locals);
 
     // Switch to writing response.
     conn->state = STATE_WRITING_RESPONSE;
@@ -1376,16 +1394,17 @@ static void handle_write(int epoll_fd, connection_t* conn) {
     response_t* res = conn->response;
     bool sending_file = res->file_fd > 0 && res->file_size > 0;
 
-    // Call the logger callback after the response is sent.
+    // Call the logger callback before response is sent.
+    // We are not interested in network latency.
     if (res->status_sent == 0) {
-        struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC, &end);
-
         if (LOGGER_CALLBACK) {
-            LOGGER_CALLBACK(conn, (struct timespec){
-                                      .tv_sec = end.tv_sec - conn->start.tv_sec,
-                                      .tv_nsec = end.tv_nsec - conn->start.tv_nsec,
-                                  });
+            struct timespec end;
+            clock_gettime(CLOCK_MONOTONIC, &end);
+
+            uint64_t start_ns = (uint64_t)conn->start.tv_sec * 1000000000ULL + conn->start.tv_nsec;
+            uint64_t end_ns = (uint64_t)end.tv_sec * 1000000000ULL + end.tv_nsec;
+            uint64_t latency_ns = end_ns - start_ns;
+            LOGGER_CALLBACK(conn, latency_ns);
         }
     }
 

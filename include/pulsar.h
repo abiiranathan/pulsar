@@ -4,6 +4,7 @@
 #include <time.h>
 #include "constants.h"
 #include "content_types.h"
+#include "hashmap.h"
 #include "routing.h"
 #include "status_code.h"
 #include "utils.h"
@@ -34,8 +35,9 @@ typedef struct connection_t connection_t;
 typedef struct request_t request_t;
 
 // Callback function pointer called after the handler runs before writing
-// data to the socket. Ideal for logging.
-typedef void (*PulsarCallback)(connection_t* conn, struct timespec latency);
+// data to the socket. Ideal for logging. Note that total_ns is the server processing time
+// and does not include network IO for sending the data.
+typedef void (*PulsarCallback)(connection_t* conn, uint64_t total_ns);
 
 /**
  * @brief Starts the Pulsar HTTP server event loop
@@ -67,6 +69,13 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
  * before writing data to the socket.
  */
 void pulsar_set_callback(PulsarCallback cb);
+
+// Set a user-owned value pointer to the context.
+void pulsar_set_context_value(connection_t* conn, const char* key, void* value);
+
+// Get a context value. The user controlled value is written to value.
+// Its your responsibility to free it if no longer required.
+void pulsar_get_context_value(connection_t* conn, const char* key, void** value);
 
 /**
  * @brief Serves a file as the response

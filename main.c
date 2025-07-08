@@ -1,12 +1,15 @@
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "include/content_types.h"
 #include "include/forms.h"
 #include "include/headers.h"
 #include "include/pulsar.h"
+#include "include/routing.h"
 #include "include/status_code.h"
 
 #define SENDFILE 0
@@ -141,7 +144,15 @@ void serve_movie(connection_t* conn) {
 
 // Example syncronous logger.
 // Note this is not ideal in production as it can seriously impair server performance.
-void pulsar_callback(connection_t* conn, struct timespec latency) {
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+// Thread-local buffer to avoid contention
+#define LOG_BUFFER_SIZE 1024
+static __thread char log_buffer[LOG_BUFFER_SIZE];
+
+void pulsar_callback(connection_t* conn, uint64_t total_ns) {
     const char* method = req_method(conn);
     const char* path = req_path(conn);
     char* ua = (char*)req_header_get(conn, "User-Agent");
@@ -149,25 +160,67 @@ void pulsar_callback(connection_t* conn, struct timespec latency) {
         ua = "-";
     }
 
-    http_status code = res_get_status(conn);
-
-    // Calculate total nanoseconds
-    uint64_t total_ns = (uint64_t)latency.tv_sec * 1000000000 + latency.tv_nsec;
+    http_status status_code = res_get_status(conn);
 
     // Format latency with appropriate unit
     char latency_str[32];
     if (total_ns < 1000) {
+        // nano seconds
         snprintf(latency_str, sizeof(latency_str), "%3luns", total_ns);
     } else if (total_ns < 1000000) {
-        snprintf(latency_str, sizeof(latency_str), "%5.2fµs", total_ns / 1000.0);
+        // Microseconds
+        snprintf(latency_str, sizeof(latency_str), "%5luµs", total_ns / 1000);
     } else if (total_ns < 1000000000) {
-        snprintf(latency_str, sizeof(latency_str), "%5.2fms", total_ns / 1000000.0);
+        // Milliseconds
+        snprintf(latency_str, sizeof(latency_str), "%5lums", total_ns / 1000000);
+    } else if (total_ns < 60000000000) {
+        // Seconds
+        snprintf(latency_str, sizeof(latency_str), "%5lus", total_ns / 1000000000);
     } else {
-        snprintf(latency_str, sizeof(latency_str), "%5.2fs", total_ns / 1000000000.0);
+        // Minutes
+        snprintf(latency_str, sizeof(latency_str), "%5lum", total_ns / 60000000000);
     }
 
-    // Format the log line.
-    printf("[Pulsar] %-2s %-3s %3d %8s %s\n", method, path, code, latency_str, ua);
+    // Build the log line in our buffer
+    char* ptr = log_buffer;
+    const char* end = log_buffer + LOG_BUFFER_SIZE - 1;  // Leave room for null terminator
+
+    // [Pulsar]
+    ptr += snprintf(ptr, end - ptr, "[Pulsar] ");
+
+    // Method (2 chars, left-aligned)
+    ptr += snprintf(ptr, end - ptr, "%-2s ", method);
+
+    // Path (3 chars, left-aligned)
+    ptr += snprintf(ptr, end - ptr, "%-3s ", path);
+
+    // Status code (3 digits)
+    ptr += snprintf(ptr, end - ptr, "%3d ", status_code);
+
+    // Latency (8 chars)
+    ptr += snprintf(ptr, end - ptr, "%8s ", latency_str);
+
+    // User-Agent
+    ptr += snprintf(ptr, end - ptr, "%s\n", ua);
+
+    // Single write to stdout
+    write(STDOUT_FILENO, log_buffer, ptr - log_buffer);
+}
+
+void mw1(connection_t* conn) {
+    // Pass context to mw2.
+    char* value = strdup("PULSAR");
+    if (value) {
+        pulsar_set_context_value(conn, "name", value);
+    }
+}
+
+void mw2(connection_t* conn) {
+    char* value = NULL;
+    pulsar_get_context_value(conn, "name", (void**)&value);
+
+    assert(value);
+    free(value);
 }
 
 int main() {
@@ -175,7 +228,11 @@ int main() {
 
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
-    route_register("/hello", HTTP_GET, hello_world_handler);
+
+    route_t* hello = route_register("/hello", HTTP_GET, hello_world_handler);
+    Middleware mw[2] = {mw1, mw2};
+    use_route_middleware(hello, mw, 2);
+
     route_register("/json", HTTP_GET, json_handler);
     route_register("/echo", HTTP_GET, echo_handler);
     route_register("/echo", HTTP_POST, echo_handler);
