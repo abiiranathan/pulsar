@@ -1,5 +1,5 @@
-#ifndef __HEADERS_H__
-#define __HEADERS_H__
+#ifndef HEADERS_H
+#define HEADERS_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -94,4 +94,4 @@ static inline void headers_clear(headers_t* headers) {
 }
 #endif
 
-#endif  // __HEADERS_H__
+#endif /* HEADERS_H */

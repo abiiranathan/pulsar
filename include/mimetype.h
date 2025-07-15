@@ -251,17 +251,13 @@ static MimeEntry mime_entries[] = {
     {.ext = "fits", .mimetype = "application/fits"},
 };
 
-#define DEFAULT_CONTENT_TYPE "application/octet-stream"
 #define MIME_MAPPING_SIZE (sizeof(mime_entries) / sizeof(mime_entries[0]))
 
-// Macro to compute the next power of two for a given number
+#define DEFAULT_CONTENT_TYPE "application/octet-stream"
 #define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
 #define HASH_TABLE_SIZE NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
-
-// Power of two check macro
 #define IS_POWER_OF_TWO(x) (((x) != 0) && (((x) & ((x) - 1)) == 0))
 
-// Static assertion (C11 or later)
 static_assert(IS_POWER_OF_TWO(HASH_TABLE_SIZE), "HASH_TABLE_SIZE must be a power of two");
 
 static MimeEntry* hash_table[HASH_TABLE_SIZE] = {0};
@@ -296,13 +292,14 @@ static inline const char* get_mimetype(char* filename) {
 
     char* extension = last_dot + 1;
 
-    char ext[11] = {0};  // Max length of extension is 10 + null terminator
+    // Max length of extension is 10 + null terminator
+    char ext[11] = {0};
     strncpy(ext, extension, sizeof(ext) - 1);
     ext[sizeof(ext) - 1] = '\0';
 
     // Convert to lowercase
     for (char* p = ext; *p; ++p) {
-        *p |= 0x20;  // Convert to lowercase using bitwise OR with 0x20(ascii trick)
+        *p |= 0x20;  // Convert to lowercase (assumes ascii)
     }
 
     // O(1) lookup

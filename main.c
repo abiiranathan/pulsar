@@ -138,7 +138,7 @@ void serve_movie(connection_t* conn) {
         "controls width='720' height='480'></video></body></html>";
 
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, CT_HTML);
+    conn_set_content_type(conn, CONTENT_TYPE_HTML);
     conn_write_string(conn, html);
 }
 
@@ -150,9 +150,15 @@ void serve_movie(connection_t* conn) {
 
 // Thread-local buffer to avoid contention
 #define LOG_BUFFER_SIZE 1024
+#define LOGGING_ON 0
+
 static __thread char log_buffer[LOG_BUFFER_SIZE];
 
 void pulsar_callback(connection_t* conn, uint64_t total_ns) {
+    if (!LOGGING_ON) {
+        return;
+    }
+
     const char* method = req_method(conn);
     const char* path = req_path(conn);
     char* ua = (char*)req_header_get(conn, "User-Agent");

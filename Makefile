@@ -16,7 +16,7 @@ ifeq ($(BUILD),debug)
     CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG -fsanitize=address -fsanitize=undefined -fanalyzer
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
-    CFLAGS := $(BASE_CFLAGS) -O3 -DNDEBUG -flto -mavx2 -mtune=native -march=native
+    CFLAGS := $(BASE_CFLAGS) -O3 -DNDEBUG -mavx2 -mtune=native -march=native
     BUILD_DIR := build/release
 else
     $(error Invalid BUILD type: $(BUILD))
@@ -95,7 +95,7 @@ shared: $(SHARED_LIB)
 
 $(SHARED_LIB): $(LIB_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_FLAG) -Wl,$(SONAME_FLAG),$(SONAME) -o $@.$(LIB_VERSION) $^ $(LDFLAGS)
+	$(CC) $(SHARED_FLAG) -flto -Wl,$(SONAME_FLAG),$(SONAME) -o $@.$(LIB_VERSION) $^ $(LDFLAGS)
 	ln -sf $@.$(LIB_VERSION) $@
 	ln -sf $@.$(LIB_VERSION) $(BUILD_DIR)/$(SONAME)
 

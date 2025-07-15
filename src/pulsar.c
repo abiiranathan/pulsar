@@ -92,7 +92,6 @@ typedef struct connection_t {
     response_t* response;       // HTTP response data (arena allocated)
     Arena* arena;               // Memory arena for allocations
     hashmap_t* locals;          // Per-request context variables set by the user.
-    void* userptr;              // Global user pointer passed to each e.g A database connection
 } connection_t;
 
 /* ================================================================
@@ -296,7 +295,7 @@ INLINE void close_connection(int epoll_fd, connection_t* conn) {
 // Send an error response during request processing.
 INLINE void send_error_response(connection_t* conn, http_status status) {
     conn_set_status(conn, status);
-    conn_set_content_type(conn, CT_PLAIN);
+    conn_set_content_type(conn, CONTENT_TYPE_PLAIN);
 
     // use resp status code as it might have already been set.
     const char* msg = http_status_text(conn->response->status_code);
@@ -327,12 +326,9 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
             break;  // We are done with headers.
 
         size_t name_len = colon - ptr;
-        char* name = arena_alloc(conn->arena, name_len + 1);
+        char* name = arena_strdup2(conn->arena, ptr, name_len);
         if (unlikely(!name))
             return false;
-
-        memcpy(name, ptr, name_len);
-        name[name_len] = '\0';
 
         // Move to header value
         ptr = colon + 1;
@@ -345,12 +341,9 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
             break;
 
         size_t value_len = eol - ptr;
-        char* value = arena_alloc(conn->arena, value_len + 1);
+        char* value = arena_strdup2(conn->arena, ptr, value_len);
         if (unlikely(!value))
             return false;
-
-        memcpy(value, ptr, value_len);
-        value[value_len] = '\0';
 
         // Set content length
         if (!content_len_set && !is_safe && strncasecmp(name, "Content-Length", 14) == 0) {
@@ -400,11 +393,8 @@ INLINE bool parse_query_params(connection_t* conn) {
         char* value = strtok_r(NULL, "", &save_ptr2);
 
         if (key) {
-            char* key_ptr = arena_strdup(conn->arena, key);
-            char* value_ptr = arena_strdup(conn->arena, value ? value : "");
-            if (!key_ptr || !value_ptr)
-                return false;
-            headers_set(conn->request->query_params, key_ptr, value_ptr);
+            // query_params own memory of key and value using an arena.
+            headers_set(conn->request->query_params, key, value ? value : "");
         }
         pair = strtok_r(NULL, "&", &save_ptr1);
     }
@@ -712,15 +702,8 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
 // Send a 404 response (StatusNotFound)
 int conn_notfound(connection_t* conn) {
     conn_set_status(conn, StatusNotFound);
-    conn_set_content_type(conn, CT_PLAIN);
+    conn_set_content_type(conn, CONTENT_TYPE_PLAIN);
     return conn_write(conn, "404 Not Found", 13);
-}
-
-// Send a 405 response (StatusMethodNotAllowed)
-int conn_method_not_allowed(connection_t* conn) {
-    conn_set_status(conn, StatusMethodNotAllowed);
-    conn_set_content_type(conn, CT_PLAIN);
-    return conn_write(conn, "405 Method Not Found", 20);
 }
 
 int conn_write_string(connection_t* conn, const char* str) {
