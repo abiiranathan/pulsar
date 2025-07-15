@@ -160,6 +160,10 @@ void conn_set_content_type(connection_t* conn, const char* content_type);
  */
 void conn_writeheader(connection_t* conn, const char* name, const char* value);
 
+// Same as conn_writeheader except name and value length are provided.
+void conn_writeheader_fast(connection_t* conn, const char* name, size_t name_len, const char* value,
+                           size_t value_len);
+
 /**
  * @brief Sets the HTTP response status
  *

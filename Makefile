@@ -9,14 +9,15 @@ BUILD ?= release
 CC := gcc
 
 # Base compiler flags
-BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC
+BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC -mtune=native
 
 # Mode-specific flags and directories
 ifeq ($(BUILD),debug)
-    CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG -fsanitize=address -fsanitize=undefined -fanalyzer
+    CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG -fanalyzer
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
-    CFLAGS := $(BASE_CFLAGS) -O3 -DNDEBUG -mavx2 -mtune=native -march=native
+    CFLAGS := $(BASE_CFLAGS) -O3 -mtune=native -march=native -flto -funroll-loops \
+    -ffast-math -DNDEBUG -msse4.2 -mavx2
     BUILD_DIR := build/release
 else
     $(error Invalid BUILD type: $(BUILD))

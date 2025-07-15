@@ -59,11 +59,9 @@ typedef struct response_t {
     http_status status_code;  // HTTP status code.
     uint8_t* buffer;          // Single response buffer: [STATUS | HEADERS | BODY]
     uint32_t buffer_size;     // / Total size of the response buffer (supports up to 4GB)
-
-    // Pack lengths - most HTTP responses are much smaller than 4GB
-    uint32_t status_len;   // Actual length of status line
-    uint32_t headers_len;  // Actual length of headers
-    uint32_t body_len;     // Actual length of body
+    uint32_t status_len;      // Actual length of status line
+    uint32_t headers_len;     // Actual length of headers
+    uint32_t body_len;        // Actual length of body
 
     uint32_t status_sent;   // Bytes of status line sent
     uint32_t headers_sent;  // Bytes of headers sent
@@ -500,7 +498,7 @@ size_t req_content_len(connection_t* conn) {
  * ================================================================ */
 
 // Set HTTP status code and message
-void conn_set_status(connection_t* conn, http_status code) {
+__attribute__((hot, flatten)) void conn_set_status(connection_t* conn, http_status code) {
     static_assert(RESPONSE_STATUS_CAPACITY >= 64, "Response status buffer must be at least 64 bytes");
 
     // Validate the status code.
@@ -513,12 +511,6 @@ void conn_set_status(connection_t* conn, http_status code) {
     //                [8 bytes ][1 B][3B][1B][32 B max][2 bytes] = 47 bytes max
     response_t* res  = conn->response;
     res->status_code = code;
-
-    // Clear only the status line segment if it was already set
-    if (res->status_len > 0) {
-        memset(res->buffer + BUFFER_STATUS_OFFSET, 0, res->status_len);
-        res->status_len = 0;
-    }
 
     // Write directly to status segment
     unsigned char* dest = res->buffer + BUFFER_STATUS_OFFSET;
@@ -545,11 +537,6 @@ void conn_set_status(connection_t* conn, http_status code) {
     dest[i++] = '\n';
 
     res->status_len = i;
-}
-
-INLINE bool res_header_exists(response_t* res, const char* name, size_t name_len) {
-    unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
-    return pulsar_memmem(headers_start, res->headers_len, name, name_len);
 }
 
 // Get the value of a response header. Returns a dynamically allocated char* pointer or NULL
@@ -617,13 +604,11 @@ http_status res_get_status(connection_t* conn) {
     return conn->response->status_code;
 }
 
-void conn_writeheader(connection_t* conn, const char* name, const char* value) {
-    ASSERT(name && value);
-
-    response_t* res     = conn->response;
-    size_t name_len     = strlen(name);
-    size_t value_len    = strlen(value);
+__attribute__((hot, flatten)) void conn_writeheader_fast(connection_t* conn, const char* name,
+                                                         size_t name_len, const char* value,
+                                                         size_t value_len) {
     size_t required_len = name_len + value_len + 4;  // ": \r\n"
+    response_t* res     = conn->response;
 
 #if DETECT_DUPLICATE_RES_HEADERS
     if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0)
@@ -650,6 +635,12 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     *dest++ = '\n';
 
     res->headers_len += required_len;
+}
+
+__attribute__((hot, flatten)) void conn_writeheader(connection_t* conn, const char* name, const char* value) {
+    size_t name_len  = strlen(name);
+    size_t value_len = strlen(value);
+    conn_writeheader_fast(conn, name, name_len, value, value_len);
 }
 
 void conn_set_content_type(connection_t* conn, const char* content_type) {
@@ -817,7 +808,7 @@ INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, o
     snprintf(content_length, sizeof(content_length), "%ld", end - start + 1);
     snprintf(content_range, sizeof(content_range), "bytes %ld-%ld/%ld", start, end, file_size);
 
-    conn_writeheader(conn, "Accept-Ranges", "bytes");
+    conn_writeheader_fast(conn, "Accept-Ranges", 13, "bytes", 5);
     conn_writeheader(conn, "Content-Length", content_length);
     conn_writeheader(conn, "Content-Range", content_range);
 }
@@ -912,9 +903,9 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
         conn_writeheader(conn, "Content-Length", content_length_str);
     }
 
-#if WRITE_SERVER_HEADERS
+#if !WRITE_SERVER_HEADERS
     // Set server headers.
-    conn_writeheader(conn, "Server", "Pulsar/1.0");
+    conn_writeheader_fast(conn, "Server", 6, "Pulsar/1.0", 10);
     char date_buf[64];
     strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&conn->last_activity));
     conn_writeheader(conn, "Date", date_buf);
@@ -1166,6 +1157,9 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
     }
 
     if (route) {
+        // Prefetch the buffer before we need it
+        __builtin_prefetch(conn->response->buffer, 1, 3);  // Write access, high temporal locality
+
         execute_all_middleware(conn, route);
         if (!conn->abort) {
             route->handler(conn);

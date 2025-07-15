@@ -262,25 +262,14 @@ typedef struct {
 
 static RouteCacheEntry route_cache[ROUTE_CACHE_SIZE];
 
-// Generate a uint32_t hash of the method and url using FNV-1a hash.
-INLINE uint32_t hash_route_key(HttpMethod method, const char* url) {
-    // FNV-1a hash.
-    uint32_t hash = 2166136261u;
-
-    // Hash method (as 4 bytes)
-    // The prime multiplier (16777619) is specifically chosen for good avalanche characteristics
-    // This manual byte extraction maintains the same hash irrespective of endianness.
-    hash = (hash ^ (method >> 0)) * 16777619u;
-    hash = (hash ^ (method >> 8)) * 16777619u;
-    hash = (hash ^ (method >> 16)) * 16777619u;
-    hash = (hash ^ (method >> 24)) * 16777619u;
-
-    // Hash URL string
-    while (*url) {
-        hash = (hash ^ (uint32_t)(*url++)) * 16777619u;
-    }
-    return hash;
-}
+#define HASH_ROUTE_KEY(method, url, result)                                                                  \
+    do {                                                                                                     \
+        (result)      = (method);                                                                            \
+        const char* p = (url);                                                                               \
+        while (*p) {                                                                                         \
+            (result) = (result) * 33 + *p++;                                                                 \
+        }                                                                                                    \
+    } while (0)
 
 // Helper function to check if a route matches a URL
 INLINE bool route_matches(route_t* route, const char* url, size_t url_length) {
@@ -295,7 +284,8 @@ INLINE bool route_matches(route_t* route, const char* url, size_t url_length) {
 
 route_t* route_match(const char* path, HttpMethod method) {
     // 0. Check cache first
-    uint32_t key        = hash_route_key(method, path);
+    uint32_t key;
+    HASH_ROUTE_KEY(method, path, key);
     uint32_t cache_slot = key & (ROUTE_CACHE_SIZE - 1);
 
     if (route_cache[cache_slot].key == key) {
@@ -356,6 +346,7 @@ route_t* route_match(const char* path, HttpMethod method) {
     }
     return matched_route;
 }
+
 INLINE void free_path_params(PathParams* path_params) {
     if (!path_params)
         return;

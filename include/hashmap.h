@@ -48,6 +48,7 @@ typedef enum {
 typedef struct hashmap hashmap_t;
 typedef struct hashmap_entry hashmap_entry_t;
 typedef struct hashmap_iterator hashmap_iterator_t;
+typedef struct arena arena_t;
 
 /**
  * @brief Hash map entry structure
@@ -79,6 +80,7 @@ struct hashmap {
     float load_factor;         /* Target load factor */
     bool thread_safe;          /* Thread safety flag */
     void* mutex;               /* Mutex for thread safety (opaque) */
+    arena_t* arena;            /* Hashmap arena*/
 };
 
 /* Core hashmap operations */
