@@ -275,9 +275,9 @@ static unsigned int hash_func(const char* str) {
 // get_mimetype.
 void init_mimetypes() {
     for (size_t i = 0; i < MIME_MAPPING_SIZE; i++) {
-        unsigned int hash = hash_func(mime_entries[i].ext);
+        unsigned int hash    = hash_func(mime_entries[i].ext);
         mime_entries[i].next = hash_table[hash];
-        hash_table[hash] = &mime_entries[i];
+        hash_table[hash]     = &mime_entries[i];
     }
 }
 

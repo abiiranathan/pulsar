@@ -69,7 +69,7 @@ static hashmap_entry_t* create_entry(const char* key, void* value) {
 
     strcpy(entry->key, key);
     entry->value = value;
-    entry->next = NULL;
+    entry->next  = NULL;
 
     return entry;
 }
@@ -150,12 +150,12 @@ hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float
         return NULL;
     }
 
-    map->capacity = initial_capacity;
-    map->size = 0;
+    map->capacity     = initial_capacity;
+    map->size         = 0;
     map->max_capacity = max_capacity;
-    map->load_factor = load_factor;
-    map->thread_safe = thread_safe;
-    map->mutex = NULL;
+    map->load_factor  = load_factor;
+    map->thread_safe  = thread_safe;
+    map->mutex        = NULL;
 
     if (thread_safe) {
         map->mutex = malloc(sizeof(mutex_t));
@@ -205,7 +205,7 @@ hashmap_error_t hashmap_put(hashmap_t* map, const char* key, void* value) {
         return resize_result;
     }
 
-    size_t index = hash_string(key, map->capacity);
+    size_t index             = hash_string(key, map->capacity);
     hashmap_entry_t* current = map->buckets[index];
 
     /* Check if key already exists */
@@ -226,7 +226,7 @@ hashmap_error_t hashmap_put(hashmap_t* map, const char* key, void* value) {
     }
 
     /* Insert at head of chain */
-    new_entry->next = map->buckets[index];
+    new_entry->next     = map->buckets[index];
     map->buckets[index] = new_entry;
     map->size++;
 
@@ -243,7 +243,7 @@ hashmap_error_t hashmap_get(hashmap_t* map, const char* key, void** value) {
     // Initialize with NULL.
     *value = NULL;
 
-    size_t index = hash_string(key, map->capacity);
+    size_t index             = hash_string(key, map->capacity);
     hashmap_entry_t* current = map->buckets[index];
 
     while (current) {
@@ -265,9 +265,9 @@ hashmap_error_t hashmap_remove(hashmap_t* map, const char* key) {
 
     lock_map(map);
 
-    size_t index = hash_string(key, map->capacity);
+    size_t index             = hash_string(key, map->capacity);
     hashmap_entry_t* current = map->buckets[index];
-    hashmap_entry_t* prev = NULL;
+    hashmap_entry_t* prev    = NULL;
 
     while (current) {
         if (strcmp(current->key, key) == 0) {
@@ -282,7 +282,7 @@ hashmap_error_t hashmap_remove(hashmap_t* map, const char* key) {
             unlock_map(map);
             return HASHMAP_OK;
         }
-        prev = current;
+        prev    = current;
         current = current->next;
     }
 
@@ -338,16 +338,16 @@ hashmap_iterator_t hashmap_iterator_create(hashmap_t* map) {
         return it;
     }
 
-    it.map = map;
+    it.map          = map;
     it.bucket_index = 0;
-    it.current = NULL;
-    it.valid = true;
+    it.current      = NULL;
+    it.valid        = true;
 
     /* Find first non-empty bucket */
     for (size_t i = 0; i < map->capacity; i++) {
         if (map->buckets[i]) {
             it.bucket_index = i;
-            it.current = map->buckets[i];
+            it.current      = map->buckets[i];
             break;
         }
     }
@@ -373,13 +373,13 @@ bool hashmap_iterator_next(hashmap_iterator_t* it) {
     for (size_t i = it->bucket_index + 1; i < it->map->capacity; i++) {
         if (it->map->buckets[i]) {
             it->bucket_index = i;
-            it->current = it->map->buckets[i];
+            it->current      = it->map->buckets[i];
             return true;
         }
     }
 
     /* No more entries */
-    it->valid = false;
+    it->valid   = false;
     it->current = NULL;
     return false;
 }
@@ -475,7 +475,7 @@ static hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity) {
 
     /* Save old state */
     hashmap_entry_t** old_buckets = map->buckets;
-    size_t old_capacity = map->capacity;
+    size_t old_capacity           = map->capacity;
 
     /* Allocate new buckets */
     hashmap_entry_t** new_buckets = calloc(new_capacity, sizeof(hashmap_entry_t*));
@@ -483,9 +483,9 @@ static hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity) {
         return HASHMAP_ERROR_OUT_OF_MEMORY;
 
     /* Update map state */
-    map->buckets = new_buckets;
+    map->buckets  = new_buckets;
     map->capacity = new_capacity;
-    map->size = 0;
+    map->size     = 0;
 
     /* Rehash all entries */
     for (size_t i = 0; i < old_capacity; i++) {
@@ -494,8 +494,8 @@ static hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity) {
             hashmap_entry_t* next = current->next;
 
             /* Reinsert into new buckets */
-            size_t new_index = hash_string(current->key, new_capacity);
-            current->next = new_buckets[new_index];
+            size_t new_index       = hash_string(current->key, new_capacity);
+            current->next          = new_buckets[new_index];
             new_buckets[new_index] = current;
             map->size++;
 

@@ -12,14 +12,14 @@ extern void static_file_handler(struct connection_t* conn);
 
 // Global routes
 static route_t global_routes[MAX_ROUTES] = {};
-static size_t global_route_count = 0;
+static size_t global_route_count         = 0;
 
 // Count the number of path parameters in pattern.
 // If there is an invalid (unterminated) parameter, valid is updated to false.
 INLINE size_t count_path_params(const char* pattern, bool* valid) {
     const char* ptr = pattern;
-    size_t count = 0;
-    *valid = true;
+    size_t count    = 0;
+    *valid          = true;
 
     while (*ptr) {
         if (*ptr == '{') {
@@ -67,9 +67,9 @@ static bool match_path_parameters(const char* pattern, const char* url_path, Pat
     if (!path_params)  // pattern/url/arena should be valid (since this is internal.)
         return false;
 
-    const char* pat = pattern;
-    const char* url = url_path;
-    size_t nparams = 0;
+    const char* pat          = pattern;
+    const char* url          = url_path;
+    size_t nparams           = 0;
     path_params->match_count = 0;
 
     // Fast path: exact match when no parameters were allocated.
@@ -145,7 +145,7 @@ static bool match_path_parameters(const char* pattern, const char* url_path, Pat
 malloc_fail:
     // Free all params allocated.
     for (size_t i = 0; i < nparams; i++) {
-        char* name = path_params->params[i].name;
+        char* name  = path_params->params[i].name;
         char* value = path_params->params[i].value;
         if (name)
             free(name);
@@ -163,8 +163,8 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     r->pattern = strdup(pattern);
     ASSERT(r->pattern && "strdup failed to allocate pattern");
 
-    r->method = method;
-    r->handler = handler;
+    r->method      = method;
+    r->handler     = handler;
     r->path_params = malloc(sizeof(PathParams));
     ASSERT(r->path_params && "malloc failed to allocate PathParams");
 
@@ -172,16 +172,16 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     size_t nparams = count_path_params(pattern, &valid);
     ASSERT(valid && "Invalid path parameters in pattern");
 
-    r->path_params->match_count = 0;         // Init the match count
+    r->path_params->match_count  = 0;        // Init the match count
     r->path_params->total_params = nparams;  // Set the expected path parameters
-    r->path_params->params = NULL;
+    r->path_params->params       = NULL;
     if (nparams > 0) {
         r->path_params->params = calloc(nparams, sizeof(PathParam));
         ASSERT(r->path_params->params && "calloc failed to allocate array of PathParam's");
     }
 
     // default to normal route.
-    r->flags = NORMAL_ROUTE_FLAG;
+    r->flags   = NORMAL_ROUTE_FLAG;
     r->dirname = NULL;
 
     // Initialize route middleware
@@ -217,7 +217,7 @@ route_t* route_static(const char* pattern, const char* dir) {
     }
 
     route_t* r = route_register(pattern, HTTP_GET, static_file_handler);
-    r->flags = STATIC_ROUTE_FLAG;
+    r->flags   = STATIC_ROUTE_FLAG;
     r->dirname = dirname;
     return r;
 }
@@ -295,7 +295,7 @@ INLINE bool route_matches(route_t* route, const char* url, size_t url_length) {
 
 route_t* route_match(const char* path, HttpMethod method) {
     // 0. Check cache first
-    uint32_t key = hash_route_key(method, path);
+    uint32_t key        = hash_route_key(method, path);
     uint32_t cache_slot = key & (ROUTE_CACHE_SIZE - 1);
 
     if (route_cache[cache_slot].key == key) {
@@ -303,12 +303,12 @@ route_t* route_match(const char* path, HttpMethod method) {
     }
 
     // 1. First try exact method match using binary search
-    size_t low = 0;
-    size_t high = global_route_count;
+    size_t low         = 0;
+    size_t high        = global_route_count;
     size_t first_match = global_route_count;
 
     while (low < high) {
-        size_t mid = low + (high - low) / 2;
+        size_t mid            = low + (high - low) / 2;
         HttpMethod mid_method = global_routes[mid].method;
         if (mid_method >= method) {
             high = mid;
@@ -320,7 +320,7 @@ route_t* route_match(const char* path, HttpMethod method) {
         }
     }
 
-    size_t url_length = strlen(path);
+    size_t url_length      = strlen(path);
     route_t* matched_route = NULL;
 
     // Search through routes of the matching method
@@ -351,7 +351,7 @@ route_t* route_match(const char* path, HttpMethod method) {
     // Store in cache before returning
     if (matched_route) {
     caching:
-        route_cache[cache_slot].key = key;
+        route_cache[cache_slot].key   = key;
         route_cache[cache_slot].route = matched_route;
     }
     return matched_route;
@@ -362,7 +362,7 @@ INLINE void free_path_params(PathParams* path_params) {
 
     PathParam* params = path_params->params;
     for (size_t i = 0; i < path_params->match_count; i++) {
-        char* name = params[i].name;
+        char* name  = params[i].name;
         char* value = params[i].value;
         if (name)
             free(name);

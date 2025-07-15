@@ -31,6 +31,24 @@
 #define RESPONSE_HEADER_CAPACITY (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
 #define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
 
+// Flag bit definitions
+#define HTTP_CONTENT_TYPE_SET 0x01
+#define HTTP_HEADERS_WRITTEN 0x02
+#define HTTP_RANGE_REQUEST 0x04
+#define HTTP_FILE_RESPONSE 0x08
+
+// Getters - check if flag is set
+#define HTTP_HAS_CONTENT_TYPE(flags) (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
+#define HTTP_HAS_HEADERS_WRITTEN(flags) (((flags) & HTTP_HEADERS_WRITTEN) != 0)
+#define HTTP_HAS_RANGE_REQUEST(flags) (((flags) & HTTP_RANGE_REQUEST) != 0)
+#define HTTP_HAS_FILE_RESPONSE(flags) (((flags) & HTTP_FILE_RESPONSE) != 0)
+
+// Setters - set flag bits
+#define HTTP_SET_CONTENT_TYPE(flags) ((flags) |= HTTP_CONTENT_TYPE_SET)
+#define HTTP_SET_HEADERS_WRITTEN(flags) ((flags) |= HTTP_HEADERS_WRITTEN)
+#define HTTP_SET_RANGE_REQUEST(flags) ((flags) |= HTTP_RANGE_REQUEST)
+#define HTTP_SET_FILE_RESPONSE(flags) ((flags) |= HTTP_FILE_RESPONSE)
+
 /* ================================================================
  * Data Structures and Type Definitions
  * ================================================================ */
@@ -38,30 +56,25 @@ const char* CRLF = "\r\n";
 
 // HTTP Response structure
 typedef struct response_t {
-    http_status status_code;  // HTTP status code
+    http_status status_code;  // HTTP status code.
+    uint8_t* buffer;          // Single response buffer: [STATUS | HEADERS | BODY]
+    uint32_t buffer_size;     // / Total size of the response buffer (supports up to 4GB)
 
-    // Buffer segments and sizes.
-    uint8_t* buffer;     // Single response buffer: [STATUS | HEADERS | BODY]
-    size_t buffer_size;  // Total size of the response buffer
-    size_t status_len;   // Actual length of status line
-    size_t headers_len;  // Actual length of headers
-    size_t body_len;     // Actual length of body
+    // Pack lengths - most HTTP responses are much smaller than 4GB
+    uint32_t status_len;   // Actual length of status line
+    uint32_t headers_len;  // Actual length of headers
+    uint32_t body_len;     // Actual length of body
 
-    // Buffer offsets for writing the response with retries(each EPOLLOUT event).
-    size_t status_sent;   // Bytes of status line sent
-    size_t headers_sent;  // Bytes of headers sent
-    size_t body_sent;     // Bytes of body sent
+    uint32_t status_sent;   // Bytes of status line sent
+    uint32_t headers_sent;  // Bytes of headers sent
+    uint32_t body_sent;     // Bytes of body sent
 
-    // File transfer state
-    size_t file_size;   // Size of file to send (if applicable)
-    off_t file_offset;  // Offset in file for sendfile
-    off_t max_range;    // Maximum range of requested bytes in range request.
-    int file_fd;        // File descriptor for file to send (if applicable)
+    uint32_t file_size;    // Size of file to send (if applicable)
+    uint32_t file_offset;  // Offset in file for sendfile
+    uint32_t max_range;    // Maximum range of requested bytes in range request.
 
-    // Flags
-    bool content_type_set;  // Flag to indicate if Content-Type header is set
-    bool headers_written;   // Flag to indicate if headers have been written
-    bool range_request;     // Has header "Range"
+    int file_fd;    // File descriptor for file to send (if applicable)
+    uint8_t flags;  // 1 byte for all flags.
 } response_t;
 
 // HTTP Request structure
@@ -97,17 +110,17 @@ typedef struct connection_t {
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
-static int server_fd = -1;                           // Server socket file descriptor
-static volatile sig_atomic_t server_running = 1;     // Server running flag
-static volatile sig_atomic_t graceful_shutdown = 0;  // Graceful shutdown flag
-static volatile sig_atomic_t force_shutdown = 0;     // Force shutdown flag
-static pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t shutdown_cond = PTHREAD_COND_INITIALIZER;
-static size_t active_connections = 0;                              // Number of active connections
-static volatile sig_atomic_t workers_shutdown = 0;                 // Flag to signal workers to shutdown
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
-static size_t global_mw_count = 0;                                 // Global middleware count
-static PulsarCallback LOGGER_CALLBACK = NULL;                      // No logger callback by default.
+static int server_fd                                        = -1;  // Server socket file descriptor
+static volatile sig_atomic_t server_running                 = 1;   // Server running flag
+static volatile sig_atomic_t graceful_shutdown              = 0;   // Graceful shutdown flag
+static volatile sig_atomic_t force_shutdown                 = 0;   // Force shutdown flag
+static pthread_mutex_t shutdown_mutex                       = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t shutdown_cond                         = PTHREAD_COND_INITIALIZER;
+static size_t active_connections                            = 0;     // Number of active connections
+static volatile sig_atomic_t workers_shutdown               = 0;     // Flag to signal workers to shutdown
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
+static size_t global_mw_count                               = 0;     // Global middleware count
+static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
 static void finalize_response(connection_t* conn, HttpMethod method);
 
@@ -164,8 +177,8 @@ INLINE request_t* create_request(Arena* arena) {
     if (unlikely(!req->headers))
         return NULL;
 
-    req->query_params = NULL;         // No query params initially
-    req->method_type = HTTP_INVALID;  // Initial method is not valid
+    req->query_params = NULL;          // No query params initially
+    req->method_type  = HTTP_INVALID;  // Initial method is not valid
     return req;
 }
 
@@ -182,7 +195,7 @@ INLINE response_t* create_response() {
     }
 
     resp->buffer_size = WRITE_BUFFER_SIZE;
-    resp->file_fd = -1;
+    resp->file_fd     = -1;
     return resp;
 }
 
@@ -209,7 +222,7 @@ INLINE void free_response(response_t* resp) {
 
 INLINE void reset_response(response_t* resp) {
     // get a reference to the buffer and its size before calling memset.
-    size_t buffer_size = resp->buffer_size;
+    size_t buffer_size    = resp->buffer_size;
     unsigned char* buffer = resp->buffer;
 
     // Reset the buffer.
@@ -219,15 +232,15 @@ INLINE void reset_response(response_t* resp) {
     memset(resp, 0, sizeof(response_t));
 
     // Reset response state.
-    resp->buffer = buffer;
-    resp->file_fd = -1;
+    resp->buffer      = buffer;
+    resp->file_fd     = -1;
     resp->status_code = 0;
     resp->buffer_size = buffer_size;
 }
 
 INLINE bool reset_connection(connection_t* conn) {
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
-    conn->state = STATE_READING_REQUEST;
+    conn->state      = STATE_READING_REQUEST;
     conn->keep_alive = true;
 
     if (conn->locals) {
@@ -303,7 +316,7 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
     finalize_response(conn, conn->request->method_type);
 
     // Switch to writing the response.
-    conn->state = STATE_WRITING_RESPONSE;
+    conn->state         = STATE_WRITING_RESPONSE;
     conn->last_activity = time(NULL);
 }
 
@@ -316,8 +329,8 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
     const char* end = ptr + headers_len;
 
     bool content_len_set = false;
-    bool keepalive_set = false;
-    bool is_safe = (method == HTTP_GET || method == HTTP_OPTIONS);
+    bool keepalive_set   = false;
+    bool is_safe         = (method == HTTP_GET || method == HTTP_OPTIONS);
 
     while (ptr < end) {
         // Parse header name
@@ -326,7 +339,7 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
             break;  // We are done with headers.
 
         size_t name_len = colon - ptr;
-        char* name = arena_strdup2(conn->arena, ptr, name_len);
+        char* name      = arena_strdup2(conn->arena, ptr, name_len);
         if (unlikely(!name))
             return false;
 
@@ -341,7 +354,7 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
             break;
 
         size_t value_len = eol - ptr;
-        char* value = arena_strdup2(conn->arena, ptr, value_len);
+        char* value      = arena_strdup2(conn->arena, ptr, value_len);
         if (unlikely(!value))
             return false;
 
@@ -358,7 +371,7 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
 
         if (!keepalive_set && strcasecmp(name, "Connection") == 0) {
             conn->keep_alive = strncmp(value, "close", 5) != 0;
-            keepalive_set = true;
+            keepalive_set    = true;
         }
 
         if (!headers_set(conn->request->headers, name, value)) {
@@ -372,7 +385,7 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
 }
 
 INLINE bool parse_query_params(connection_t* conn) {
-    char* path = conn->request->path;
+    char* path  = conn->request->path;
     char* query = strchr(path, '?');
     if (!query)
         return true;
@@ -386,10 +399,10 @@ INLINE bool parse_query_params(connection_t* conn) {
 
     char* save_ptr1 = NULL;
     char* save_ptr2 = NULL;
-    char* pair = strtok_r(query, "&", &save_ptr1);
+    char* pair      = strtok_r(query, "&", &save_ptr1);
 
     while (pair) {
-        char* key = strtok_r(pair, "=", &save_ptr2);
+        char* key   = strtok_r(pair, "=", &save_ptr2);
         char* value = strtok_r(NULL, "", &save_ptr2);
 
         if (key) {
@@ -405,7 +418,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, char* rea
     if (conn->request->content_length == 0)
         return true;
 
-    request_t* req = conn->request;
+    request_t* req        = conn->request;
     size_t content_length = req->content_length;
     size_t body_available = read_bytes - headers_len;
     ASSERT(body_available <= content_length);
@@ -428,7 +441,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, char* rea
     size_t body_received = body_available;
     while (body_received < content_length) {
         size_t remaining = content_length - body_received;
-        ssize_t count = read(conn->client_fd, req->body + body_received, remaining);
+        ssize_t count    = read(conn->client_fd, req->body + body_received, remaining);
         if (count == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 usleep(500);
@@ -498,7 +511,7 @@ void conn_set_status(connection_t* conn, http_status code) {
 
     // Status line: // "HTTP/1.1 <code> <status text>\r\n"
     //                [8 bytes ][1 B][3B][1B][32 B max][2 bytes] = 47 bytes max
-    response_t* res = conn->response;
+    response_t* res  = conn->response;
     res->status_code = code;
 
     // Clear only the status line segment if it was already set
@@ -509,7 +522,7 @@ void conn_set_status(connection_t* conn, http_status code) {
 
     // Write directly to status segment
     unsigned char* dest = res->buffer + BUFFER_STATUS_OFFSET;
-    size_t i = 0;
+    size_t i            = 0;
 
     // Write "HTTP/1.1 "
     memcpy(dest + i, "HTTP/1.1 ", 9);
@@ -542,7 +555,7 @@ INLINE bool res_header_exists(response_t* res, const char* name, size_t name_len
 // Get the value of a response header. Returns a dynamically allocated char* pointer or NULL
 // If header does not exist or malloc fails.
 char* res_header_get(connection_t* conn, const char* name) {
-    response_t* res = conn->response;
+    response_t* res              = conn->response;
     unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
 
     char* ptr = pulsar_memmem(headers_start, res->headers_len, name, strlen(name));
@@ -558,7 +571,7 @@ char* res_header_get(connection_t* conn, const char* name) {
     if (!value_end)
         return NULL;
 
-    size_t len = value_end - ptr;
+    size_t len   = value_end - ptr;
     char* header = malloc(len + 1);
     if (!header)
         return NULL;
@@ -572,7 +585,7 @@ char* res_header_get(connection_t* conn, const char* name) {
 // Returns true on success or false if buffer is very small or header not found.
 bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size) {
     // Check if header already exists in the buffer
-    response_t* res = conn->response;
+    response_t* res              = conn->response;
     unsigned char* headers_start = res->buffer + BUFFER_HEADERS_OFFSET;
 
     char* ptr = pulsar_memmem(headers_start, res->headers_len, name, strlen(name));
@@ -607,9 +620,9 @@ http_status res_get_status(connection_t* conn) {
 void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     ASSERT(name && value);
 
-    response_t* res = conn->response;
-    size_t name_len = strlen(name);
-    size_t value_len = strlen(value);
+    response_t* res     = conn->response;
+    size_t name_len     = strlen(name);
+    size_t value_len    = strlen(value);
     size_t required_len = name_len + value_len + 4;  // ": \r\n"
 
 #if DETECT_DUPLICATE_RES_HEADERS
@@ -640,16 +653,18 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
 }
 
 void conn_set_content_type(connection_t* conn, const char* content_type) {
-    if (conn->response->content_type_set)
+    if (HTTP_HAS_CONTENT_TYPE(conn->response->flags)) {
         return;
+    }
+
     conn_writeheader(conn, "Content-Type", content_type);
-    conn->response->content_type_set = true;
+    HTTP_SET_CONTENT_TYPE(conn->response->flags);
 }
 
 static inline size_t grow_buffer(size_t current_size, size_t required) {
     static const size_t kInitialSize = 1024;
-    static const size_t kThreshold = 1024 * 1024;  // 1MB
-    static const size_t kMaxSize = SIZE_MAX / 2;   // Safety cap
+    static const size_t kThreshold   = 1024 * 1024;   // 1MB
+    static const size_t kMaxSize     = SIZE_MAX / 2;  // Safety cap
 
     if (required > kMaxSize) {
         return 0;  // Buffer growth would overflow
@@ -689,7 +704,7 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
             return 0;
         }
 
-        res->buffer = new_buffer;
+        res->buffer      = new_buffer;
         res->buffer_size = new_size;
     }
 
@@ -771,8 +786,8 @@ bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off64_t fi
         // Http range requests can be negative :) Wieird but true
         // I had to read the RFC to understand this, who would have thought?
         // https://datatracker.ietf.org/doc/html/rfc7233
-        start_byte = file_size + start_byte;  // subtract from the file size
-        end_byte = start_byte + chunk_size;   // send the next chunk size (if not more than the file size)
+        start_byte = file_size + start_byte;   // subtract from the file size
+        end_byte   = start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
     } else if (end_byte < 0) {
         // Even the end range can be negative. Deal with it!
         end_byte = file_size + end_byte;
@@ -789,7 +804,7 @@ bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off64_t fi
     }
 
     *start = start_byte;
-    *end = end_byte;
+    *end   = end_byte;
     return true;
 }
 
@@ -829,13 +844,13 @@ bool conn_servefile(connection_t* conn, const char* filename) {
     conn_writeheader(conn, "Last-Modified", time_buf);
 
     // Set mime type if not already set
-    if (!conn->response->content_type_set) {
+    if (!HTTP_HAS_CONTENT_TYPE(conn->response->flags)) {
         const char* mimetype = get_mimetype((char*)filename);
         conn_set_content_type(conn, mimetype);
     }
 
-    conn->response->file_fd = fd;
-    conn->response->file_size = stat_buf.st_size;
+    conn->response->file_fd     = fd;
+    conn->response->file_size   = stat_buf.st_size;
     conn->response->file_offset = 0;
 
     const char* range_header = headers_get(conn->request->headers, "Range");
@@ -862,9 +877,9 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 
         // Update file offset and size.
         conn->response->file_offset = start_offset;
-        conn->response->file_size = stat_buf.st_size;
-        conn->response->range_request = true;
-        conn->response->max_range = end_offset - start_offset + 1;
+        conn->response->file_size   = stat_buf.st_size;
+        conn->response->max_range   = end_offset - start_offset + 1;
+        HTTP_SET_RANGE_REQUEST(conn->response->flags);
     }
 
     return true;
@@ -876,7 +891,8 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     if (resp->status_len == 0)
         conn_set_status(conn, StatusOK);
 
-    if (likely(!resp->range_request)) {
+    // If range request flag is not set, set content-length.
+    if (likely(!HTTP_HAS_RANGE_REQUEST(resp->flags))) {
         size_t content_length = resp->body_len;
         char content_length_str[32];
 
@@ -922,8 +938,8 @@ void static_file_handler(connection_t* conn) {
     ASSERT((route->flags & STATIC_ROUTE_FLAG) != 0 && route);
 
     const char* dirname = route->dirname;
-    size_t dirlen = strlen(dirname);
-    const char* path = conn->request->path;
+    size_t dirlen       = strlen(dirname);
+    const char* path    = conn->request->path;
 
     // Prevent directory traversal attacks
     if (is_malicious_path(path)) {
@@ -933,7 +949,7 @@ void static_file_handler(connection_t* conn) {
 
     // Build the request static path
     const char* static_path = path + strlen(route->pattern);
-    size_t static_path_len = strlen(static_path);
+    size_t static_path_len  = strlen(static_path);
 
     // Validate path lengths
     if (dirlen >= PATH_MAX || static_path_len >= PATH_MAX || (dirlen + static_path_len + 2) >= PATH_MAX) {
@@ -1164,7 +1180,7 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
     hashmap_clear(conn->locals);
 
     // Switch to writing response.
-    conn->state = STATE_WRITING_RESPONSE;
+    conn->state         = STATE_WRITING_RESPONSE;
     conn->last_activity = time(NULL);
 }
 
@@ -1192,17 +1208,17 @@ static int create_server_socket(const char* host, int port) {
     }
 
     int fd;
-    int opt = 1;
+    int opt               = 1;
     struct addrinfo hints = {0};
     struct addrinfo *result, *rp;
 
-    hints.ai_family = AF_UNSPEC;      /* Allow IPv4 or IPv6 */
-    hints.ai_socktype = SOCK_STREAM;  // TCP
-    hints.ai_flags = AI_PASSIVE;      // For wildcard IP address
-    hints.ai_protocol = 0;            /* Any protocol */
+    hints.ai_family    = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
+    hints.ai_socktype  = SOCK_STREAM;  // TCP
+    hints.ai_flags     = AI_PASSIVE;   // For wildcard IP address
+    hints.ai_protocol  = 0;            /* Any protocol */
     hints.ai_canonname = NULL;
-    hints.ai_addr = NULL;
-    hints.ai_next = NULL;
+    hints.ai_addr      = NULL;
+    hints.ai_next      = NULL;
 
     // Convert port to string for getaddrinfo
     char port_str[6];
@@ -1329,7 +1345,7 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
     }
 
     struct epoll_event event;
-    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
     event.data.ptr = conn;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
@@ -1356,14 +1372,14 @@ INLINE void handle_read(int epoll_fd, connection_t* conn) {
         return;
     }
 
-    conn->last_activity = time(NULL);
+    conn->last_activity  = time(NULL);
     read_buf[bytes_read] = '\0';
 
     process_request(conn, read_buf, bytes_read);
 
     if (conn->state == STATE_WRITING_RESPONSE) {
         struct epoll_event event;
-        event.events = EPOLLOUT | EPOLLET;
+        event.events   = EPOLLOUT | EPOLLET;
         event.data.ptr = conn;
 
         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
@@ -1374,7 +1390,7 @@ INLINE void handle_read(int epoll_fd, connection_t* conn) {
 }
 
 static void handle_write(int epoll_fd, connection_t* conn) {
-    response_t* res = conn->response;
+    response_t* res   = conn->response;
     bool sending_file = res->file_fd > 0 && res->file_size > 0;
 
     // Call the logger callback before response is sent.
@@ -1384,8 +1400,8 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             struct timespec end;
             clock_gettime(CLOCK_MONOTONIC, &end);
 
-            uint64_t start_ns = (uint64_t)conn->start.tv_sec * 1000000000ULL + conn->start.tv_nsec;
-            uint64_t end_ns = (uint64_t)end.tv_sec * 1000000000ULL + end.tv_nsec;
+            uint64_t start_ns   = (uint64_t)conn->start.tv_sec * 1000000000ULL + conn->start.tv_nsec;
+            uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + end.tv_nsec;
             uint64_t latency_ns = end_ns - start_ns;
             LOGGER_CALLBACK(conn, latency_ns);
         }
@@ -1396,7 +1412,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
 
         if (sending_file) {
             /* File transfer mode */
-            if (!res->headers_written) {
+            if (!HTTP_HAS_HEADERS_WRITTEN(res->flags)) {
                 // Send headers (status + headers)
                 struct iovec iov[2] = {
                     {res->buffer + BUFFER_STATUS_OFFSET + res->status_sent,
@@ -1406,7 +1422,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
                 };
 
                 errno = 0;  // Reset errno before writev
-                sent = writev(conn->client_fd, iov, 2);
+                sent  = writev(conn->client_fd, iov, 2);
                 if (sent < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         return;  // Will retry on next EPOLLOUT
@@ -1423,14 +1439,14 @@ static void handle_write(int epoll_fd, connection_t* conn) {
                 }
 
                 if (res->status_sent == res->status_len && res->headers_sent == res->headers_len) {
-                    res->headers_written = true;
+                    HTTP_SET_HEADERS_WRITTEN(res->flags);
                 }
                 continue;
             }
 
             /* Send file data directly */
             off_t buffer_size;
-            if (res->range_request) {
+            if (HTTP_HAS_RANGE_REQUEST(res->flags)) {
                 // send file will handle position based on offset.
                 buffer_size = 1 << 20;
                 buffer_size = res->max_range < buffer_size ? res->max_range : buffer_size;
@@ -1440,7 +1456,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
                 lseek(res->file_fd, 0, SEEK_SET);
             }
 
-            sent = sendfile(conn->client_fd, res->file_fd, &res->file_offset, buffer_size);
+            sent = sendfile(conn->client_fd, res->file_fd, (off_t*)&res->file_offset, buffer_size);
             if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT
@@ -1548,14 +1564,14 @@ typedef struct {
 
 void* worker_thread(void* arg) {
     WorkerData* worker = (WorkerData*)arg;
-    int epoll_fd = worker->epoll_fd;
-    int worker_id = worker->worker_id;
-    int cpu_core = worker->designated_core;
+    int epoll_fd       = worker->epoll_fd;
+    int worker_id      = worker->worker_id;
+    int cpu_core       = worker->designated_core;
 
     pin_current_thread_to_core(cpu_core);
 
     struct epoll_event server_event;
-    server_event.events = EPOLLIN | EPOLLEXCLUSIVE;
+    server_event.events  = EPOLLIN | EPOLLEXCLUSIVE;
     server_event.data.fd = server_fd;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event) < 0) {
@@ -1572,7 +1588,7 @@ void* worker_thread(void* arg) {
             break;
         }
 
-        int timeout = graceful_shutdown ? 500 : 1000;  // Shorter timeout during shutdown
+        int timeout    = graceful_shutdown ? 500 : 1000;  // Shorter timeout during shutdown
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, timeout);
 
         if (num_events == -1) {
@@ -1638,7 +1654,7 @@ void* worker_thread(void* arg) {
                 }
 
                 // Check timeouts (shorter timeout during shutdown)
-                time_t now = time(NULL);
+                time_t now          = time(NULL);
                 int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
                 if (now - conn->last_activity > timeout_seconds) {
                     conn->state = STATE_CLOSING;
@@ -1756,7 +1772,7 @@ int pulsar_run(const char* addr, int port) {
     init_mimetypes();
 
     // When creating worker threads
-    int num_cores = get_num_available_cores();
+    int num_cores      = get_num_available_cores();
     int reserved_cores = 1;  // Leave one core free
 
     // Initialize worker data and create workers
@@ -1767,8 +1783,8 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].epoll_fd = epoll_fd;
-        worker_data[i].worker_id = i;
+        worker_data[i].epoll_fd        = epoll_fd;
+        worker_data[i].worker_id       = i;
         worker_data[i].designated_core = i % (num_cores - reserved_cores);
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
