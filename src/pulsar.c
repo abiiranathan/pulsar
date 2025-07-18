@@ -25,29 +25,29 @@
 #include "../include/pulsar.h"
 
 // Buffer segment offsets (fixed positions)
-#define BUFFER_STATUS_OFFSET 0
-#define BUFFER_HEADERS_OFFSET 64                               // Reserve 64B for status line
-#define BUFFER_BODY_OFFSET (BUFFER_HEADERS_OFFSET + 4096 + 2)  // Reserve 4096 for headers+\r\n
+#define BUFFER_STATUS_OFFSET     0
+#define BUFFER_HEADERS_OFFSET    64                                  // Reserve 64B for status line
+#define BUFFER_BODY_OFFSET       (BUFFER_HEADERS_OFFSET + 4096 + 2)  // Reserve 4096 for headers+\r\n
 #define RESPONSE_HEADER_CAPACITY (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
 #define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
 
 // Flag bit definitions
 #define HTTP_CONTENT_TYPE_SET 0x01
-#define HTTP_HEADERS_WRITTEN 0x02
-#define HTTP_RANGE_REQUEST 0x04
-#define HTTP_FILE_RESPONSE 0x08
+#define HTTP_HEADERS_WRITTEN  0x02
+#define HTTP_RANGE_REQUEST    0x04
+#define HTTP_FILE_RESPONSE    0x08
 
 // Getters - check if flag is set
-#define HTTP_HAS_CONTENT_TYPE(flags) (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
+#define HTTP_HAS_CONTENT_TYPE(flags)    (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
 #define HTTP_HAS_HEADERS_WRITTEN(flags) (((flags) & HTTP_HEADERS_WRITTEN) != 0)
-#define HTTP_HAS_RANGE_REQUEST(flags) (((flags) & HTTP_RANGE_REQUEST) != 0)
-#define HTTP_HAS_FILE_RESPONSE(flags) (((flags) & HTTP_FILE_RESPONSE) != 0)
+#define HTTP_HAS_RANGE_REQUEST(flags)   (((flags) & HTTP_RANGE_REQUEST) != 0)
+#define HTTP_HAS_FILE_RESPONSE(flags)   (((flags) & HTTP_FILE_RESPONSE) != 0)
 
 // Setters - set flag bits
-#define HTTP_SET_CONTENT_TYPE(flags) ((flags) |= HTTP_CONTENT_TYPE_SET)
+#define HTTP_SET_CONTENT_TYPE(flags)    ((flags) |= HTTP_CONTENT_TYPE_SET)
 #define HTTP_SET_HEADERS_WRITTEN(flags) ((flags) |= HTTP_HEADERS_WRITTEN)
-#define HTTP_SET_RANGE_REQUEST(flags) ((flags) |= HTTP_RANGE_REQUEST)
-#define HTTP_SET_FILE_RESPONSE(flags) ((flags) |= HTTP_FILE_RESPONSE)
+#define HTTP_SET_RANGE_REQUEST(flags)   ((flags) |= HTTP_RANGE_REQUEST)
+#define HTTP_SET_FILE_RESPONSE(flags)   ((flags) |= HTTP_FILE_RESPONSE)
 
 /* ================================================================
  * Data Structures and Type Definitions
@@ -165,15 +165,13 @@ static void install_signal_handler(void) {
 
 INLINE request_t* create_request(Arena* arena) {
     request_t* req = arena_alloc(arena, sizeof(request_t));
-    if (unlikely(!req))
-        return NULL;
+    if (unlikely(!req)) return NULL;
 
     // Initialize request structure
     memset(req, 0, sizeof(request_t));
 
     req->headers = headers_new(arena);
-    if (unlikely(!req->headers))
-        return NULL;
+    if (unlikely(!req->headers)) return NULL;
 
     req->query_params = NULL;          // No query params initially
     req->method_type  = HTTP_INVALID;  // Initial method is not valid
@@ -182,8 +180,7 @@ INLINE request_t* create_request(Arena* arena) {
 
 INLINE response_t* create_response() {
     response_t* resp = calloc(1, sizeof(response_t));
-    if (unlikely(!resp))
-        return NULL;
+    if (unlikely(!resp)) return NULL;
 
     // Allocate a a resizble buffer for the response.
     resp->buffer = calloc(1, WRITE_BUFFER_SIZE);
@@ -199,8 +196,7 @@ INLINE response_t* create_response() {
 
 // Free request body. (Request structure is arena-allocated.)
 INLINE void free_request(request_t* req) {
-    if (unlikely(!req))
-        return;
+    if (unlikely(!req)) return;
 
     if (unlikely(req->body)) {
         free(req->body);
@@ -209,8 +205,7 @@ INLINE void free_request(request_t* req) {
 
 // Free response buffer and dynmically allocated response itself.
 INLINE void free_response(response_t* resp) {
-    if (!resp)
-        return;
+    if (!resp) return;
 
     if (likely(resp->buffer)) {
         free(resp->buffer);
@@ -262,8 +257,7 @@ INLINE bool reset_connection(connection_t* conn) {
 
     if (unlikely(!conn->arena)) {
         conn->arena = arena_create(ARENA_CAPACITY);
-        if (unlikely(!conn->arena))
-            return false;
+        if (unlikely(!conn->arena)) return false;
     } else {
         arena_reset(conn->arena);
     }
@@ -275,8 +269,7 @@ INLINE bool reset_connection(connection_t* conn) {
 }
 
 INLINE void close_connection(int epoll_fd, connection_t* conn) {
-    if (unlikely(!conn))
-        return;
+    if (unlikely(!conn)) return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
     close(conn->client_fd);
@@ -333,13 +326,11 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
     while (ptr < end) {
         // Parse header name
         const char* colon = (const char*)memchr(ptr, ':', end - ptr);
-        if (!colon)
-            break;  // We are done with headers.
+        if (!colon) break;  // We are done with headers.
 
         size_t name_len = colon - ptr;
         char* name      = arena_strdup2(conn->arena, ptr, name_len);
-        if (unlikely(!name))
-            return false;
+        if (unlikely(!name)) return false;
 
         // Move to header value
         ptr = colon + 1;
@@ -348,13 +339,11 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
 
         // Parse header value
         const char* eol = (const char*)memchr(ptr, '\r', end - ptr);
-        if (!eol || eol + 1 >= end || eol[1] != '\n')
-            break;
+        if (!eol || eol + 1 >= end || eol[1] != '\n') break;
 
         size_t value_len = eol - ptr;
         char* value      = arena_strdup2(conn->arena, ptr, value_len);
-        if (unlikely(!value))
-            return false;
+        if (unlikely(!value)) return false;
 
         // Set content length
         if (!content_len_set && !is_safe && strncasecmp(name, "Content-Length", 14) == 0) {
@@ -385,15 +374,13 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* r
 INLINE bool parse_query_params(connection_t* conn) {
     char* path  = conn->request->path;
     char* query = strchr(path, '?');
-    if (!query)
-        return true;
+    if (!query) return true;
 
     *query = '\0';
     query++;
 
     conn->request->query_params = headers_new(conn->arena);
-    if (!conn->request->query_params)
-        return false;
+    if (!conn->request->query_params) return false;
 
     char* save_ptr1 = NULL;
     char* save_ptr2 = NULL;
@@ -413,8 +400,7 @@ INLINE bool parse_query_params(connection_t* conn) {
 }
 
 static bool parse_request_body(connection_t* conn, size_t headers_len, char* read_buf, size_t read_bytes) {
-    if (conn->request->content_length == 0)
-        return true;
+    if (conn->request->content_length == 0) return true;
 
     request_t* req        = conn->request;
     size_t content_length = req->content_length;
@@ -475,8 +461,7 @@ const char* req_path(connection_t* conn) {
 
 // Get value for a query parameter if present or NULL.
 const char* query_get(connection_t* conn, const char* name) {
-    if (!conn->request->query_params)
-        return NULL;  // no query params.
+    if (!conn->request->query_params) return NULL;  // no query params.
     return headers_get(conn->request->query_params, name);
 }
 
@@ -555,13 +540,11 @@ char* res_header_get(connection_t* conn, const char* name) {
 
     // Find the next \r\n to get the response value.
     char* value_end = pulsar_memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
-    if (!value_end)
-        return NULL;
+    if (!value_end) return NULL;
 
     size_t len   = value_end - ptr;
     char* header = malloc(len + 1);
-    if (!header)
-        return NULL;
+    if (!header) return NULL;
 
     memcpy(header, ptr, len);
     header[len] = '\0';
@@ -585,8 +568,7 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
 
     // Find the next \r\n to get the response value.
     char* value_end = pulsar_memmem(ptr, res->headers_len - (ptr - (char*)headers_start), "\r\n", 2);
-    if (!value_end)
-        return NULL;
+    if (!value_end) return NULL;
 
     size_t len = value_end - ptr;
 
@@ -611,12 +593,10 @@ __attribute__((hot, flatten)) void conn_writeheader_fast(connection_t* conn, con
     response_t* res     = conn->response;
 
 #if DETECT_DUPLICATE_RES_HEADERS
-    if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0)
-        return;
+    if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0) return;
 #endif
 
-    if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY)
-        return;
+    if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY) return;
 
     unsigned char* dest = res->buffer + BUFFER_HEADERS_OFFSET + res->headers_len;
 
@@ -722,8 +702,7 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
     int len = vsnprintf(NULL, 0, fmt, args);
     va_end(args);
 
-    if (len <= 0)
-        return 0;  // No data to write
+    if (len <= 0) return 0;  // No data to write
 
     char* buffer = malloc(len + 1);
     if (!buffer) {
@@ -765,8 +744,7 @@ INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end, 
 
 // Validates the requested range against the file size
 bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off64_t file_size) {
-    if (!start || !end)
-        return false;
+    if (!start || !end) return false;
 
     ssize_t start_byte = *start, end_byte = *end;
     ssize_t chunk_size = (4 * 1024 * 1024) - 1;  // 4 MB chunks.
@@ -814,8 +792,7 @@ INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, o
 }
 
 bool conn_servefile(connection_t* conn, const char* filename) {
-    if (!filename)
-        return false;
+    if (!filename) return false;
 
     int fd = open(filename, O_RDONLY);
     if (fd == -1) {
@@ -879,8 +856,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 // Build the complete HTTP response
 INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     response_t* resp = conn->response;
-    if (resp->status_len == 0)
-        conn_set_status(conn, StatusOK);
+    if (resp->status_len == 0) conn_set_status(conn, StatusOK);
 
     // If range request flag is not set, set content-length.
     if (likely(!HTTP_HAS_RANGE_REQUEST(resp->flags))) {
@@ -995,11 +971,9 @@ path_toolong:
 }
 
 const char* get_path_param(connection_t* conn, const char* name) {
-    if (!name)
-        return NULL;
+    if (!name) return NULL;
     route_t* route = conn->request->route;
-    if (!route)
-        return NULL;
+    if (!route) return NULL;
 
     PathParams* path_params = route->path_params;
     for (size_t i = 0; i < path_params->match_count; i++) {
@@ -1051,8 +1025,7 @@ void use_global_middleware(HttpHandler* middleware, size_t count) {
 }
 
 void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count) {
-    if (count == 0)
-        return;
+    if (count == 0) return;
     ASSERT(route->mw_count + count <= MAX_ROUTE_MIDDLEWARE);
 
     for (size_t i = 0; i < count; i++) {
@@ -1066,8 +1039,7 @@ void pulsar_set_callback(PulsarCallback cb) {
 
 // Set the context value by key.
 void pulsar_set_context_value(connection_t* conn, const char* key, void* value) {
-    if (!conn)
-        return;
+    if (!conn) return;
     hashmap_error_t code;
     code = hashmap_put(conn->locals, key, value);
     if (code != HASHMAP_OK) {
@@ -1078,8 +1050,7 @@ void pulsar_set_context_value(connection_t* conn, const char* key, void* value) 
 // Get a context value. The user controlled value is written to value.
 // Its your responsibility to free it if no longer required.
 void pulsar_get_context_value(connection_t* conn, const char* key, void** value) {
-    if (!conn)
-        return;
+    if (!conn) return;
 
     hashmap_error_t code;
     code = hashmap_get(conn->locals, key, value);
@@ -1228,8 +1199,7 @@ static int create_server_socket(const char* host, int port) {
     // Try each address until we successfully bind
     for (rp = result; rp != NULL; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd == -1)
-            continue;
+        if (fd == -1) continue;
 
         if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
             perror("setsockopt");
@@ -1237,8 +1207,7 @@ static int create_server_socket(const char* host, int port) {
             continue;
         }
 
-        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0)
-            break;  // Success
+        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;  // Success
 
         close(fd);
     }

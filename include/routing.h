@@ -14,9 +14,9 @@ extern "C" {
 #define NORMAL_ROUTE_FLAG 0x02  // 1 << 2
 
 // Power of two check macro
-#define IS_POWER_OF_TWO(x) (((x) != 0) && (((x) & ((x) - 1)) == 0))
+#define IS_POWER_OF_TWO(x)   (((x) != 0) && (((x) & ((x) - 1)) == 0))
 #define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
-#define ROUTE_CACHE_SIZE (NEXT_POWER_OF_TWO(MAX_ROUTES * 2))
+#define ROUTE_CACHE_SIZE     (NEXT_POWER_OF_TWO(MAX_ROUTES * 2))
 
 // Must be power of 2
 static_assert(IS_POWER_OF_TWO(ROUTE_CACHE_SIZE), "ROUTE_CACHE_SIZE must be a power of two");

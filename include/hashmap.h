@@ -26,11 +26,11 @@ extern "C" {
 #endif
 
 /* Default configuration constants */
-#define HASHMAP_DEFAULT_CAPACITY 16
+#define HASHMAP_DEFAULT_CAPACITY    16
 #define HASHMAP_DEFAULT_LOAD_FACTOR 0.75f
-#define HASHMAP_MAX_LOAD_FACTOR 0.9f
-#define HASHMAP_MIN_LOAD_FACTOR 0.1f
-#define HASHMAP_GROWTH_FACTOR 2
+#define HASHMAP_MAX_LOAD_FACTOR     0.9f
+#define HASHMAP_MIN_LOAD_FACTOR     0.1f
+#define HASHMAP_GROWTH_FACTOR       2
 
 /* Error codes */
 typedef enum {

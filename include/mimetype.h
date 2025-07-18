@@ -255,8 +255,8 @@ static MimeEntry mime_entries[] = {
 
 #define DEFAULT_CONTENT_TYPE "application/octet-stream"
 #define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
-#define HASH_TABLE_SIZE NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
-#define IS_POWER_OF_TWO(x) (((x) != 0) && (((x) & ((x) - 1)) == 0))
+#define HASH_TABLE_SIZE      NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
+#define IS_POWER_OF_TWO(x)   (((x) != 0) && (((x) & ((x) - 1)) == 0))
 
 static_assert(IS_POWER_OF_TWO(HASH_TABLE_SIZE), "HASH_TABLE_SIZE must be a power of two");
 
@@ -282,13 +282,11 @@ void init_mimetypes() {
 }
 
 static inline const char* get_mimetype(char* filename) {
-    if (!filename)
-        return DEFAULT_CONTENT_TYPE;
+    if (!filename) return DEFAULT_CONTENT_TYPE;
 
     // Find last dot
     char* last_dot = strrchr(filename, '.');
-    if (!last_dot)
-        return DEFAULT_CONTENT_TYPE;
+    if (!last_dot) return DEFAULT_CONTENT_TYPE;
 
     char* extension = last_dot + 1;
 

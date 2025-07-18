@@ -20,8 +20,7 @@ typedef enum {
 static bool grow_files_array(MultipartForm* form) {
     size_t new_capacity    = form->files_capacity * 2;
     FileHeader** new_files = (FileHeader**)arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
-    if (!new_files)
-        return false;
+    if (!new_files) return false;
 
     // Copy existing pointers
     if (form->files && form->num_files > 0) {
@@ -37,8 +36,7 @@ static bool grow_files_array(MultipartForm* form) {
 static bool grow_fields_array(MultipartForm* form) {
     size_t new_capacity   = form->fields_capacity * 2;
     FormField* new_fields = (FormField*)arena_alloc(form->arena, new_capacity * sizeof(FormField));
-    if (!new_fields)
-        return false;
+    if (!new_fields) return false;
 
     // Copy existing fields
     if (form->fields && form->num_fields > 0) {
@@ -57,8 +55,7 @@ MpCode multipart_init(MultipartForm* form, size_t memory) {
 
     // Make sure we have minimum memory
     static const size_t minMemory = 1024;
-    if (memory < minMemory)
-        memory = minMemory;
+    if (memory < minMemory) memory = minMemory;
 
     memset(form, 0, sizeof(MultipartForm));
 
@@ -88,8 +85,7 @@ MpCode multipart_init(MultipartForm* form, size_t memory) {
 // Insert file header into form
 static inline bool form_insert_header(MultipartForm* form, FileHeader* header) {
     if (form->num_files >= form->files_capacity) {
-        if (!grow_files_array(form))
-            return false;
+        if (!grow_files_array(form)) return false;
     }
     form->files[form->num_files] = header;
     form->num_files++;
@@ -178,8 +174,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                         // Regular form field - move to value
                         while (ptr < data + size && *ptr != '\n')
                             ptr++;
-                        if (ptr < data + size)
-                            ptr++;  // Skip newline
+                        if (ptr < data + size) ptr++;  // Skip newline
 
                         // Consume CRLF before value
                         if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
@@ -248,8 +243,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                     // Move to end of line
                     while (ptr < data + size && *ptr != '\n')
                         ptr++;
-                    if (ptr < data + size)
-                        ptr++;  // Skip newline
+                    if (ptr < data + size) ptr++;  // Skip newline
 
                     // Consume CRLF if present
                     if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
@@ -291,8 +285,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                 // Move to end of line
                 while (ptr < data + size && *ptr != '\n')
                     ptr++;
-                if (ptr < data + size)
-                    ptr++;  // Skip newline
+                if (ptr < data + size) ptr++;  // Skip newline
 
                 // Consume CRLF before file body
                 while (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
@@ -374,8 +367,7 @@ cleanup:
 
 // Parses the form boundary from the content-type header
 bool parse_boundary(const char* content_type, char* boundary, size_t size) {
-    if (!content_type || !boundary)
-        return false;
+    if (!content_type || !boundary) return false;
 
     const char* prefix  = "--";
     size_t prefix_len   = strlen(prefix);
@@ -386,13 +378,11 @@ bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     }
 
     char* start = memmem(content_type, total_length, "boundary=", 9);
-    if (!start)
-        return false;
+    if (!start) return false;
 
     size_t length = total_length - ((start + 9) - content_type);
 
-    if (size <= length + prefix_len + 1)
-        return false;
+    if (size <= length + prefix_len + 1) return false;
 
     memcpy(boundary, prefix, prefix_len);
     strncpy(boundary + prefix_len, (start + 9), length);
@@ -402,8 +392,7 @@ bool parse_boundary(const char* content_type, char* boundary, size_t size) {
 
 // Free the multipart form and its arena
 void multipart_cleanup(MultipartForm* form) {
-    if (!form)
-        return;
+    if (!form) return;
 
     if (form->arena) {
         arena_destroy(form->arena);
@@ -421,8 +410,7 @@ void multipart_cleanup(MultipartForm* form) {
 // =============== Fields API ========================
 
 const char* multipart_field_value(const MultipartForm* form, const char* name) {
-    if (!form || !name)
-        return NULL;
+    if (!form || !name) return NULL;
 
     for (size_t i = 0; i < form->num_fields; i++) {
         if (form->fields[i].name && strcmp(form->fields[i].name, name) == 0) {
@@ -435,8 +423,7 @@ const char* multipart_field_value(const MultipartForm* form, const char* name) {
 // =============== File API ==========================
 
 FileHeader* multipart_file(const MultipartForm* form, const char* field_name) {
-    if (!form || !field_name)
-        return NULL;
+    if (!form || !field_name) return NULL;
 
     for (size_t i = 0; i < form->num_files; i++) {
         if (form->files[i]->field_name && strcmp(form->files[i]->field_name, field_name) == 0) {
@@ -448,8 +435,7 @@ FileHeader* multipart_file(const MultipartForm* form, const char* field_name) {
 
 size_t* multipart_get_files(const MultipartForm* form, const char* field_name, size_t* count) {
     if (!form || !field_name || !count) {
-        if (count)
-            *count = 0;
+        if (count) *count = 0;
         return NULL;
     }
 
@@ -484,8 +470,7 @@ size_t* multipart_get_files(const MultipartForm* form, const char* field_name, s
 }
 
 bool multipart_save_file(const FileHeader* file, const char* body, const char* path) {
-    if (!file || !body || !path)
-        return false;
+    if (!file || !body || !path) return false;
 
     FILE* f = fopen(path, "wb");
     if (!f) {

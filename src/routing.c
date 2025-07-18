@@ -97,8 +97,7 @@ static bool match_path_parameters(const char* pattern, const char* url_path, Pat
             const char* name_start = pat;
             while (*pat && *pat != '}')
                 pat++;
-            if (*pat != '}')
-                return false;
+            if (*pat != '}') return false;
 
             size_t name_len = pat - name_start;
 
@@ -126,8 +125,7 @@ static bool match_path_parameters(const char* pattern, const char* url_path, Pat
             memcpy(param->value, val_start, val_len);
             param->value[val_len] = '\0';
         } else {
-            if (*pat != *url)
-                return false;
+            if (*pat != *url) return false;
             pat++;
             url++;
         }
@@ -147,10 +145,8 @@ malloc_fail:
     for (size_t i = 0; i < nparams; i++) {
         char* name  = path_params->params[i].name;
         char* value = path_params->params[i].value;
-        if (name)
-            free(name);
-        if (value)
-            free(value);
+        if (name) free(name);
+        if (value) free(value);
     }
     return false;
 }
@@ -196,10 +192,8 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 route_t* route_static(const char* pattern, const char* dir) {
     ASSERT(pattern && dir && "pattern and dir must not be NULL");
 
-    if (strcmp(".", dir) == 0)
-        dir = "./";
-    if (strcmp("..", dir) == 0)
-        dir = "../";
+    if (strcmp(".", dir) == 0) dir = "./";
+    if (strcmp("..", dir) == 0) dir = "../";
     size_t dirlen = strlen(dir);
     ASSERT((dirlen + 1 < PATH_MAX) && "Directory name is too long");
 
@@ -228,18 +222,14 @@ static int compare_routes(const void* a, const void* b) {
     const route_t* rb = (const route_t*)b;
 
     // First sort by method
-    if (ra->method < rb->method)
-        return -1;
-    if (ra->method > rb->method)
-        return 1;
+    if (ra->method < rb->method) return -1;
+    if (ra->method > rb->method) return 1;
 
     // Then sort by pattern length (longer patterns first)
     size_t len_a = strlen(ra->pattern);
     size_t len_b = strlen(rb->pattern);
-    if (len_a > len_b)
-        return -1;
-    if (len_a < len_b)
-        return 1;
+    if (len_a > len_b) return -1;
+    if (len_a < len_b) return 1;
 
     // Finally sort alphabetically
     return strcmp(ra->pattern, rb->pattern);
@@ -348,17 +338,14 @@ route_t* route_match(const char* path, HttpMethod method) {
 }
 
 INLINE void free_path_params(PathParams* path_params) {
-    if (!path_params)
-        return;
+    if (!path_params) return;
 
     PathParam* params = path_params->params;
     for (size_t i = 0; i < path_params->match_count; i++) {
         char* name  = params[i].name;
         char* value = params[i].value;
-        if (name)
-            free(name);
-        if (value)
-            free(value);
+        if (name) free(name);
+        if (value) free(value);
     }
     free(params);
     free(path_params);

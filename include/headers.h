@@ -26,8 +26,7 @@ typedef struct {
 // Initialize headers
 static inline headers_t* headers_new(Arena* arena) {
     headers_t* headers = arena_alloc(arena, sizeof(headers_t));
-    if (unlikely(!headers))
-        return NULL;
+    if (unlikely(!headers)) return NULL;
 
     memset(headers, 0, sizeof(headers_t));
     headers->arena = arena;
@@ -36,15 +35,13 @@ static inline headers_t* headers_new(Arena* arena) {
 
 // Set a header (case-insensitive)
 static inline bool headers_set(headers_t* headers, const char* name, const char* value) {
-    if (unlikely(headers->count >= HEADERS_CAPACITY))
-        return false;
+    if (unlikely(headers->count >= HEADERS_CAPACITY)) return false;
 
     // Check if header already exists (update if found)
     for (size_t i = 0; i < headers->count; i++) {
         if (strcasecmp(headers->entries[i].name, name) == 0) {
             char* new_value = arena_strdup(headers->arena, value);
-            if (unlikely(!new_value))
-                return false;
+            if (unlikely(!new_value)) return false;
 
             headers->entries[i].value = new_value;
 
@@ -60,8 +57,7 @@ new_header:
     // Add new header with copied strings
     char* new_name  = arena_strdup(headers->arena, name);
     char* new_value = arena_strdup(headers->arena, value);
-    if (unlikely(!new_name || !new_value))
-        return false;
+    if (unlikely(!new_name || !new_value)) return false;
 
     headers->entries[headers->count].name  = new_name;
     headers->entries[headers->count].value = new_value;
@@ -86,8 +82,7 @@ static inline void headers_clear(headers_t* headers) {
 
 // Iterator
 #define headers_foreach(headers, item)                                                                       \
-    if (!headers)                                                                                            \
-        return;                                                                                              \
+    if (!headers) return;                                                                                    \
     for (size_t _i = 0; _i < (headers)->count && ((item) = &(headers)->entries[_i], 1); _i++)
 
 #ifdef __cplusplus

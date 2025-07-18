@@ -17,10 +17,8 @@ __attribute__((always_inline)) static inline uint16_t le_load_u16(const unsigned
 
 __attribute__((always_inline)) static inline void* memmem_scalar(const void* haystack, size_t haystack_len,
                                                                  const void* needle, size_t needle_len) {
-    if (needle_len == 0)
-        return (void*)haystack;
-    if (haystack_len < needle_len)
-        return NULL;
+    if (needle_len == 0) return (void*)haystack;
+    if (haystack_len < needle_len) return NULL;
 
     const unsigned char* h   = (const unsigned char*)haystack;
     const unsigned char* n   = (const unsigned char*)needle;
@@ -36,8 +34,7 @@ __attribute__((always_inline)) static inline void* memmem_scalar(const void* hay
         uint16_t n16 = le_load_u16(n);
         size_t limit = haystack_len - 1;
         for (size_t i = 0; i < limit; i++) {
-            if (le_load_u16(h + i) == n16)
-                return (void*)(h + i);
+            if (le_load_u16(h + i) == n16) return (void*)(h + i);
         }
         return NULL;
     }
@@ -74,10 +71,8 @@ __attribute__((always_inline)) static inline void* memmem_scalar(const void* hay
 
 /* AVX2 optimized version for longer needles */
 static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* needle, size_t needle_len) {
-    if (needle_len == 0)
-        return (void*)haystack;
-    if (haystack_len < needle_len)
-        return NULL;
+    if (needle_len == 0) return (void*)haystack;
+    if (haystack_len < needle_len) return NULL;
 
     const unsigned char* h = (const unsigned char*)haystack;
     const unsigned char* n = (const unsigned char*)needle;

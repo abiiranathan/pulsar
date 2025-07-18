@@ -22,12 +22,12 @@ extern "C" {
 #define UNUSED(var) ((void)var)
 
 #if defined(__GNUC__) || defined(__clang__)
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#define INLINE __attribute__((always_inline)) static inline
+#define likely(x)     __builtin_expect(!!(x), 1)
+#define unlikely(x)   __builtin_expect(!!(x), 0)
+#define INLINE        __attribute__((always_inline)) static inline
 #define STATIC_INLINE INLINE static
 #else
-#define likely(x) (x)
+#define likely(x)   (x)
 #define unlikely(x) (x)
 #define INLINE
 #define STATIC_INLINE
@@ -103,14 +103,12 @@ INLINE void url_percent_decode(const char* src, char* dst, size_t dst_size) {
             written++;
         } else if ((*src == '%') && (src_len >= 2) && ((a = src[1]) && (b = src[2])) &&
                    (isxdigit(a) && isxdigit(b))) {
-            if (a >= 'a')
-                a -= 'a' - 'A';
+            if (a >= 'a') a -= 'a' - 'A';
             if (a >= 'A')
                 a -= 'A' - 10;
             else
                 a -= '0';
-            if (b >= 'a')
-                b -= 'a' - 'A';
+            if (b >= 'a') b -= 'a' - 'A';
             if (b >= 'A')
                 b -= 'A' - 10;
             else

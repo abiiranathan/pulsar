@@ -8,17 +8,17 @@
 #ifdef _WIN32
 #include <windows.h>
 typedef CRITICAL_SECTION mutex_t;
-#define MUTEX_INIT(m) InitializeCriticalSection(m)
+#define MUTEX_INIT(m)    InitializeCriticalSection(m)
 #define MUTEX_DESTROY(m) DeleteCriticalSection(m)
-#define MUTEX_LOCK(m) EnterCriticalSection(m)
-#define MUTEX_UNLOCK(m) LeaveCriticalSection(m)
+#define MUTEX_LOCK(m)    EnterCriticalSection(m)
+#define MUTEX_UNLOCK(m)  LeaveCriticalSection(m)
 #else
 #include <pthread.h>
 typedef pthread_mutex_t mutex_t;
-#define MUTEX_INIT(m) pthread_mutex_init(m, NULL)
+#define MUTEX_INIT(m)    pthread_mutex_init(m, NULL)
 #define MUTEX_DESTROY(m) pthread_mutex_destroy(m)
-#define MUTEX_LOCK(m) pthread_mutex_lock(m)
-#define MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
+#define MUTEX_LOCK(m)    pthread_mutex_lock(m)
+#define MUTEX_UNLOCK(m)  pthread_mutex_unlock(m)
 #endif
 
 /* Arena allocator implementation */
@@ -39,8 +39,7 @@ struct arena {
 
 static arena_t* arena_create(size_t initial_block_size, bool thread_safe) {
     arena_t* arena = malloc(sizeof(arena_t));
-    if (!arena)
-        return NULL;
+    if (!arena) return NULL;
 
     arena->first = arena->current = NULL;
     arena->block_size             = initial_block_size;
@@ -61,8 +60,7 @@ static arena_t* arena_create(size_t initial_block_size, bool thread_safe) {
 }
 
 static void arena_destroy(arena_t* arena) {
-    if (!arena)
-        return;
+    if (!arena) return;
 
     arena_block_t* block = arena->first;
     while (block) {
@@ -81,15 +79,14 @@ static void arena_destroy(arena_t* arena) {
 }
 
 static void* arena_alloc(arena_t* arena, size_t size) {
-    if (!arena || size == 0)
-        return NULL;
+    if (!arena || size == 0) return NULL;
 
     if (arena->thread_safe && arena->mutex) {
         MUTEX_LOCK(arena->mutex);
     }
 
-    // Align to 8-byte boundary
-    size = (size + 7) & ~7;
+    // Align to 16-byte boundary
+    size = (size + 15) & ~15;
 
     // Check if current block has enough space
     if (!arena->current || (arena->current->size - arena->current->used) < size) {
@@ -138,22 +135,52 @@ static void* arena_alloc(arena_t* arena, size_t size) {
     return ptr;
 }
 
+// Reset arena, freeing large blocks.
+static void arena_reset(arena_t* arena) {
+    if (!arena) return;
+
+    arena_block_t* block = arena->first;
+    arena_block_t* prev  = NULL;
+
+    while (block) {
+        // Free blocks that are excessively large
+        arena_block_t* next = block->next;
+
+        if (block->size > arena->block_size * 4) {
+            // Free oversized blocks to avoid memory bloat
+            free(block->memory);
+            free(block);
+
+            if (prev)
+                prev->next = next;
+            else
+                arena->first = next;
+        } else {
+            block->used = 0;
+            prev        = block;
+        }
+
+        block = next;
+    }
+
+    arena->current = arena->first;
+}
+
 /* Internal helper functions */
-static size_t hash_string(const char* key, size_t capacity);
-static hashmap_entry_t* create_entry(arena_t* arena, const char* key, void* value);
-static hashmap_error_t resize_if_needed(hashmap_t* map);
-static hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity);
-static bool is_valid_capacity(size_t capacity);
-static bool is_valid_load_factor(float load_factor);
-static void lock_map(hashmap_t* map);
-static void unlock_map(hashmap_t* map);
+static inline size_t hash_string(const char* key, size_t capacity);
+static inline hashmap_entry_t* create_entry(arena_t* arena, const char* key, void* value);
+static inline hashmap_error_t resize_if_needed(hashmap_t* map);
+static inline hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity);
+static inline bool is_valid_capacity(size_t capacity);
+static inline bool is_valid_load_factor(float load_factor);
+static inline void lock_map(hashmap_t* map);
+static inline void unlock_map(hashmap_t* map);
 
 /**
  * @brief Hash function for strings (djb2 algorithm)
  */
 static size_t hash_string(const char* key, size_t capacity) {
-    if (!key || capacity == 0)
-        return 0;
+    if (!key || capacity == 0) return 0;
 
     size_t hash = 5381;
     int c;
@@ -169,16 +196,14 @@ static size_t hash_string(const char* key, size_t capacity) {
  * @brief Create a new entry with copied key using arena allocation
  */
 static hashmap_entry_t* create_entry(arena_t* arena, const char* key, void* value) {
-    if (!key)
-        return NULL;
+    if (!key) return NULL;
 
     // Allocate entry and key in one allocation
     size_t key_len    = strlen(key) + 1;
     size_t total_size = sizeof(hashmap_entry_t) + key_len;
 
     hashmap_entry_t* entry = arena_alloc(arena, total_size);
-    if (!entry)
-        return NULL;
+    if (!entry) return NULL;
 
     // Key is stored right after the entry struct
     char* key_copy = (char*)(entry + 1);
@@ -237,8 +262,7 @@ hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float
     }
 
     hashmap_t* map = malloc(sizeof(hashmap_t));
-    if (!map)
-        return NULL;
+    if (!map) return NULL;
 
     // Create arena with initial block size of 64KB or enough for initial buckets
     size_t arena_block_size = 64 * 1024;
@@ -283,31 +307,20 @@ hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float
 }
 
 void hashmap_clear(hashmap_t* map) {
-    if (!map)
-        return;
+    if (!map) return;
 
     lock_map(map);
 
     // Reset all buckets to NULL
     memset(map->buckets, 0, map->capacity * sizeof(hashmap_entry_t*));
     map->size = 0;
-
-    // Reset the arena by moving all blocks back to initial state
-    arena_block_t* block = map->arena->first;
-    while (block) {
-        block->used = 0;
-        block       = block->next;
-    }
-
-    // Reset arena's current pointer to first block
-    map->arena->current = map->arena->first;
+    arena_reset(map->arena);
 
     unlock_map(map);
 }
 
 void hashmap_destroy(hashmap_t* map) {
-    if (!map)
-        return;
+    if (!map) return;
 
     lock_map(map);
 
@@ -326,8 +339,7 @@ void hashmap_destroy(hashmap_t* map) {
 }
 
 hashmap_error_t hashmap_put(hashmap_t* map, const char* key, void* value) {
-    if (!map || !key)
-        return HASHMAP_ERROR_NULL_POINTER;
+    if (!map || !key) return HASHMAP_ERROR_NULL_POINTER;
 
     lock_map(map);
 
@@ -371,8 +383,7 @@ hashmap_error_t hashmap_put(hashmap_t* map, const char* key, void* value) {
    except for removing destroy_entry since we're using arena allocation */
 
 hashmap_error_t hashmap_get(hashmap_t* map, const char* key, void** value) {
-    if (!map || !key || !value)
-        return HASHMAP_ERROR_NULL_POINTER;
+    if (!map || !key || !value) return HASHMAP_ERROR_NULL_POINTER;
 
     lock_map(map);
 
@@ -396,8 +407,7 @@ hashmap_error_t hashmap_get(hashmap_t* map, const char* key, void** value) {
 }
 
 hashmap_error_t hashmap_remove(hashmap_t* map, const char* key) {
-    if (!map || !key)
-        return HASHMAP_ERROR_NULL_POINTER;
+    if (!map || !key) return HASHMAP_ERROR_NULL_POINTER;
 
     lock_map(map);
 
@@ -450,8 +460,7 @@ const char* hashmap_error_string(hashmap_error_t error) {
 }
 
 float hashmap_load_factor_current(const hashmap_t* map) {
-    if (!map || map->capacity == 0)
-        return 0.0f;
+    if (!map || map->capacity == 0) return 0.0f;
     return (float)map->size / (float)map->capacity;
 }
 
@@ -459,8 +468,7 @@ float hashmap_load_factor_current(const hashmap_t* map) {
  * @brief Check if resize is needed and perform it
  */
 static hashmap_error_t resize_if_needed(hashmap_t* map) {
-    if (!map)
-        return HASHMAP_ERROR_NULL_POINTER;
+    if (!map) return HASHMAP_ERROR_NULL_POINTER;
 
     float current_load = hashmap_load_factor_current(map);
 
@@ -482,12 +490,9 @@ static hashmap_error_t resize_if_needed(hashmap_t* map) {
 }
 
 hashmap_error_t hashmap_resize(hashmap_t* map, size_t new_capacity) {
-    if (!map)
-        return HASHMAP_ERROR_NULL_POINTER;
-    if (!is_valid_capacity(new_capacity))
-        return HASHMAP_ERROR_INVALID_CAPACITY;
-    if (new_capacity < map->size)
-        return HASHMAP_ERROR_INVALID_CAPACITY;
+    if (!map) return HASHMAP_ERROR_NULL_POINTER;
+    if (!is_valid_capacity(new_capacity)) return HASHMAP_ERROR_INVALID_CAPACITY;
+    if (new_capacity < map->size) return HASHMAP_ERROR_INVALID_CAPACITY;
 
     lock_map(map);
     hashmap_error_t result = resize_internal(map, new_capacity);
@@ -500,13 +505,11 @@ hashmap_error_t hashmap_resize(hashmap_t* map, size_t new_capacity) {
  * @brief Internal resize implementation
  */
 static hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity) {
-    if (!map || new_capacity == 0)
-        return HASHMAP_ERROR_INVALID_CAPACITY;
+    if (!map || new_capacity == 0) return HASHMAP_ERROR_INVALID_CAPACITY;
 
     /* Allocate new buckets */
     hashmap_entry_t** new_buckets = arena_alloc(map->arena, new_capacity * sizeof(hashmap_entry_t*));
-    if (!new_buckets)
-        return HASHMAP_ERROR_OUT_OF_MEMORY;
+    if (!new_buckets) return HASHMAP_ERROR_OUT_OF_MEMORY;
 
     /* Initialize new buckets to NULL */
     memset(new_buckets, 0, new_capacity * sizeof(hashmap_entry_t*));

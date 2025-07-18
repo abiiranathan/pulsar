@@ -41,8 +41,7 @@ INLINE Arena* arena_create(size_t capacity) {
 
 // Destroty arena and free memory.
 INLINE void arena_destroy(Arena* arena) {
-    if (!arena)
-        return;
+    if (!arena) return;
     free(arena);
 }
 

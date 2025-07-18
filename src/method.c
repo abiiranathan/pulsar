@@ -12,22 +12,14 @@ bool http_method_valid(HttpMethod method) {
 }
 
 HttpMethod http_method_from_string(const char* method) {
-    if (!method)
-        return HTTP_INVALID;
-    if (strcmp(method, "GET") == 0)
-        return HTTP_GET;
-    if (strcmp(method, "HEAD") == 0)
-        return HTTP_HEAD;
-    if (strcmp(method, "POST") == 0)
-        return HTTP_POST;
-    if (strcmp(method, "PUT") == 0)
-        return HTTP_PUT;
-    if (strcmp(method, "PATCH") == 0)
-        return HTTP_PATCH;
-    if (strcmp(method, "DELETE") == 0)
-        return HTTP_DELETE;
-    if (strcmp(method, "OPTIONS") == 0)
-        return HTTP_OPTIONS;
+    if (!method) return HTTP_INVALID;
+    if (strcmp(method, "GET") == 0) return HTTP_GET;
+    if (strcmp(method, "HEAD") == 0) return HTTP_HEAD;
+    if (strcmp(method, "POST") == 0) return HTTP_POST;
+    if (strcmp(method, "PUT") == 0) return HTTP_PUT;
+    if (strcmp(method, "PATCH") == 0) return HTTP_PATCH;
+    if (strcmp(method, "DELETE") == 0) return HTTP_DELETE;
+    if (strcmp(method, "OPTIONS") == 0) return HTTP_OPTIONS;
     return HTTP_INVALID;
 }
 

@@ -138,13 +138,6 @@ else
 	@file $(SHARED_LIB).$(LIB_VERSION)
 endif
 
-# Python package preparation
-pyupdate: lib
-	mkdir -p python/pulsar/lib
-	cp -fP $(SHARED_LIB)* python/pulsar/lib
-ifeq ($(UNAME), Darwin)
-	cp -fP $(STATIC_LIB) python/pulsar/lib
-endif
 
 # Clean build artifacts
 clean:
