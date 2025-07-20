@@ -6,14 +6,14 @@ ARCH := $(shell uname -m)
 BUILD ?= release
 
 # Compiler
-CC := gcc
+CC := clang
 
 # Base compiler flags
 BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC -mtune=native
 
 # Mode-specific flags and directories
 ifeq ($(BUILD),debug)
-    CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG -fanalyzer
+    CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
     CFLAGS := $(BASE_CFLAGS) -O3 -mtune=native -march=native -flto -funroll-loops \

@@ -22,9 +22,10 @@ extern "C" {
 #define UNUSED(var) ((void)var)
 
 #if defined(__GNUC__) || defined(__clang__)
-#define likely(x)     __builtin_expect(!!(x), 1)
-#define unlikely(x)   __builtin_expect(!!(x), 0)
-#define INLINE        __attribute__((always_inline)) static inline
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+// #define INLINE        __attribute__((always_inline)) static inline
+#define INLINE        static inline
 #define STATIC_INLINE INLINE static
 #else
 #define likely(x)   (x)

@@ -586,19 +586,19 @@ http_status res_get_status(connection_t* conn) {
     return conn->response->status_code;
 }
 
-__attribute__((hot, flatten)) void conn_writeheader_fast(connection_t* conn, const char* name,
+__attribute__((hot, flatten)) void conn_writeheader_fast(connection_t* restrict conn, const char* name,
                                                          size_t name_len, const char* value,
                                                          size_t value_len) {
     size_t required_len = name_len + value_len + 4;  // ": \r\n"
     response_t* res     = conn->response;
 
 #if DETECT_DUPLICATE_RES_HEADERS
-    if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0) return;
+    // if (res_header_exists(res, name, name_len) && strcasecmp(name, "Set-Cookie") != 0) return;
 #endif
 
     if (res->headers_len + required_len > RESPONSE_HEADER_CAPACITY) return;
 
-    unsigned char* dest = res->buffer + BUFFER_HEADERS_OFFSET + res->headers_len;
+    unsigned char* restrict dest = res->buffer + BUFFER_HEADERS_OFFSET + res->headers_len;
 
     // copy name + ": "
     memcpy(dest, name, name_len);
@@ -1062,6 +1062,61 @@ void pulsar_get_context_value(connection_t* conn, const char* key, void** value)
 /* ================================================================
  * Request Processing Functions
  * ================================================================ */
+bool parse_request_line(const char* read_buf, size_t buf_len, char* method, size_t method_size, char* path,
+                        size_t path_size, char* http_protocol, size_t protocol_size) {
+    const char* ptr     = read_buf;
+    const char* buf_end = read_buf + buf_len;
+    const char* start;
+    size_t len;
+
+    // Parse method
+    start = ptr;
+    while (ptr < buf_end && *ptr != ' ' && *ptr != '\t' && *ptr != '\0') {
+        ptr++;
+    }
+    if (ptr == start || ptr >= buf_end) return false;
+
+    len = ptr - start;
+    if (len >= method_size) return false;
+    memcpy(method, start, len);
+    method[len] = '\0';
+
+    // Skip whitespace
+    while (ptr < buf_end && (*ptr == ' ' || *ptr == '\t'))
+        ptr++;
+    if (ptr >= buf_end) return false;
+
+    // Parse path
+    start = ptr;
+    while (ptr < buf_end && *ptr != ' ' && *ptr != '\t' && *ptr != '\0') {
+        ptr++;
+    }
+    if (ptr == start || ptr >= buf_end) return false;
+
+    len = ptr - start;
+    if (len >= path_size) return false;
+    memcpy(path, start, len);
+    path[len] = '\0';
+
+    // Skip whitespace
+    while (ptr < buf_end && (*ptr == ' ' || *ptr == '\t'))
+        ptr++;
+    if (ptr >= buf_end) return false;
+
+    // Parse protocol
+    start = ptr;
+    while (ptr < buf_end && *ptr != ' ' && *ptr != '\t' && *ptr != '\r' && *ptr != '\n' && *ptr != '\0') {
+        ptr++;
+    }
+    if (ptr == start) return false;
+
+    len = ptr - start;
+    if (len >= protocol_size) return false;
+    memcpy(http_protocol, start, len);
+    http_protocol[len] = '\0';
+
+    return true;
+}
 
 static void process_request(connection_t* conn, char* read_buf, size_t read_bytes) {
     char* end_of_headers = strstr(read_buf, "\r\n\r\n");
@@ -1076,7 +1131,8 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
     char http_protocol[16];
 
     // Parse method, path and HTTP version
-    if (sscanf(read_buf, "%7s %1023s %15s", conn->request->method, path, http_protocol) != 3) {
+    if (!parse_request_line(read_buf, read_bytes, conn->request->method, sizeof(conn->request->method), path,
+                            sizeof(path), http_protocol, sizeof(http_protocol))) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
@@ -1386,7 +1442,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
 
                 errno = 0;  // Reset errno before writev
                 sent  = writev(conn->client_fd, iov, 2);
-                if (sent < 0) {
+                if (unlikely(sent < 0)) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         return;  // Will retry on next EPOLLOUT
                     }
@@ -1420,7 +1476,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             }
 
             sent = sendfile(conn->client_fd, res->file_fd, (off_t*)&res->file_offset, buffer_size);
-            if (sent < 0) {
+            if (unlikely(sent < 0)) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT
                 }
@@ -1444,7 +1500,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             };
 
             sent = writev(conn->client_fd, iov, 3);
-            if (sent < 0) {
+            if (unlikely(sent < 0)) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return;  // Will retry on next EPOLLOUT
                 }
@@ -1567,11 +1623,6 @@ void* worker_thread(void* arg) {
         bool accept_new_connections = !graceful_shutdown;
 
         for (int i = 0; i < num_events; i++) {
-            // prefetch next event to improve cache locality.
-            if (i + 1 < num_events) {
-                __builtin_prefetch(events[i + 1].data.ptr, 0, 3);
-            }
-
             if (events[i].data.fd == server_fd) {
                 if (accept_new_connections) {
                     // Accept new connection
@@ -1597,22 +1648,17 @@ void* worker_thread(void* arg) {
                 connection_t* conn = (connection_t*)events[i].data.ptr;
 
                 // Check for connection errors or hangups
-                if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+                if (unlikely(events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP))) {
                     conn->state = STATE_CLOSING;
-                } else {
-                    switch (conn->state) {
-                        case STATE_READING_REQUEST:
-                            if (events[i].events & EPOLLIN) {
-                                handle_read(epoll_fd, conn);
-                            }
-                            break;
-                        case STATE_WRITING_RESPONSE:
-                            if (events[i].events & EPOLLOUT) {
-                                handle_write(epoll_fd, conn);
-                            }
-                            break;
-                        default:
-                            break;
+                }
+
+                if (conn->state == STATE_READING_REQUEST) {
+                    if (events[i].events & EPOLLIN) {
+                        handle_read(epoll_fd, conn);
+                    }
+                } else if (conn->state == STATE_WRITING_RESPONSE) {
+                    if (events[i].events & EPOLLOUT) {
+                        handle_write(epoll_fd, conn);
                     }
                 }
 

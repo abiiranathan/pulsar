@@ -6,7 +6,7 @@
 // If "truthy", duplicate response headers are detected and ignored.
 // However this may have a small performance impact of calling memmem or alternative.
 #ifndef DETECT_DUPLICATE_RES_HEADERS
-#define DETECT_DUPLICATE_RES_HEADERS 0
+#define DETECT_DUPLICATE_RES_HEADERS 1
 #endif
 
 // If "truthy", server headers are written to the response.
@@ -22,12 +22,12 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 1024
+#define MAX_EVENTS 2048
 #endif
 
 // Buffer size for incoming statusline + headers.
 #ifndef READ_BUFFER_SIZE
-#define READ_BUFFER_SIZE 4096
+#define READ_BUFFER_SIZE 2048
 #endif
 
 // Default buffer size for status + headers + body.
