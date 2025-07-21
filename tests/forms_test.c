@@ -35,8 +35,8 @@ char* read_file(const char* filename, size_t* size) {
 // Helper function to create a test directory
 void create_test_dir() {
     struct stat st = {0};
-    if (stat("test_output", &st) == -1) {
-        mkdir("test_output", 0700);
+    if (stat("build", &st) == -1) {
+        mkdir("build", 0700);
     }
 }
 
@@ -119,13 +119,13 @@ int main() {
         printf("File found: %s (type: %s, size: %zu bytes)\n", file->filename, file->mimetype, file->size);
 
         // Save the file
-        bool save_result = multipart_save_file(file, test_form, "test_output/saved_test.txt");
+        bool save_result = multipart_save_file(file, test_form, "build/saved_test.txt");
         ASSERT(save_result && "Failed to save file");
-        printf("File saved successfully to test_output/saved_test.txt\n");
+        printf("File saved successfully to build/saved_test.txt\n");
 
         // Verify file content
         size_t file_size   = 0;
-        char* file_content = read_file("test_output/saved_test.txt", &file_size);
+        char* file_content = read_file("build/saved_test.txt", &file_size);
         ASSERT(file_content != NULL && "Failed to read saved file");
         printf("File content:\n%.*s\n", (int)file_size, file_content);
         free(file_content);
