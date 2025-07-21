@@ -188,9 +188,10 @@ static void arena_reset_full(arena_t* arena) {
 
         if (block->is_large_block || block->size > arena->block_size * 4) {
             // Free oversized blocks to avoid memory bloat
+            arena->total_allocated -= block->size;
+
             free(block->memory);
             free(block);
-            arena->total_allocated -= block->size;
 
             if (prev)
                 prev->next = next;
