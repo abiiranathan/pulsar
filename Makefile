@@ -6,10 +6,10 @@ ARCH := $(shell uname -m)
 BUILD ?= release
 
 # Compiler
-CC := clang
+CC := gcc
 
 # Base compiler flags
-BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC -mtune=native
+BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC -mtune=native -Iinclude
 
 # Mode-specific flags and directories
 ifeq ($(BUILD),debug)
@@ -17,7 +17,7 @@ ifeq ($(BUILD),debug)
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
     CFLAGS := $(BASE_CFLAGS) -O3 -mtune=native -march=native -flto -funroll-loops \
-    -ffast-math -DNDEBUG -msse4.2 -mavx2
+    -ffast-math -msse4.2 -mavx2
     BUILD_DIR := build/release
 else
     $(error Invalid BUILD type: $(BUILD))
@@ -45,15 +45,23 @@ endif
 
 # Targets
 TARGET := $(BUILD_DIR)/server
-TEST_TARGET := $(BUILD_DIR)/forms_test
+TEST_DIR := tests
+TEST_SRCS := $(wildcard $(TEST_DIR)/*.c)
+TEST_TARGETS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
 
 # Source and header directories
 SRC_DIR := src
 HEADERS_DIR := include
 
+
 # Source files
-BASE_SRC := $(SRC_DIR)/routing.c $(SRC_DIR)/hashmap.c $(SRC_DIR)/method.c $(SRC_DIR)/pulsar.c $(SRC_DIR)/forms.c
-TEST_SRCS := $(SRC_DIR)/forms_test.c $(SRC_DIR)/forms.c
+BASE_SRC := $(SRC_DIR)/routing.c \
+			$(SRC_DIR)/hashmap.c \
+			$(SRC_DIR)/method.c  \
+			$(SRC_DIR)/pulsar.c  \
+			$(SRC_DIR)/forms.c   \
+			$(SRC_DIR)/str.c
+
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 
 # Object files (placed in build dir)
@@ -74,14 +82,17 @@ $(TARGET): $(MAIN_SRC) $(LIB_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(MAIN_SRC) $(LIB_OBJS) -o $@ $(LDFLAGS)
 
-# Build the test application
-$(TEST_TARGET): $(HEADERS) $(TEST_SRCS)
+# Build test targets
+$(BUILD_DIR)/tests/%: $(TEST_DIR)/%.c $(LIB_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
 
-# Run tests
-test: $(TEST_TARGET)
-	./$<
+# Run all tests
+test: $(TEST_TARGETS)
+	@for test in $^; do \
+		echo "Running $$test..."; \
+		$$test || exit 1; \
+	done
 
 # Build static library
 static: $(STATIC_LIB)
@@ -138,10 +149,9 @@ else
 	@file $(SHARED_LIB).$(LIB_VERSION)
 endif
 
-
 # Clean build artifacts
 clean:
-	rm -rf build *.o *.a *.so* *.dylib* $(TARGET) $(TEST_TARGET)
+	rm -rf build *.o *.a *.so* *.dylib* $(TARGET) $(TEST_TARGETS)
 
 # Explicit targets for debug and release
 debug:
@@ -150,4 +160,4 @@ debug:
 release:
 	$(MAKE) BUILD=release all
 
-.PHONY: all test static shared lib install verify pyupdate clean debug release
+.PHONY: all test static shared lib install verify clean debug release
