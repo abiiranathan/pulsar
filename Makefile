@@ -8,8 +8,10 @@ BUILD ?= release
 # Compiler
 CC := gcc
 
+DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
+
 # Base compiler flags
-BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -D_GNU_SOURCE -fPIC -mtune=native -Iinclude
+BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -fPIC -mtune=native -Iinclude $(DEFINES)
 
 # Mode-specific flags and directories
 ifeq ($(BUILD),debug)
