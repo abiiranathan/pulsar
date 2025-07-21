@@ -5,21 +5,13 @@
 extern "C" {
 #endif
 
-#include <stdint.h>
 #include "constants.h"
 #include "headers.h"
 #include "method.h"
 
-#define STATIC_ROUTE_FLAG 0x01  // 1 << 0
-#define NORMAL_ROUTE_FLAG 0x02  // 1 << 2
-
-// Power of two check macro
-#define IS_POWER_OF_TWO(x)   (((x) != 0) && (((x) & ((x) - 1)) == 0))
-#define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
-#define ROUTE_CACHE_SIZE     (NEXT_POWER_OF_TWO(MAX_ROUTES * 2))
-
-// Must be power of 2
-static_assert(IS_POWER_OF_TWO(ROUTE_CACHE_SIZE), "ROUTE_CACHE_SIZE must be a power of two");
+#define STATIC_ROUTE_FLAG 0x01
+#define NORMAL_ROUTE_FLAG 0x02
+#define ROUTE_CACHE_SIZE  (NEXT_POWER_OF_TWO(MAX_ROUTES))
 
 // Path parameter.
 typedef struct {
@@ -48,12 +40,12 @@ typedef void (*HttpHandler)(struct connection_t* conn);
 typedef HttpHandler Middleware;  // Middleware function is same as the handler.
 
 typedef struct route_t {
-    int flags;                                    // Bit mask for route type. NormalRoute | StaticRoute
-    char* pattern;                                // dynamically allocated route pattern
-    char* dirname;                                // Directory name (for static routes)
-    HttpMethod method;                            // Http method.
+    const char* pattern;                          // dynamically allocated route pattern
+    const char* dirname;                          // Directory name (for static routes)
     HttpHandler handler;                          // Handler function pointer
     PathParams* path_params;                      // Path parameters
+    uint8_t flags;                                // Bit mask for route type. NormalRoute | StaticRoute
+    HttpMethod method;                            // Http method.
     Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
     size_t mw_count;                              // Number of middleware
 } route_t;
@@ -66,7 +58,7 @@ void sort_routes(void);
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler);
 
 // Register a new route to server static file in directory at dir.
-// dir must exist and pattern not NULL.
+// dir must be a resolved path and must exist and pattern not NULL.
 // Handles serving of index.html at root of directory. File System Traversal
 // `should` be blocked.
 route_t* route_static(const char* pattern, const char* dir);
@@ -80,4 +72,4 @@ route_t* route_match(const char* path, HttpMethod method);
 }
 #endif
 
-#endif  // ROUTING_H
+#endif /* ROUTING_H */

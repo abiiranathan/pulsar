@@ -25,13 +25,6 @@
 extern "C" {
 #endif
 
-/* Default configuration constants */
-#define HASHMAP_DEFAULT_CAPACITY    16
-#define HASHMAP_DEFAULT_LOAD_FACTOR 0.75f
-#define HASHMAP_MAX_LOAD_FACTOR     0.9f
-#define HASHMAP_MIN_LOAD_FACTOR     0.1f
-#define HASHMAP_GROWTH_FACTOR       2
-
 /* Error codes */
 typedef enum {
     HASHMAP_OK = 0,
@@ -47,43 +40,16 @@ typedef enum {
 /* Forward declarations */
 typedef struct hashmap hashmap_t;
 typedef struct hashmap_entry hashmap_entry_t;
-typedef struct hashmap_iterator hashmap_iterator_t;
-typedef struct arena arena_t;
-
-/**
- * @brief Hash map entry structure
- */
-struct hashmap_entry {
-    char* key;                  /* Owned copy of the key string */
-    void* value;                /* User-provided value pointer */
-    struct hashmap_entry* next; /* Next entry in chain */
-};
 
 /**
  * @brief Hash map iterator structure
  */
-struct hashmap_iterator {
+typedef struct hashmap_iterator {
     hashmap_t* map;           /* Reference to the hashmap */
     size_t bucket_index;      /* Current bucket index */
     hashmap_entry_t* current; /* Current entry */
     bool valid;               /* Iterator validity flag */
-};
-
-/**
- * @brief Hash map structure
- */
-struct hashmap {
-    hashmap_entry_t** buckets; /* Array of bucket heads */
-    size_t capacity;           /* Current bucket array size */
-    size_t size;               /* Number of key-value pairs */
-    size_t max_capacity;       /* Maximum allowed capacity (0 = unlimited) */
-    float load_factor;         /* Target load factor */
-    bool thread_safe;          /* Thread safety flag */
-    void* mutex;               /* Mutex for thread safety (opaque) */
-    arena_t* arena;            /* Hashmap arena*/
-};
-
-/* Core hashmap operations */
+} hashmap_iterator_t;
 
 /**
  * @brief Create a new hashmap with default settings
@@ -96,11 +62,9 @@ hashmap_t* hashmap_create(void);
  * @param initial_capacity Initial bucket array size (must be > 0)
  * @param max_capacity Maximum allowed capacity (0 = unlimited)
  * @param load_factor Target load factor (0.1 - 0.9)
- * @param thread_safe Enable thread safety
  * @return Pointer to new hashmap or NULL on failure
  */
-hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float load_factor,
-                             bool thread_safe);
+hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float load_factor);
 
 /**
  * @brief Destroy a hashmap and free all memory

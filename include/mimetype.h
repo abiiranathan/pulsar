@@ -8,6 +8,7 @@ extern "C" {
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
+#include "macros.h"
 
 typedef struct MimeEntry {
     const char* ext;
@@ -254,11 +255,9 @@ static MimeEntry mime_entries[] = {
 #define MIME_MAPPING_SIZE (sizeof(mime_entries) / sizeof(mime_entries[0]))
 
 #define DEFAULT_CONTENT_TYPE "application/octet-stream"
-#define NEXT_POWER_OF_TWO(n) ((n) == 0 ? 1 : (1 << (32 - __builtin_clz((n) - 1))))
 #define HASH_TABLE_SIZE      NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
-#define IS_POWER_OF_TWO(x)   (((x) != 0) && (((x) & ((x) - 1)) == 0))
-
-static_assert(IS_POWER_OF_TWO(HASH_TABLE_SIZE), "HASH_TABLE_SIZE must be a power of two");
+CHECK_POWER_OF_2(HASH_TABLE_SIZE);
+#define HASH_TABLE_MASK (HASH_TABLE_SIZE - 1)
 
 static MimeEntry* hash_table[HASH_TABLE_SIZE] = {0};
 
@@ -267,8 +266,8 @@ static unsigned int hash_func(const char* str) {
     unsigned long hash = 5381;
     int c;
     while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;  /* hash * 33 + c */
-    return hash & (HASH_TABLE_SIZE - 1);  // Fast alternative to modulo
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    return hash & HASH_TABLE_MASK;       // Fast alternative to modulo
 }
 
 // Initialize hashes for mime types. Must be called before calling
@@ -302,6 +301,8 @@ static inline const char* get_mimetype(char* filename) {
 
     // O(1) lookup
     unsigned int hash = hash_func(ext);
+
+    // Walk the chain.
     for (MimeEntry* entry = hash_table[hash]; entry; entry = entry->next) {
         if (strcmp(ext, entry->ext) == 0) {
             return entry->mimetype;

@@ -1,8 +1,3 @@
-// File: routing.c
-// Implements Pulsar server routing.
-// Heavily uses assert in functions that are guaranteed to fail at startup
-// if a constraint is violated.
-
 #include "../include/routing.h"
 #include "../include/method.h"
 #include "../include/utils.h"
@@ -64,16 +59,12 @@ INLINE size_t count_path_params(const char* pattern, bool* valid) {
  * @return true if the pattern and URL match, false otherwise
  */
 static bool match_path_parameters(const char* pattern, const char* url_path, PathParams* path_params) {
-    if (!path_params)  // pattern/url/arena should be valid (since this is internal.)
-        return false;
-
-    const char* pat          = pattern;
-    const char* url          = url_path;
-    size_t nparams           = 0;
-    path_params->match_count = 0;
+    const char* pat = pattern;
+    const char* url = url_path;
+    size_t nparams  = 0;
 
     // Fast path: exact match when no parameters were allocated.
-    if (path_params->params == NULL) {
+    if (!path_params || !path_params->params) {
         while (*pat && *url && *pat == *url) {
             pat++;
             url++;
@@ -85,6 +76,9 @@ static bool match_path_parameters(const char* pattern, const char* url_path, Pat
             url++;
         return (*pat == '\0' && *url == '\0');
     }
+
+    // Initialize match count.
+    path_params->match_count = 0;
 
     // Now, we have parameters
     while (*pat && *url && nparams < path_params->total_params) {
@@ -152,63 +146,43 @@ malloc_fail:
 }
 
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
-    ASSERT(global_route_count < MAX_ROUTES && http_method_valid(method) && pattern && handler &&
-           "Invalid arguments");
+    ASSERT(global_route_count < MAX_ROUTES);
+    ASSERT(http_method_valid(method));
+    ASSERT(pattern && handler && "pattern and handler must not be NULL");
 
-    route_t* r = &global_routes[global_route_count];
-    r->pattern = strdup(pattern);
-    ASSERT(r->pattern && "strdup failed to allocate pattern");
-
+    route_t* r     = &global_routes[global_route_count];
+    r->pattern     = pattern;
     r->method      = method;
     r->handler     = handler;
-    r->path_params = malloc(sizeof(PathParams));
-    ASSERT(r->path_params && "malloc failed to allocate PathParams");
+    r->flags       = NORMAL_ROUTE_FLAG;
+    r->dirname     = NULL;
+    r->path_params = NULL;
 
-    bool valid;
-    size_t nparams = count_path_params(pattern, &valid);
-    ASSERT(valid && "Invalid path parameters in pattern");
+    bool pattern_valid;
+    size_t nparams = count_path_params(pattern, &pattern_valid);
+    ASSERT(pattern_valid && "Invalid path parameters in pattern");
 
-    r->path_params->match_count  = 0;        // Init the match count
-    r->path_params->total_params = nparams;  // Set the expected path parameters
-    r->path_params->params       = NULL;
+    // Only allocate path params if they exist in the pattern.
     if (nparams > 0) {
-        r->path_params->params = calloc(nparams, sizeof(PathParam));
+        r->path_params = malloc(sizeof(PathParams));
+        ASSERT(r->path_params && "malloc failed to allocate PathParams");
+
+        r->path_params->match_count  = 0;        // Init the match count
+        r->path_params->total_params = nparams;  // Set the expected path parameters
+        r->path_params->params       = NULL;     // Init array to NULL.
+        r->path_params->params       = calloc(nparams, sizeof(PathParam));
         ASSERT(r->path_params->params && "calloc failed to allocate array of PathParam's");
     }
 
-    // default to normal route.
-    r->flags   = NORMAL_ROUTE_FLAG;
-    r->dirname = NULL;
-
-    // Initialize route middleware
-    r->mw_count = 0;
-    memset(r->middleware, 0, sizeof(r->middleware));
-
-    // Increment global count
-    global_route_count++;
+    memset(r->middleware, 0, sizeof(r->middleware));  // zero middleware array
+    r->mw_count = 0;                                  // intialize count to 0
+    global_route_count++;                             // Increment global count
     return r;
 }
 
-route_t* route_static(const char* pattern, const char* dir) {
-    ASSERT(pattern && dir && "pattern and dir must not be NULL");
-
-    if (strcmp(".", dir) == 0) dir = "./";
-    if (strcmp("..", dir) == 0) dir = "../";
-    size_t dirlen = strlen(dir);
-    ASSERT((dirlen + 1 < PATH_MAX) && "Directory name is too long");
-
-    char* dirname = NULL;  // will be malloc'd
-    if ((dirname = realpath(dir, NULL)) == NULL) {
-        fprintf(stderr, "Unable to resolve path: %s\n", dir);
-        exit(1);
-    }
-
-    // We must have a valid directory
-    ASSERT(is_dir(dirname) && "dir must be a valid path to an existing directory");
-
-    if (dirname[dirlen - 1] == '/') {
-        dirname[dirlen - 1] = '\0';  // Remove trailing slash
-    }
+route_t* route_static(const char* pattern, const char* dirname) {
+    ASSERT(pattern && dirname && "pattern and dirname must be non-NULL");
+    ASSERT(is_dir(dirname) && "dir must be an existing directory");
 
     route_t* r = route_register(pattern, HTTP_GET, static_file_handler);
     r->flags   = STATIC_ROUTE_FLAG;
@@ -340,25 +314,22 @@ route_t* route_match(const char* path, HttpMethod method) {
 INLINE void free_path_params(PathParams* path_params) {
     if (!path_params) return;
 
-    PathParam* params = path_params->params;
-    for (size_t i = 0; i < path_params->match_count; i++) {
-        char* name  = params[i].name;
-        char* value = params[i].value;
-        if (name) free(name);
-        if (value) free(value);
+    PathParam* params_array = path_params->params;
+    if (params_array) {
+        for (size_t i = 0; i < path_params->match_count; i++) {
+            char* name  = params_array[i].name;
+            char* value = params_array[i].value;
+            if (name) free(name);
+            if (value) free(value);
+        }
+        free(params_array);
     }
-    free(params);
     free(path_params);
 }
 
 __attribute__((destructor())) void routing_cleanup(void) {
     for (size_t i = 0; i < global_route_count; i++) {
         route_t* r = &global_routes[i];
-        free(r->pattern);
-
-        if (r->dirname) {
-            free(r->dirname);
-        }
         free_path_params(r->path_params);
     }
 }

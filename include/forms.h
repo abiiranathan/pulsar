@@ -22,34 +22,6 @@ extern "C" {
 
 #include "arena.h"
 
-/* Configuration Constants ***************************************************/
-
-/**
- * @def INITIAL_FIELD_CAPACITY
- * @brief Initial number of form fields to allocate space for
- */
-#ifndef INITIAL_FIELD_CAPACITY
-#define INITIAL_FIELD_CAPACITY 16
-#endif
-
-/**
- * @def INITIAL_FILE_CAPACITY
- * @brief Initial number of files to allocate space for
- */
-#ifndef INITIAL_FILE_CAPACITY
-#define INITIAL_FILE_CAPACITY 4
-#endif
-
-/**
- * @def MAX_FILE_SIZE
- * @brief Maximum allowed file size (10MB default)
- */
-#ifndef MAX_FILE_SIZE
-#define MAX_FILE_SIZE (10 * 1024 * 1024)
-#endif
-
-/* Data Structures ***********************************************************/
-
 /**
  * @struct FileHeader
  * @brief Metadata for uploaded files
@@ -172,9 +144,9 @@ const char* multipart_error(MpCode error);
 
 /**
  * @brief Extract boundary from Content-Type header
- * @param content_type Header value
- * @param boundary Output buffer
- * @param size Buffer size
+ * @param content_type Header value. Must be null-terminated.
+ * @param boundary Output buffer for the boundary.
+ * @param size Buffer size for the boundary.
  * @return true if boundary found, false otherwise
  */
 bool parse_boundary(const char* content_type, char* boundary, size_t size);

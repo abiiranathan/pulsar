@@ -14,32 +14,11 @@ extern "C" {
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "macros.h"
 
 // Fast memmem implementation
 // Uses AVX intrinsics for better performance on x86/x86_64.
 #include "memmem.h"
-
-#define UNUSED(var) ((void)var)
-
-#if defined(__GNUC__) || defined(__clang__)
-#define likely(x)   __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-// #define INLINE        __attribute__((always_inline)) static inline
-#define INLINE        static inline
-#define STATIC_INLINE INLINE static
-#else
-#define likely(x)   (x)
-#define unlikely(x) (x)
-#define INLINE
-#define STATIC_INLINE
-#endif
-
-#ifdef NDEBUG
-#define ASSERT(expr) ((void)(expr))  // evaluates but discards, avoids "unused"
-#else
-#include <assert.h>
-#define ASSERT(expr) assert((expr))
-#endif
 
 INLINE unsigned long parse_ulong(const char* value, bool* valid) {
     assert(valid && "NULL pointer for bool *valid");
@@ -85,8 +64,7 @@ INLINE bool is_dir(const char* path) {
  * Returns true if path exists, false otherwise (and sets errno)
  */
 INLINE bool path_exists(const char* path) {
-    if (!path || !*path) {  // Handle NULL or empty string
-        errno = EINVAL;
+    if (!path || !*path) {
         return false;
     }
     return access(path, F_OK) == 0;

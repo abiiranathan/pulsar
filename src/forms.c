@@ -1,5 +1,10 @@
-#include "../include/forms.h"
 #include <stdio.h>
+
+#include "../include/constants.h"
+#include "../include/forms.h"
+
+#define INITIAL_FIELD_CAPACITY 32
+#define INITIAL_FILE_CAPACITY  4
 
 /**
  * @enum State
@@ -17,7 +22,7 @@ typedef enum {
 } State;
 
 // Helper function to grow the files array
-static bool grow_files_array(MultipartForm* form) {
+INLINE bool grow_files_array(MultipartForm* form) {
     size_t new_capacity    = form->files_capacity * 2;
     FileHeader** new_files = (FileHeader**)arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
     if (!new_files) return false;
@@ -33,7 +38,7 @@ static bool grow_files_array(MultipartForm* form) {
 }
 
 // Helper function to grow the fields array
-static bool grow_fields_array(MultipartForm* form) {
+INLINE bool grow_fields_array(MultipartForm* form) {
     size_t new_capacity   = form->fields_capacity * 2;
     FormField* new_fields = (FormField*)arena_alloc(form->arena, new_capacity * sizeof(FormField));
     if (!new_fields) return false;
@@ -83,7 +88,7 @@ MpCode multipart_init(MultipartForm* form, size_t memory) {
 }
 
 // Insert file header into form
-static inline bool form_insert_header(MultipartForm* form, FileHeader* header) {
+INLINE bool form_insert_header(MultipartForm* form, FileHeader* header) {
     if (form->num_files >= form->files_capacity) {
         if (!grow_files_array(form)) return false;
     }
@@ -365,21 +370,21 @@ cleanup:
     return code;
 }
 
-// Parses the form boundary from the content-type header
 bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     if (!content_type || !boundary) return false;
 
     const char* prefix  = "--";
-    size_t prefix_len   = strlen(prefix);
+    size_t prefix_len   = 2;  // strlen(prefix)
     size_t total_length = strlen(content_type);
 
     if (strncasecmp(content_type, "multipart/form-data", 19) != 0) {
         return false;
     }
 
-    char* start = memmem(content_type, total_length, "boundary=", 9);
+    char* start = strstr(content_type, "boundary=");
     if (!start) return false;
 
+    // +9 for to move past "boundary="
     size_t length = total_length - ((start + 9) - content_type);
 
     if (size <= length + prefix_len + 1) return false;

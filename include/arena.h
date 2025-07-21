@@ -8,9 +8,6 @@
 #include <string.h>
 #include "utils.h"
 
-// Faster alignment for 64-bit systems
-#define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
-
 #ifdef __cplusplus
 extern "C" {
 #endif

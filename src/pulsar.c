@@ -30,6 +30,7 @@
 #define BUFFER_BODY_OFFSET       (BUFFER_HEADERS_OFFSET + 4096 + 2)  // Reserve 4096 for headers+\r\n
 #define RESPONSE_HEADER_CAPACITY (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
 #define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
+#define CACHE_LINE_SIZE          64
 
 // Flag bit definitions
 #define HTTP_CONTENT_TYPE_SET 0x01
@@ -77,9 +78,9 @@ typedef struct response_t {
 
 // HTTP Request structure
 typedef struct request_t {
+    char path[512];           // Request path.
     char method[8];           // HTTP method (GET, POST etc.)
     HttpMethod method_type;   // MethodType Enum
-    char* path;               // Requested path (arena allocated)
     char* body;               // Request body (dynamically allocated)
     size_t content_length;    // Content-Length header value
     headers_t* headers;       // Request headers
@@ -93,16 +94,17 @@ typedef struct connection_t {
         STATE_READING_REQUEST,
         STATE_WRITING_RESPONSE,
         STATE_CLOSING,
-    } state;                    // Connection state
-    int client_fd;              // Client socket file descriptor
-    time_t last_activity;       // Timestamp of last I/O activity
-    struct timespec start;      // Timestamp of first request
-    bool keep_alive;            // Keep-alive flag
-    bool abort;                 // Abort handler/middleware processing
-    struct request_t* request;  // HTTP request data (arena allocated)
-    response_t* response;       // HTTP response data (arena allocated)
-    Arena* arena;               // Memory arena for allocations
-    hashmap_t* locals;          // Per-request context variables set by the user.
+    } state;                          // Connection state
+    int client_fd;                    // Client socket file descriptor
+    time_t last_activity;             // Timestamp of last I/O activity
+    struct timespec start;            // Timestamp of first request
+    bool keep_alive;                  // Keep-alive flag
+    bool abort;                       // Abort handler/middleware processing
+    struct request_t* request;        // HTTP request data (arena allocated)
+    response_t* response;             // HTTP response data (arena allocated)
+    Arena* arena;                     // Memory arena for allocations
+    hashmap_t* locals;                // Per-request context variables set by the user.
+    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
 } connection_t;
 
 /* ================================================================
@@ -169,6 +171,7 @@ INLINE request_t* create_request(Arena* arena) {
 
     // Initialize request structure
     memset(req, 0, sizeof(request_t));
+    memset(req->path, 0, sizeof(req->path));
 
     req->headers = headers_new(arena);
     if (unlikely(!req->headers)) return NULL;
@@ -179,15 +182,17 @@ INLINE request_t* create_request(Arena* arena) {
 }
 
 INLINE response_t* create_response() {
-    response_t* resp = calloc(1, sizeof(response_t));
-    if (unlikely(!resp)) return NULL;
+    response_t* resp = aligned_alloc(CACHE_LINE_SIZE, sizeof(response_t));
+    if (!resp) return NULL;
+    memset(resp, 0, sizeof(*resp));
 
     // Allocate a a resizble buffer for the response.
-    resp->buffer = calloc(1, WRITE_BUFFER_SIZE);
-    if (unlikely(!resp->buffer)) {
+    resp->buffer = aligned_alloc(CACHE_LINE_SIZE, WRITE_BUFFER_SIZE);
+    if (!resp->buffer) {
         free(resp);
         return NULL;
     }
+    memset(resp->buffer, 0, WRITE_BUFFER_SIZE);
 
     resp->buffer_size = WRITE_BUFFER_SIZE;
     resp->file_fd     = -1;
@@ -196,7 +201,7 @@ INLINE response_t* create_response() {
 
 // Free request body. (Request structure is arena-allocated.)
 INLINE void free_request(request_t* req) {
-    if (unlikely(!req)) return;
+    if (!req) return;
 
     if (unlikely(req->body)) {
         free(req->body);
@@ -235,6 +240,7 @@ INLINE bool reset_connection(connection_t* conn) {
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
     conn->state      = STATE_READING_REQUEST;
     conn->keep_alive = true;
+    memset(conn->read_buf, 0, READ_BUFFER_SIZE);
 
     if (conn->locals) {
         hashmap_clear(conn->locals);
@@ -246,18 +252,20 @@ INLINE bool reset_connection(connection_t* conn) {
     }
 
     // Free request body before resetting arena.
-    free_request(conn->request);
+    if (conn->request && conn->request->body) {
+        free(conn->request->body);
+    };
 
     // Allocate a response if NULL or reset the buffer.
-    if (likely(conn->response)) {
+    if (conn->response) {
         reset_response(conn->response);
     } else {
         conn->response = create_response();
     }
 
-    if (unlikely(!conn->arena)) {
+    if (!conn->arena) {
         conn->arena = arena_create(ARENA_CAPACITY);
-        if (unlikely(!conn->arena)) return false;
+        if (!conn->arena) return false;
     } else {
         arena_reset(conn->arena);
     }
@@ -315,8 +323,8 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, char* read_buf, size_t headers_len) {
-    const char* ptr = read_buf;
+INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, size_t headers_len) {
+    const char* ptr = conn->read_buf;
     const char* end = ptr + headers_len;
 
     bool content_len_set = false;
@@ -399,7 +407,7 @@ INLINE bool parse_query_params(connection_t* conn) {
     return true;
 }
 
-static bool parse_request_body(connection_t* conn, size_t headers_len, char* read_buf, size_t read_bytes) {
+static bool parse_request_body(connection_t* conn, size_t headers_len, size_t read_bytes) {
     if (conn->request->content_length == 0) return true;
 
     request_t* req        = conn->request;
@@ -413,13 +421,13 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, char* rea
     }
 
     // Allocate full request body (+ null byte for safety).
-    req->body = malloc(content_length + 1);
+    req->body = aligned_alloc(CACHE_LINE_SIZE, content_length + 1);
     if (!req->body) {
         perror("malloc body");
         return false;
     }
 
-    memcpy(req->body, read_buf + headers_len, body_available);
+    memcpy(req->body, conn->read_buf + headers_len, body_available);
     req->body[body_available] = '\0';
 
     size_t body_received = body_available;
@@ -1118,7 +1126,8 @@ bool parse_request_line(const char* read_buf, size_t buf_len, char* method, size
     return true;
 }
 
-static void process_request(connection_t* conn, char* read_buf, size_t read_bytes) {
+INLINE void process_request(connection_t* conn, size_t read_bytes) {
+    const char* read_buf = conn->read_buf;
     char* end_of_headers = strstr(read_buf, "\r\n\r\n");
     if (!end_of_headers) {
         send_error_response(conn, StatusBadRequest);
@@ -1127,12 +1136,11 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
 
     size_t headers_len = end_of_headers - read_buf + 4;
 
-    char path[1024];
     char http_protocol[16];
-
     // Parse method, path and HTTP version
-    if (!parse_request_line(read_buf, read_bytes, conn->request->method, sizeof(conn->request->method), path,
-                            sizeof(path), http_protocol, sizeof(http_protocol))) {
+    if (!parse_request_line(read_buf, read_bytes, conn->request->method, sizeof(conn->request->method),
+                            conn->request->path, sizeof(conn->request->path), http_protocol,
+                            sizeof(http_protocol))) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
@@ -1150,12 +1158,6 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
         return;
     }
 
-    conn->request->path = arena_strdup(conn->arena, path);
-    if (!conn->request->path) {
-        send_error_response(conn, StatusInternalServerError);
-        return;
-    }
-
     HttpMethod method = http_method_from_string(conn->request->method);
     if (!http_method_valid(method)) {
         send_error_response(conn, StatusMethodNotAllowed);
@@ -1169,7 +1171,7 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
     }
 
     // We need to parse the headers even for 404.
-    if (!parse_request_headers(conn, method, read_buf, headers_len)) {
+    if (!parse_request_headers(conn, method, headers_len)) {
         send_error_response(conn, StatusInternalServerError);
         return;
     };
@@ -1177,7 +1179,7 @@ static void process_request(connection_t* conn, char* read_buf, size_t read_byte
     route_t* route = route_match(conn->request->path, method);
     if (route) {
         conn->request->route = route;
-        if (!parse_request_body(conn, headers_len, read_buf, read_bytes)) {
+        if (!parse_request_body(conn, headers_len, read_bytes)) {
             send_error_response(conn, StatusInternalServerError);
             return;
         }
@@ -1346,7 +1348,7 @@ INLINE int conn_accept(int worker_id) {
 }
 
 INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
-    connection_t* conn = malloc(sizeof(connection_t));
+    connection_t* conn = aligned_alloc(CACHE_LINE_SIZE, sizeof(connection_t));
     if (!conn) {
         perror("calloc");
         close(client_fd);
@@ -1379,8 +1381,7 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
 }
 
 INLINE void handle_read(int epoll_fd, connection_t* conn) {
-    char read_buf[READ_BUFFER_SIZE];
-    ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
+    ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             conn->state = STATE_CLOSING;  // read: connection reset by peer.
@@ -1390,11 +1391,9 @@ INLINE void handle_read(int epoll_fd, connection_t* conn) {
         conn->state = STATE_CLOSING;  // Unexpected close.
         return;
     }
+    conn->read_buf[bytes_read] = '\0';
 
-    conn->last_activity  = time(NULL);
-    read_buf[bytes_read] = '\0';
-
-    process_request(conn, read_buf, bytes_read);
+    process_request(conn, bytes_read);
 
     if (conn->state == STATE_WRITING_RESPONSE) {
         struct epoll_event event;

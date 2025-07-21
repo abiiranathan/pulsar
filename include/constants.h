@@ -3,6 +3,9 @@
 
 #include <stddef.h>
 
+// Include helper macros
+#include "macros.h"
+
 // If "truthy", duplicate response headers are detected and ignored.
 // However this may have a small performance impact of calling memmem or alternative.
 #ifndef DETECT_DUPLICATE_RES_HEADERS
@@ -44,6 +47,14 @@
 // Max Request body allowed. Default 2 MB
 #ifndef MAX_BODY_SIZE
 #define MAX_BODY_SIZE (2 << 20)
+#endif
+
+/**
+ * @def MAX_FILE_SIZE
+ * @brief Maximum allowed file size (25KB default)
+ */
+#ifndef MAX_FILE_SIZE
+#define MAX_FILE_SIZE (25 * 1024)
 #endif
 
 // Arena memory per connection for request headers, query params and path params.
@@ -101,6 +112,8 @@ static_assert(CONNECTION_TIMEOUT >= 10, "CONNECTION_TIMEOUT must be at least 10 
 
 // Ensure body size is reasonable
 static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
+static_assert(MAX_FILE_SIZE > 0, "MAX_FILE_SIZE must be > 0");
+static_assert(MAX_FILE_SIZE <= MAX_BODY_SIZE, "MAX_FILE_SIZE must be <= MAX_BODY_SIZE");
 
 // Ensure shutdown timeout is reasonable
 static_assert(SHUTDOWN_TIMEOUT_SECONDS > 0, "SHUTDOWN_TIMEOUT_SECONDS must be > 0");
