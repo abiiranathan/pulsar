@@ -250,7 +250,7 @@ route_t* route_match(const char* path, HttpMethod method) {
     // 0. Check cache first
     uint32_t key;
     HASH_ROUTE_KEY(method, path, key);
-    uint32_t cache_slot = key & (ROUTE_CACHE_SIZE - 1);
+    uint32_t cache_slot = (key & ROUTE_CACHE_MASK);
 
     if (route_cache[cache_slot].key == key) {
         return route_cache[cache_slot].route;

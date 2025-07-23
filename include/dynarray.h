@@ -183,8 +183,8 @@
          : da_shrink_((void**)&(arr_ptr)->data, &(arr_ptr)->cap, (arr_ptr)->len, sizeof(*(arr_ptr)->data)))
 
 // Function declarations
-bool da_grow_(void** data, size_t* cap, size_t min_cap, size_t elem_size);
-bool da_shrink_(void** data, size_t* cap, size_t new_cap, size_t elem_size);
+static inline bool da_grow_(void** data, size_t* cap, size_t min_cap, size_t elem_size);
+static inline bool da_shrink_(void** data, size_t* cap, size_t new_cap, size_t elem_size);
 
 #ifdef DA_IMPLEMENTATION
 

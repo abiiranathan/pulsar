@@ -1,7 +1,8 @@
 {
-    "python.analysis.extraPaths": [
-        "${workspaceFolder}/python/pulsar"
-    ],
-    "editor.formatOnSave": true,
-    "python.defaultInterpreterPath": "${workspaceFolder}/python/.venv/bin/python"
+    "files.exclude": {
+        "**/*.mp4": true,
+        "**/*.out": true,
+        "**/build": true,
+        "**/perf.data*": true
+    }
 }

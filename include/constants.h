@@ -6,10 +6,9 @@
 // Include helper macros
 #include "macros.h"
 
-// If "truthy", duplicate response headers are detected and ignored.
-// However this may have a small performance impact of calling memmem or alternative.
-#ifndef DETECT_DUPLICATE_RES_HEADERS
-#define DETECT_DUPLICATE_RES_HEADERS 1
+// Enable logging callback.
+#ifndef ENABLE_LOGGING
+#define ENABLE_LOGGING 0
 #endif
 
 // If "truthy", server headers are written to the response.
@@ -59,7 +58,7 @@
 
 // Arena memory per connection for request headers, query params and path params.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY (4 * 1024)
+#define ARENA_CAPACITY (16 * 1024)
 #endif
 
 // Maximum number of routes to statically allocated for.

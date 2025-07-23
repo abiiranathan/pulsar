@@ -12,6 +12,7 @@ extern "C" {
 #define STATIC_ROUTE_FLAG 0x01
 #define NORMAL_ROUTE_FLAG 0x02
 #define ROUTE_CACHE_SIZE  (NEXT_POWER_OF_TWO(MAX_ROUTES))
+#define ROUTE_CACHE_MASK  (ROUTE_CACHE_SIZE - 1)
 
 // Path parameter.
 typedef struct {

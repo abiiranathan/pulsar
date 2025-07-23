@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-typedef enum {
+typedef enum : uint16_t {
     StatusContinue           = 100,
     StatusSwitchingProtocols = 101,
     StatusProcessing         = 102,
