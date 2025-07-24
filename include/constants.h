@@ -58,7 +58,7 @@
 
 // Arena memory per connection for request headers, query params and path params.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY (16 * 1024)
+#define ARENA_CAPACITY (8 * 1024)
 #endif
 
 // Maximum number of routes to statically allocated for.

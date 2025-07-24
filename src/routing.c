@@ -147,7 +147,8 @@ malloc_fail:
 
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
     ASSERT(global_route_count < MAX_ROUTES);
-    ASSERT(http_method_valid(method));
+    ASSERT(METHOD_VALID(method));
+
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
 
     route_t* r     = &global_routes[global_route_count];

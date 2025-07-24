@@ -58,7 +58,6 @@ HEADERS_DIR := include
 # Source files
 BASE_SRC := $(SRC_DIR)/routing.c \
 			$(SRC_DIR)/hashmap.c \
-			$(SRC_DIR)/method.c  \
 			$(SRC_DIR)/pulsar.c  \
 			$(SRC_DIR)/forms.c   \
 			$(SRC_DIR)/str.c

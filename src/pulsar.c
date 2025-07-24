@@ -37,6 +37,7 @@
 #define RESPONSE_HEADER_CAPACITY (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
 #define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
 #define CACHE_LINE_SIZE          64
+#define MAX_ACTIVE_CONNECTIONS   10000
 
 // Flag bit definitions
 #define HTTP_CONTENT_TYPE_SET 0x01
@@ -85,7 +86,7 @@ typedef struct response_t {
 // HTTP Request structure
 typedef struct request_t {
     char* path;               // Request path (arena allocated)
-    char method[8];           // HTTP method (GET, POST etc.)
+    char method[15];          // HTTP method (GET, POST etc.)
     HttpMethod method_type;   // MethodType Enum
     char* body;               // Request body (dynamically allocated)
     size_t content_length;    // Content-Length header value
@@ -94,7 +95,7 @@ typedef struct request_t {
     struct route_t* route;    // Matched route (has static lifetime)
 } request_t;
 
-typedef enum connection_state {
+typedef enum connection_state : int8_t {
     STATE_READING_REQUEST,
     STATE_WRITING_RESPONSE,
     STATE_CLOSING,
@@ -102,20 +103,18 @@ typedef enum connection_state {
 
 // Connection state structure
 typedef struct connection_t {
-    int client_fd;                    // Client socket file descriptor
-    connection_state state;           // Connection state
-    bool keep_alive;                  // Keep-alive flag
-    bool abort;                       // Abort handler/middleware processing
-    time_t last_activity;             // Timestamp of last I/O activity
-    response_t* response;             // HTTP response data (arena allocated)
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
-    struct request_t* request;        // HTTP request data (arena allocated)
-
+    int client_fd;              // Client socket file descriptor
+    connection_state state;     // Connection state
+    bool keep_alive;            // Keep-alive flag
+    bool abort;                 // Abort handler/middleware processing
+    time_t last_activity;       // Timestamp of last I/O activity
+    response_t* response;       // HTTP response data (arena allocated)
+    char* read_buf;             // Buffer for incoming data.
+    struct request_t* request;  // HTTP request data (arena allocated)
+    Arena* arena;               // Memory arena for allocations
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
 #endif
-
-    Arena* arena;       // Memory arena for allocations
     hashmap_t* locals;  // Per-request context variables set by the user.
 } connection_t;
 
@@ -250,50 +249,43 @@ INLINE void reset_response(response_t* resp) {
     resp->buffer_size = buffer_size;
 }
 
-INLINE bool reset_connection(connection_t* conn) {
+static inline bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
+    conn->client_fd     = client_fd;
+    conn->state         = STATE_READING_REQUEST;
+    conn->keep_alive    = true;
+    conn->abort         = false;
+    conn->last_activity = time(NULL);
+    conn->response      = create_response();
+    conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
+    conn->request       = create_request(arena);
+    conn->arena         = arena;
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
-
-    conn->state      = STATE_READING_REQUEST;
-    conn->keep_alive = true;
-    memset(conn->read_buf, 0, READ_BUFFER_SIZE);
-
-    if (conn->locals) {
-        hashmap_clear(conn->locals);
-    } else {
-        conn->locals = hashmap_create();
-        if (!conn->locals) {
-            return false;
-        }
-    }
-
-    // Free request body before resetting arena.
-    if (conn->request && conn->request->body) {
-        free(conn->request->body);
-    };
-
-    // Allocate a response if NULL or reset the buffer.
-    if (conn->response) {
-        reset_response(conn->response);
-    } else {
-        conn->response = create_response();
-    }
-
-    if (!conn->arena) {
-        conn->arena = arena_create(ARENA_CAPACITY);
-        if (!conn->arena) return false;
-    } else {
-        arena_reset(conn->arena);
-    }
-
-    // Create a new request in arena(after reset)
-    conn->request = create_request(conn->arena);
-
-    return (conn->request && conn->response);
+    conn->locals = hashmap_create();
+    return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
-INLINE void close_connection(int epoll_fd, connection_t* conn) {
+static bool reset_connection(connection_t* conn) {
+    conn->state         = STATE_READING_REQUEST;
+    conn->keep_alive    = true;
+    conn->abort         = false;
+    conn->last_activity = time(NULL);
+    free(conn->request->body);       // Free request body
+    reset_response(conn->response);  // Reset response buffer
+
+    arena_reset(conn->arena);  // Reset arena and reuse.
+
+#if ENABLE_LOGGING
+    clock_gettime(CLOCK_MONOTONIC, &conn->start);
+#endif
+    conn->request  = create_request(conn->arena);
+    conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
+    hashmap_clear(conn->locals);
+    return (conn->request && conn->response && conn->locals && conn->read_buf);
+}
+
+static void close_connection(int epoll_fd, connection_t* conn) {
     if (unlikely(!conn)) return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
@@ -320,7 +312,7 @@ INLINE void close_connection(int epoll_fd, connection_t* conn) {
 }
 
 // Send an error response during request processing.
-INLINE void send_error_response(connection_t* conn, http_status status) {
+static void send_error_response(connection_t* conn, http_status status) {
     conn_set_status(conn, status);
     conn_set_content_type(conn, CONTENT_TYPE_PLAIN);
 
@@ -338,13 +330,12 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, size_t headers_len) {
+static bool parse_request_headers(connection_t* conn, HttpMethod method, size_t headers_len) {
     const char* ptr = conn->read_buf;
     const char* end = ptr + headers_len;
-
-    bool content_len_set = false;
-    bool keepalive_set   = false;
-    bool is_safe         = (method == HTTP_GET || method == HTTP_OPTIONS);
+    bool is_safe    = SAFE_METHOD(method);
+    request_t* req  = conn->request;
+    Arena* arena    = conn->arena;
 
     while (ptr < end) {
         // Parse header name
@@ -352,7 +343,7 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, size_t 
         if (!colon) break;  // We are done with headers.
 
         size_t name_len = colon - ptr;
-        char* name      = arena_strdup2(conn->arena, ptr, name_len);
+        char* name      = arena_strdup2(arena, ptr, name_len);
         if (unlikely(!name)) return false;
 
         // Move to header value
@@ -365,30 +356,34 @@ INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, size_t 
         if (!eol || eol + 1 >= end || eol[1] != '\n') break;
 
         size_t value_len = eol - ptr;
-        char* value      = arena_strdup2(conn->arena, ptr, value_len);
+        char* value      = arena_strdup2(arena, ptr, value_len);
         if (unlikely(!value)) return false;
 
-        // Set content length
-        if (!content_len_set && !is_safe && strncasecmp(name, "Content-Length", 14) == 0) {
-            bool valid;
-            conn->request->content_length = parse_ulong(value, &valid);
-            if (unlikely(!valid)) {
-                fprintf(stderr, "Invalid content-length header\n");
-                return false;
-            }
-            content_len_set = true;
-        }
-
-        if (!keepalive_set && strcasecmp(name, "Connection") == 0) {
-            conn->keep_alive = strncmp(value, "close", 5) != 0;
-            keepalive_set    = true;
-        }
-
-        if (!headers_set(conn->request->headers, name, value)) {
+        if (!headers_set(req->headers, name, value)) {
             return false;
         }
 
         ptr = eol + 2;  // Skip CRLF
+    }
+
+    // Parse content length if present.
+    if (!is_safe) {
+        const char* content_len = headers_get(req->headers, "Content-Length");
+        if (content_len) {
+            bool content_len_valid;
+            req->content_length = parse_ulong(content_len, &content_len_valid);
+            if (!content_len_valid) {
+                fprintf(stderr, "Invalid content-length header: %s\n", content_len);
+                return false;
+            }
+        }
+    }
+
+    // Parse keep alive.
+    const char* keep_alive_header = headers_get(req->headers, "Keep-Alive");
+    if (keep_alive_header) {
+        conn->keep_alive =
+            strncasecmp(keep_alive_header, "keep-alive", 10) || !strncmp(keep_alive_header, "close", 5);
     }
 
     return true;
@@ -599,7 +594,7 @@ http_status res_get_status(connection_t* conn) {
 __attribute__((hot, flatten, always_inline)) static inline void conn_writeheader_fast(
     connection_t* restrict conn, const char* restrict name, size_t name_len, const char* restrict value,
     size_t value_len) {
-    response_t* restrict res  = conn->response;
+    response_t* res           = conn->response;
     const size_t required_len = name_len + value_len + 4;  // ": \r\n"
     const size_t current_len  = res->headers_len;
 
@@ -608,8 +603,7 @@ __attribute__((hot, flatten, always_inline)) static inline void conn_writeheader
         return;
     }
 
-    // Single pointer calculation, keep in register
-    unsigned char* restrict dest = res->buffer + BUFFER_HEADERS_OFFSET + current_len;
+    uint8_t* dest = res->buffer + BUFFER_HEADERS_OFFSET + current_len;
 
     // Bulk copy name
     __builtin_memcpy(dest, name, name_len);
@@ -1005,26 +999,22 @@ const char* get_path_param(connection_t* conn, const char* name) {
 
 INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute global middleware
-    size_t index = 0;
-    if (global_mw_count > 0) {
-        while (index < global_mw_count) {
-            global_middleware[index++](conn);
-            if (conn->abort) {
-                return;
-            }
-        }
-    }
+#define EXECUTE_MIDDLEWARE(mw, count)                                                                        \
+    do {                                                                                                     \
+        size_t index = 0;                                                                                    \
+        if (count > 0) {                                                                                     \
+            while (index < count) {                                                                          \
+                mw[index++](conn);                                                                           \
+                if (conn->abort) {                                                                           \
+                    return;                                                                                  \
+                }                                                                                            \
+            }                                                                                                \
+        }                                                                                                    \
+    } while (0)
 
-    // Execute route specific middleware.
-    index = 0;
-    if (route->mw_count > 0) {
-        while (index < route->mw_count) {
-            route->middleware[index++](conn);
-            if (conn->abort) {
-                return;
-            }
-        }
-    }
+    EXECUTE_MIDDLEWARE(global_middleware, global_mw_count);
+    EXECUTE_MIDDLEWARE(route->middleware, route->mw_count);
+#undef EXECUTE_MIDDLEWARE
 }
 
 void use_global_middleware(HttpHandler* middleware, size_t count) {
@@ -1133,17 +1123,17 @@ bool parse_request_line(const char* read_buf, size_t buf_len, char* method, size
     return true;
 }
 
-INLINE void process_request(connection_t* conn, size_t read_bytes) {
+static void process_request(connection_t* conn, size_t read_bytes) {
+    char path[1024];
+    char http_protocol[16];
     const char* read_buf = conn->read_buf;
+
     char* end_of_headers = strstr(read_buf, "\r\n\r\n");
     if (!end_of_headers) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
-
-    char path[1024]        = {};
-    char http_protocol[16] = {};
-    size_t headers_len     = end_of_headers - read_buf + 4;
+    size_t headers_len = end_of_headers - read_buf + 4;
 
     // Parse method, path and HTTP version
     if (!parse_request_line(read_buf, read_bytes, conn->request->method, sizeof(conn->request->method), path,
@@ -1172,7 +1162,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
 
     HttpMethod method = http_method_from_string(conn->request->method);
-    if (!http_method_valid(method)) {
+    if (!METHOD_VALID(method)) {
         send_error_response(conn, StatusMethodNotAllowed);
         return;
     }
@@ -1199,9 +1189,6 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
 
     if (route) {
-        // Prefetch the buffer before we need it
-        __builtin_prefetch(conn->response->buffer, 1, 3);  // Write access, high temporal locality
-
         execute_all_middleware(conn, route);
         if (!conn->abort) {
             route->handler(conn);
@@ -1368,15 +1355,15 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
         return;
     }
 
-    // Zero all fields.
-    memset(conn, 0, sizeof(connection_t));
-    conn->client_fd = client_fd;
-
-    if (!reset_connection(conn)) {
-        fprintf(stderr, "Error in reset_connection\n");
-        conn->state = STATE_CLOSING;
+    Arena* arena = arena_create(ARENA_CAPACITY);
+    if (!arena) {
+        perror("arena_create failed");
+        close(client_fd);
+        free(conn);
         return;
     }
+
+    init_connection(conn, arena, client_fd);
 
     struct epoll_event event;
     event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
@@ -1392,8 +1379,9 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
     atomic_fetch_add_explicit(&active_connections, 1, memory_order_relaxed);
 }
 
-INLINE void handle_read(int epoll_fd, connection_t* conn) {
-    ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
+static void handle_read(int epoll_fd, connection_t* conn) {
+    char* read_buf     = conn->read_buf;
+    ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             conn->state = STATE_CLOSING;  // read: connection reset by peer.
@@ -1403,7 +1391,7 @@ INLINE void handle_read(int epoll_fd, connection_t* conn) {
         conn->state = STATE_CLOSING;  // Unexpected close.
         return;
     }
-    conn->read_buf[bytes_read] = '\0';
+    read_buf[bytes_read] = '\0';
 
     process_request(conn, bytes_read);
 
@@ -1621,6 +1609,19 @@ typedef struct {
     int designated_core;
 } WorkerData;
 
+static const char shutdown_msg[] =
+    "HTTP/1.1 503 Service Unavailable\r\n"
+    "Content-Length: 23\r\n"
+    "Connection: close\r\n\r\n"
+    "Server is shutting down";
+
+// Check timeouts.
+__attribute__((unused)) static bool connection_timedout(time_t last_activity) {
+    time_t now          = time(NULL);
+    int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
+    return (now - last_activity > timeout_seconds);
+}
+
 void* worker_thread(void* arg) {
     WorkerData* worker = (WorkerData*)arg;
     int epoll_fd       = worker->epoll_fd;
@@ -1643,13 +1644,11 @@ void* worker_thread(void* arg) {
     printf("Worker %d started\n", worker_id);
 
     while (server_running) {
-        if (force_shutdown) {
+        if (unlikely(force_shutdown)) {
             break;
         }
 
-        int timeout    = graceful_shutdown ? 500 : 1000;  // Shorter timeout during shutdown
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, timeout);
-
+        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 500);
         if (num_events == -1) {
             if (errno == EINTR) {
                 continue;
@@ -1660,54 +1659,39 @@ void* worker_thread(void* arg) {
 
         // During graceful shutdown, don't accept new connections
         // but continue processing existing ones
-        bool accept_new_connections = !graceful_shutdown;
-
         for (int i = 0; i < num_events; i++) {
             if (events[i].data.fd == server_fd) {
-                if (accept_new_connections) {
-                    // Accept new connection
-                    int client_fd = conn_accept(worker_id);
-                    if (client_fd >= 0) {
-                        add_connection_to_worker(epoll_fd, client_fd);
+
+                if (unlikely(graceful_shutdown)) {
+                    // Accept and immediately close to prevent connection backlog
+                    int client_fd = accept(server_fd, NULL, NULL);
+                    if (client_fd > 0) {
+                        write(client_fd, shutdown_msg, sizeof(shutdown_msg));
+                        close(client_fd);
                     }
                 } else {
-                    // During shutdown: accept and immediately close to prevent connection backlog
-                    int client_fd = accept(server_fd, NULL, NULL);
-                    if (client_fd >= 0) {
-                        // Send a simple shutdown message
-                        const char* shutdown_msg =
-                            "HTTP/1.1 503 Service Unavailable\r\n"
-                            "Content-Length: 23\r\n"
-                            "Connection: close\r\n\r\n"
-                            "Server is shutting down";
-                        write(client_fd, shutdown_msg, strlen(shutdown_msg));
-                        close(client_fd);
+                    int client_fd = conn_accept(worker_id);
+                    if (client_fd > 0) {
+                        add_connection_to_worker(epoll_fd, client_fd);
                     }
                 }
             } else {
-                connection_t* conn = (connection_t*)events[i].data.ptr;
+                connection_t* conn     = (connection_t*)events[i].data.ptr;
+                connection_state state = conn->state;
 
-                if (conn->state == STATE_READING_REQUEST) {
-                    if (events[i].events & EPOLLIN) {
-                        handle_read(epoll_fd, conn);
-                    }
-                } else if (conn->state == STATE_WRITING_RESPONSE) {
-                    if (events[i].events & EPOLLOUT) {
-                        handle_write(epoll_fd, conn);
-                    }
+                if (state == STATE_READING_REQUEST) {
+                    if (events[i].events & EPOLLIN) handle_read(epoll_fd, conn);
+
+                } else if (state == STATE_WRITING_RESPONSE) {
+                    if (events[i].events & EPOLLOUT) handle_write(epoll_fd, conn);
                 }
 
-                // Check timeouts (shorter timeout during shutdown)
-                if (likely(conn->keep_alive)) {
-                    time_t now          = time(NULL);
-                    int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
-                    if (now - conn->last_activity > timeout_seconds) {
-                        conn->state = STATE_CLOSING;
-                    }
-                }
+                // State may have changed.
+                state            = conn->state;
+                bool sock_hangup = events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP);
 
                 // Check for connection errors or hangups
-                if (conn->state == STATE_CLOSING || events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+                if (state == STATE_CLOSING || sock_hangup) {
                     close_connection(epoll_fd, conn);
                 }
             }

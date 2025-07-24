@@ -311,7 +311,7 @@ void hashmap_destroy(hashmap_t* map) {
 
 void hashmap_clear(hashmap_t* map) {
     lock_map(map);
-    memset(map->buckets, 0, map->capacity * sizeof(hashmap_entry_t*));
+    // memset(map->buckets, 0, map->capacity * sizeof(hashmap_entry_t*));
     map->size = 0;
     arena_reset_fast(map->arena);
     unlock_map(map);
