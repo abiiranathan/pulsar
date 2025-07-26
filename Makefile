@@ -94,6 +94,9 @@ test: $(TEST_TARGETS)
 		$$test || exit 1; \
 	done
 
+check:
+	valgrind --leak-check=full --show-leak-kinds=all --suppressions=glibc.supp ./build/debug/server
+
 # Build static library
 static: $(STATIC_LIB)
 

@@ -1,25 +1,18 @@
 #include <arpa/inet.h>
 #include <assert.h>
-#include <bits/time.h>
 #include <fcntl.h>
-#include <netdb.h>  // For getaddrinfo()
+#include <malloc.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
-#include <time.h>
-#include <unistd.h>
 
 #if defined(__FreeBSD__)
 #include <sys/cpuset.h>
@@ -124,43 +117,34 @@ typedef struct connection_t {
 
 typedef struct KeepAliveState {
     connection_t* head;
-    connection_t* tail;  // Add tail pointer for efficient appends
+    connection_t* tail;
     size_t count;
 } KeepAliveState;
 
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
-static int server_fd                           = -1;  // Server socket file descriptor
-static volatile sig_atomic_t server_running    = 1;   // Server running flag
-static volatile sig_atomic_t graceful_shutdown = 0;   // Graceful shutdown flag
-static volatile sig_atomic_t force_shutdown    = 0;   // Force shutdown flag
-static pthread_mutex_t shutdown_mutex          = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t shutdown_cond            = PTHREAD_COND_INITIALIZER;
-static atomic_size_t active_connections        = 0;  // Number of active connections
-
-static volatile sig_atomic_t workers_shutdown               = 0;     // Flag to signal workers to shutdown
+static int server_fd                                        = -1;    // Server socket file descriptor
+static volatile sig_atomic_t server_running                 = 1;     // Server running flag
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
 static size_t global_mw_count                               = 0;     // Global middleware count
 static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
-static void finalize_response(connection_t* conn, HttpMethod method);
-static void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state);
+INLINE void finalize_response(connection_t* conn, HttpMethod method);
+INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state);
 
-static inline bool conn_timedout(time_t now, time_t last_activity) {
-    int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
-    bool timed_out      = (now - last_activity) > timeout_seconds;
+INLINE bool conn_timedout(time_t now, time_t last_activity) {
+    bool timed_out = (now - last_activity) > CONNECTION_TIMEOUT;
 
 // Remove debug printf in production, or make it conditional
 #ifdef DEBUG_TIMEOUTS
     printf("conn_timedout: now=%ld, last_activity=%ld, timeout=%d, timed_out=%d\n", now, last_activity,
            timeout_seconds, timed_out);
 #endif
-
     return timed_out;
 }
 
-static void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     if (!conn->in_keep_alive) {
         return;
     }
@@ -183,13 +167,10 @@ static void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state)
     conn->next = NULL;
     state->count--;
     conn->in_keep_alive = false;
-    // printf("Removed conn: %p from keep-alive\n", (void*)conn);
 }
 
-static void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
-    if (conn->in_keep_alive) {
-        return;
-    }
+INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+    if (conn->in_keep_alive) return;
 
     // Add to front
     conn->next = state->head;
@@ -204,13 +185,9 @@ static void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     state->head = conn;
     state->count++;
     conn->in_keep_alive = true;
-    // printf("Add conn: %p to keep-alive\n", (void*)conn);
 }
 
-static void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
-    // printf("[Worker %d]: Active connections: %lu\n", worker_id, state->count);
-    UNUSED(worker_id);
-
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
@@ -221,32 +198,15 @@ static void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epo
         }
         current = next;
     }
+
+    // Release memory to OS
+    malloc_trim(0);
 }
 
 // Signal handler for graceful shutdown.
 void handle_sigint(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
-        pthread_mutex_lock(&shutdown_mutex);
-
-        if (!graceful_shutdown) {
-            // First signal - initiate graceful shutdown
-            printf("\nInitiating graceful shutdown... (Active connections: %zu)\n", active_connections);
-            graceful_shutdown = 1;
-
-            // Don't set server_running to 0 yet - let workers finish naturally
-            pthread_cond_broadcast(&shutdown_cond);  // Wake up any waiting threads
-        } else if (!force_shutdown) {
-            // Second signal - force immediate shutdown
-            printf("\nForcing immediate shutdown...\n");
-            force_shutdown = 1;
-            server_running = 0;
-            pthread_cond_broadcast(&shutdown_cond);
-        } else {
-            // Third signal - hard exit
-            printf("\nHard exit...\n");
-            exit(EXIT_FAILURE);
-        }
-        pthread_mutex_unlock(&shutdown_mutex);
+        server_running = 0;
     }
 }
 
@@ -281,7 +241,7 @@ INLINE request_t* create_request(Arena* arena) {
 }
 
 INLINE response_t* create_response() {
-    response_t* resp = aligned_alloc(CACHE_LINE_SIZE, sizeof(response_t));
+    response_t* resp = malloc(sizeof(response_t));
     if (!resp) return NULL;
     memset(resp, 0, sizeof(*resp));
 
@@ -325,7 +285,7 @@ INLINE void reset_response(response_t** resp) {
     *resp = create_response();
 }
 
-static inline bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
+INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->client_fd     = client_fd;
     conn->state         = STATE_READING_REQUEST;
     conn->keep_alive    = true;
@@ -345,7 +305,7 @@ static inline bool init_connection(connection_t* conn, Arena* arena, int client_
     return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
-static bool reset_connection(connection_t* conn) {
+INLINE bool reset_connection(connection_t* conn) {
     conn->state      = STATE_READING_REQUEST;
     conn->keep_alive = true;          // Default to Keep-Alive
     conn->abort      = false;         // Connection not aborted
@@ -367,13 +327,10 @@ static bool reset_connection(connection_t* conn) {
         conn->prev = NULL;
     }
 
-    // Ensure next/prev pointers & in_keep_alive flag are not reset
-    // if connection remains in keep-alive list.
-    // They are already NULL if not in the list, or will be managed by RemoveKeepAliveConnection
     return (conn->request && conn->read_buf);
 }
 
-static void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state) {
+INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state) {
     if (!conn || conn->client_fd == -1) return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
@@ -389,18 +346,10 @@ static void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* k
     if (conn->locals) hashmap_destroy(conn->locals);
 
     free(conn);
-
-    size_t prev_count = atomic_fetch_sub_explicit(&active_connections, 1, memory_order_acq_rel);
-    if (graceful_shutdown && prev_count == 1) {
-        // We just decremented from 1 to 0 (was last connection)
-        pthread_mutex_lock(&shutdown_mutex);
-        pthread_cond_signal(&shutdown_cond);
-        pthread_mutex_unlock(&shutdown_mutex);
-    }
 }
 
 // Send an error response during request processing.
-static void send_error_response(connection_t* conn, http_status status) {
+INLINE void send_error_response(connection_t* conn, http_status status) {
     conn_set_status(conn, status);
     conn_set_content_type(conn, CONTENT_TYPE_PLAIN);
 
@@ -418,7 +367,7 @@ static void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-static bool parse_request_headers(connection_t* conn, HttpMethod method, size_t headers_len) {
+INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, size_t headers_len) {
     const char* ptr = conn->read_buf;
     const char* end = ptr + headers_len;
     bool is_safe    = SAFE_METHOD(method);
@@ -512,7 +461,7 @@ INLINE bool parse_query_params(connection_t* conn) {
     return true;
 }
 
-static bool parse_request_body(connection_t* conn, size_t headers_len, size_t read_bytes) {
+INLINE bool parse_request_body(connection_t* conn, size_t headers_len, size_t read_bytes) {
     if (conn->request->content_length == 0) return true;
 
     request_t* req        = conn->request;
@@ -526,9 +475,9 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, size_t re
     }
 
     // Allocate full request body (+ null byte for safety).
-    req->body = aligned_alloc(CACHE_LINE_SIZE, content_length + 1);
+    req->body = malloc(content_length + 1);
     if (!req->body) {
-        perror("aligned_alloc for body");
+        perror("malloc for body");
         return false;
     }
 
@@ -734,7 +683,7 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
     HTTP_SET_CONTENT_TYPE(conn->response->flags);
 }
 
-static inline size_t grow_buffer(size_t current_size, size_t required) {
+INLINE size_t grow_buffer(size_t current_size, size_t required) {
     static const size_t kInitialSize = 1024;
     static const size_t kThreshold   = 1024 * 1024;   // 1MB
     static const size_t kMaxSize     = SIZE_MAX / 2;  // Safety cap
@@ -845,7 +794,7 @@ INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end, 
 }
 
 // Validates the requested range against the file size
-bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off64_t file_size) {
+INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off64_t file_size) {
     if (!start || !end) return false;
 
     ssize_t start_byte = *start, end_byte = *end;
@@ -1440,9 +1389,9 @@ INLINE int conn_accept(int worker_id) {
 }
 
 INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
-    connection_t* conn = aligned_alloc(CACHE_LINE_SIZE, sizeof(connection_t));
+    connection_t* conn = malloc(sizeof(connection_t));
     if (!conn) {
-        perror("calloc");
+        perror("malloc");
         close(client_fd);
         return;
     }
@@ -1466,9 +1415,6 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
         conn->state = STATE_CLOSING;
         return;
     }
-
-    // Increment number of active connections.
-    atomic_fetch_add_explicit(&active_connections, 1, memory_order_relaxed);
 }
 
 static void handle_read(int epoll_fd, connection_t* conn) {
@@ -1714,12 +1660,6 @@ typedef struct {
     KeepAliveState* keep_alive_state;
 } WorkerData;
 
-static const char shutdown_msg[] =
-    "HTTP/1.1 503 Service Unavailable\r\n"
-    "Content-Length: 23\r\n"
-    "Connection: close\r\n\r\n"
-    "Server is shutting down";
-
 void* worker_thread(void* arg) {
     WorkerData* worker       = (WorkerData*)arg;
     int epoll_fd             = worker->epoll_fd;
@@ -1738,16 +1678,11 @@ void* worker_thread(void* arg) {
         return NULL;
     }
 
-    struct epoll_event events[MAX_EVENTS] = {};
-
     printf("Worker %d started\n", worker_id);
 
-    long last_timeout_check = 0;
+    struct epoll_event events[MAX_EVENTS] = {};
+    long last_timeout_check               = 0;
     while (server_running) {
-        if (unlikely(force_shutdown)) {
-            break;
-        }
-
         // Check for Keep-Alive timeouts 5 seconds.
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1756,7 +1691,7 @@ void* worker_thread(void* arg) {
             last_timeout_check = now.tv_sec;
         }
 
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
+        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 500);
         if (num_events == -1) {
             if (errno == EINTR) {
                 continue;
@@ -1769,45 +1704,29 @@ void* worker_thread(void* arg) {
         // but continue processing existing ones
         for (int i = 0; i < num_events; i++) {
             if (events[i].data.fd == server_fd) {
-
-                if (unlikely(graceful_shutdown)) {
-                    // Accept and immediately close to prevent connection backlog
-                    int client_fd = accept(server_fd, NULL, NULL);
-                    if (client_fd > 0) {
-                        write(client_fd, shutdown_msg, sizeof(shutdown_msg));
-                        close(client_fd);
-                    }
-                } else {
-                    int client_fd = conn_accept(worker_id);
-                    if (client_fd > 0) {
-                        add_connection_to_worker(epoll_fd, client_fd);
-                    }
+                int client_fd = conn_accept(worker_id);
+                if (client_fd > 0) {
+                    add_connection_to_worker(epoll_fd, client_fd);
                 }
             } else {
-                connection_t* conn     = (connection_t*)events[i].data.ptr;
-                connection_state state = conn->state;
+                connection_t* conn = (connection_t*)events[i].data.ptr;
 
-                if (state == STATE_READING_REQUEST) {
-                    if (events[i].events & EPOLLIN) handle_read(epoll_fd, conn);
-
-                } else if (state == STATE_WRITING_RESPONSE) {
-                    if (events[i].events & EPOLLOUT) handle_write(epoll_fd, conn, ka_state);
+                switch (conn->state) {
+                    case STATE_READING_REQUEST:
+                        if (events[i].events & EPOLLIN) handle_read(epoll_fd, conn);
+                        break;
+                    case STATE_WRITING_RESPONSE:
+                        if (events[i].events & EPOLLOUT) handle_write(epoll_fd, conn, ka_state);
+                        break;
+                    default:
+                        // fall through
                 }
 
-                // State may have changed.
                 bool sock_hangup = events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP);
-
-                // Check for connection errors or hangups
                 if (conn->state == STATE_CLOSING || sock_hangup) {
                     close_connection(epoll_fd, conn, ka_state);
                 }
             }
-        }
-
-        // During graceful shutdown, check if we should exit
-        if (graceful_shutdown && num_events == 0 &&
-            atomic_load_explicit(&active_connections, memory_order_acquire) == 0) {
-            break;
         }
     }
 
@@ -1818,59 +1737,7 @@ void* worker_thread(void* arg) {
 
     close(epoll_fd);
 
-    // Signal that this worker has shut down
-    pthread_mutex_lock(&shutdown_mutex);
-    workers_shutdown++;
-    pthread_cond_signal(&shutdown_cond);
-    pthread_mutex_unlock(&shutdown_mutex);
     return NULL;
-}
-
-// Wait for all workers to shut down gracefully or forcefully.
-void wait_for_workers_shutdown(pthread_t* workers, int timeout_seconds) {
-    // Main server loop - wait for shutdown conditions
-    pthread_mutex_lock(&shutdown_mutex);
-    while (server_running) {
-        if (graceful_shutdown) {
-            // Wait for either all connections to close or force shutdown
-            while (atomic_load_explicit(&active_connections, memory_order_acquire) > 0 && !force_shutdown) {
-                struct timespec timeout;
-                clock_gettime(CLOCK_REALTIME, &timeout);
-                timeout.tv_sec += timeout_seconds;  // Wait up to timeout seconds
-
-                int result = pthread_cond_timedwait(&shutdown_cond, &shutdown_mutex, &timeout);
-                if (result == ETIMEDOUT) {
-                    printf("Shutdown timeout...\n");
-                    break;
-                }
-            }
-            server_running = 0;  // Signal workers to stop
-            break;
-        }
-
-        // Wait for shutdown signal
-        pthread_cond_wait(&shutdown_cond, &shutdown_mutex);
-    }
-    pthread_mutex_unlock(&shutdown_mutex);
-
-    // Wait for all workers to shut down
-    pthread_mutex_lock(&shutdown_mutex);
-    while (workers_shutdown < NUM_WORKERS) {
-        struct timespec timeout;
-        clock_gettime(CLOCK_REALTIME, &timeout);
-        timeout.tv_sec += 10;  // 10 second timeout
-
-        if (pthread_cond_timedwait(&shutdown_cond, &shutdown_mutex, &timeout) == ETIMEDOUT) {
-            printf("Timeout waiting for workers, forcing shutdown\n");
-            break;
-        }
-    }
-    pthread_mutex_unlock(&shutdown_mutex);
-
-    // Join all worker threads
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        pthread_join(workers[i], NULL);
-    }
 }
 
 static inline int get_num_available_cores() {
@@ -1888,6 +1755,10 @@ int pulsar_run(const char* addr, int port) {
     install_signal_handler();
     sort_routes();
     init_mimetypes();
+
+    // Tune malloc.
+    mallopt(M_MMAP_THRESHOLD, 128 * 1024);  // Larger allocations use mmap
+    mallopt(M_TRIM_THRESHOLD, 128 * 1024);  // More aggressive trimming
 
     // When creating worker threads
     int num_cores      = get_num_available_cores();
@@ -1913,16 +1784,16 @@ int pulsar_run(const char* addr, int port) {
     }
 
     usleep(1000);  // Give workers time to start
-    printf("Server with %d workers listening on http://%s:%d\n", NUM_WORKERS, addr ? addr : "0.0.0.0", port);
+    printf("\n\nServer with %d workers listening on http://%s:%d\n", NUM_WORKERS, addr ? addr : "0.0.0.0",
+           port);
     printf("Press Ctrl+C once for graceful shutdown, twice for immediate shutdown\n");
 
-    wait_for_workers_shutdown(workers, SHUTDOWN_TIMEOUT_SECONDS);
+    // Join all worker threads
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        pthread_join(workers[i], NULL);
+    }
 
     // Close server socket
     close(server_fd);
-
-    // Cleanup the mutext and condition variable
-    pthread_mutex_destroy(&shutdown_mutex);
-    pthread_cond_destroy(&shutdown_cond);
     return 0;
 }
