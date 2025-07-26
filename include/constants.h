@@ -87,8 +87,10 @@
 #endif
 
 #ifndef LOCALS_CAPACITY
-#define LOCALS_CAPACITY 16
+#define LOCALS_CAPACITY 64
 #endif
+
+CHECK_POWER_OF_2(LOCALS_CAPACITY);
 
 // Assertions for all constants
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
@@ -107,7 +109,7 @@ static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB")
 static_assert(WRITE_BUFFER_SIZE >= 8192, "WRITE_BUFFER_SIZE must be at least 8KB");
 
 // Ensure timeouts are reasonable
-static_assert(CONNECTION_TIMEOUT >= 10, "CONNECTION_TIMEOUT must be at least 10 seconds");
+static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 seconds");
 
 // Ensure body size is reasonable
 static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");

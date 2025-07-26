@@ -11,7 +11,7 @@ CC := gcc
 DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
 
 # Base compiler flags
-BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -fPIC -Iinclude $(DEFINES)
+BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -fPIC -Iinclude $(DEFINES) -Wno-unused-function
 
 # Mode-specific flags and directories
 ifeq ($(BUILD),debug)

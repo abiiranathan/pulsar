@@ -250,6 +250,7 @@ static hashmap_entry_t* create_entry(arena_t* arena, const char* key, void* valu
 static bool is_valid_capacity(size_t capacity) {
     return capacity > 0 && capacity <= SIZE_MAX / 2;
 }
+
 static bool is_valid_load_factor(float lf) {
     return lf >= 0.1f && lf <= 0.95f;
 }
@@ -281,6 +282,7 @@ hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float
     map->buckets = arena_alloc(map->arena, buckets_size);
     if (!map->buckets) {
         arena_destroy(map->arena);
+        map->arena = NULL;
         platform_aligned_free(map);
         return NULL;
     }
@@ -293,6 +295,7 @@ hashmap_t* hashmap_create_ex(size_t initial_capacity, size_t max_capacity, float
 
     if (MUTEX_INIT(&map->mutex) != 0) {
         arena_destroy(map->arena);
+        map->arena = NULL;
         platform_aligned_free(map);
         return NULL;
     }
@@ -311,7 +314,7 @@ void hashmap_destroy(hashmap_t* map) {
 
 void hashmap_clear(hashmap_t* map) {
     lock_map(map);
-    // memset(map->buckets, 0, map->capacity * sizeof(hashmap_entry_t*));
+    memset(map->buckets, 0, map->capacity * sizeof(hashmap_entry_t*));
     map->size = 0;
     arena_reset_fast(map->arena);
     unlock_map(map);

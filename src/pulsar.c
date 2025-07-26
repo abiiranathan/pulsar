@@ -37,7 +37,6 @@
 #define RESPONSE_HEADER_CAPACITY (BUFFER_BODY_OFFSET - BUFFER_HEADERS_OFFSET - 2)  // -2 \r\n
 #define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
 #define CACHE_LINE_SIZE          64
-#define MAX_ACTIVE_CONNECTIONS   10000
 
 // Flag bit definitions
 #define HTTP_CONTENT_TYPE_SET 0x01
@@ -107,6 +106,7 @@ typedef struct connection_t {
     connection_state state;     // Connection state
     bool keep_alive;            // Keep-alive flag
     bool abort;                 // Abort handler/middleware processing
+    bool in_keep_alive;         // Flag for a tracked connection
     time_t last_activity;       // Timestamp of last I/O activity
     response_t* response;       // HTTP response data (arena allocated)
     char* read_buf;             // Buffer for incoming data.
@@ -116,7 +116,17 @@ typedef struct connection_t {
     struct timespec start;  // Timestamp of first request
 #endif
     hashmap_t* locals;  // Per-request context variables set by the user.
+
+    // Linked List nodes.
+    connection_t* next;
+    connection_t* prev;
 } connection_t;
+
+typedef struct KeepAliveState {
+    connection_t* head;
+    connection_t* tail;  // Add tail pointer for efficient appends
+    size_t count;
+} KeepAliveState;
 
 /* ================================================================
  * Global Variables and Constants
@@ -127,8 +137,7 @@ static volatile sig_atomic_t graceful_shutdown = 0;   // Graceful shutdown flag
 static volatile sig_atomic_t force_shutdown    = 0;   // Force shutdown flag
 static pthread_mutex_t shutdown_mutex          = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t shutdown_cond            = PTHREAD_COND_INITIALIZER;
-
-static _Alignas(8) atomic_size_t active_connections = 0;  // Number of active connections
+static atomic_size_t active_connections        = 0;  // Number of active connections
 
 static volatile sig_atomic_t workers_shutdown               = 0;     // Flag to signal workers to shutdown
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
@@ -136,6 +145,83 @@ static size_t global_mw_count                               = 0;     // Global m
 static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
 static void finalize_response(connection_t* conn, HttpMethod method);
+static void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state);
+
+static inline bool conn_timedout(time_t now, time_t last_activity) {
+    int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
+    bool timed_out      = (now - last_activity) > timeout_seconds;
+
+// Remove debug printf in production, or make it conditional
+#ifdef DEBUG_TIMEOUTS
+    printf("conn_timedout: now=%ld, last_activity=%ld, timeout=%d, timed_out=%d\n", now, last_activity,
+           timeout_seconds, timed_out);
+#endif
+
+    return timed_out;
+}
+
+static void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+    if (!conn->in_keep_alive) {
+        return;
+    }
+
+    // Update neighbors
+    if (conn->prev) {
+        conn->prev->next = conn->next;
+    } else {
+        state->head = conn->next;
+    }
+
+    if (conn->next) {
+        conn->next->prev = conn->prev;
+    } else {
+        state->tail = conn->prev;
+    }
+
+    // Clear pointers
+    conn->prev = NULL;
+    conn->next = NULL;
+    state->count--;
+    conn->in_keep_alive = false;
+    // printf("Removed conn: %p from keep-alive\n", (void*)conn);
+}
+
+static void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+    if (conn->in_keep_alive) {
+        return;
+    }
+
+    // Add to front
+    conn->next = state->head;
+    conn->prev = NULL;
+
+    if (state->head) {
+        state->head->prev = conn;
+    } else {
+        state->tail = conn;
+    }
+
+    state->head = conn;
+    state->count++;
+    conn->in_keep_alive = true;
+    // printf("Add conn: %p to keep-alive\n", (void*)conn);
+}
+
+static void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
+    // printf("[Worker %d]: Active connections: %lu\n", worker_id, state->count);
+    UNUSED(worker_id);
+
+    connection_t* current = state->head;
+    time_t now            = time(NULL);
+    while (current) {
+        connection_t* next = current->next;
+        if (conn_timedout(now, current->last_activity)) {
+            printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
+            close_connection(epoll_fd, current, state);
+        }
+        current = next;
+    }
+}
 
 // Signal handler for graceful shutdown.
 void handle_sigint(int sig) {
@@ -216,8 +302,9 @@ INLINE response_t* create_response() {
 INLINE void free_request(request_t* req) {
     if (!req) return;
 
-    if (unlikely(req->body)) {
+    if (req->body) {
         free(req->body);
+        req->body = NULL;
     }
 }
 
@@ -225,34 +312,24 @@ INLINE void free_request(request_t* req) {
 INLINE void free_response(response_t* resp) {
     if (!resp) return;
 
-    if (likely(resp->buffer)) {
+    if (resp->buffer) {
         free(resp->buffer);
+        resp->buffer = NULL;
     }
     free(resp);
 }
 
-INLINE void reset_response(response_t* resp) {
-    // get a reference to the buffer and its size before calling memset.
-    size_t buffer_size    = resp->buffer_size;
-    unsigned char* buffer = resp->buffer;
-
-    // Reset the buffer.
-    memset(buffer, 0, buffer_size);
-
-    // Reset the structure.
-    memset(resp, 0, sizeof(response_t));
-
-    // Reset response state.
-    resp->buffer      = buffer;
-    resp->file_fd     = -1;
-    resp->status_code = 0;
-    resp->buffer_size = buffer_size;
+INLINE void reset_response(response_t** resp) {
+    free((*resp)->buffer);
+    free(*resp);
+    *resp = create_response();
 }
 
 static inline bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->client_fd     = client_fd;
     conn->state         = STATE_READING_REQUEST;
     conn->keep_alive    = true;
+    conn->in_keep_alive = false;
     conn->abort         = false;
     conn->last_activity = time(NULL);
     conn->response      = create_response();
@@ -263,43 +340,54 @@ static inline bool init_connection(connection_t* conn, Arena* arena, int client_
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
     conn->locals = hashmap_create();
+    conn->next   = NULL;
+    conn->prev   = NULL;
     return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
 static bool reset_connection(connection_t* conn) {
-    conn->state         = STATE_READING_REQUEST;
-    conn->keep_alive    = true;
-    conn->abort         = false;
-    conn->last_activity = time(NULL);
-    free(conn->request->body);       // Free request body
-    reset_response(conn->response);  // Reset response buffer
-
-    arena_reset(conn->arena);  // Reset arena and reuse.
+    conn->state      = STATE_READING_REQUEST;
+    conn->keep_alive = true;          // Default to Keep-Alive
+    conn->abort      = false;         // Connection not aborted
+    free(conn->request->body);        // Free request body
+    reset_response(&conn->response);  // Reset response buffer
+    arena_reset(conn->arena);         // Reset arena and reuse.
 
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
     conn->request  = create_request(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
+
     hashmap_clear(conn->locals);
-    return (conn->request && conn->response && conn->locals && conn->read_buf);
+
+    // Don't reset these fields if connection is in keep-alive list
+    if (!conn->in_keep_alive) {
+        conn->next = NULL;
+        conn->prev = NULL;
+    }
+
+    // Ensure next/prev pointers & in_keep_alive flag are not reset
+    // if connection remains in keep-alive list.
+    // They are already NULL if not in the list, or will be managed by RemoveKeepAliveConnection
+    return (conn->request && conn->read_buf);
 }
 
-static void close_connection(int epoll_fd, connection_t* conn) {
-    if (unlikely(!conn)) return;
+static void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state) {
+    if (!conn || conn->client_fd == -1) return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
     close(conn->client_fd);
+    conn->client_fd = -1;
+
+    RemoveKeepAliveConnection(conn, ka_state);
 
     free_request(conn->request);
     free_response(conn->response);
 
-    if (likely(conn->arena)) {
-        arena_destroy(conn->arena);
-    }
+    if (conn->arena) arena_destroy(conn->arena);
+    if (conn->locals) hashmap_destroy(conn->locals);
 
-    // Free locals map.
-    hashmap_destroy(conn->locals);
     free(conn);
 
     size_t prev_count = atomic_fetch_sub_explicit(&active_connections, 1, memory_order_acq_rel);
@@ -380,10 +468,17 @@ static bool parse_request_headers(connection_t* conn, HttpMethod method, size_t 
     }
 
     // Parse keep alive.
-    const char* keep_alive_header = headers_get(req->headers, "Keep-Alive");
-    if (keep_alive_header) {
-        conn->keep_alive =
-            strncasecmp(keep_alive_header, "keep-alive", 10) || !strncmp(keep_alive_header, "close", 5);
+    const char* connection_header = headers_get(req->headers, "Connection");
+    if (connection_header) {
+        // Default to keep-alive for HTTP/1.1, close for HTTP/1.0
+        if (strcasecmp(connection_header, "close") == 0) {
+            conn->keep_alive = false;
+        } else {
+            // Be permissive - accept any non-"close" connection header
+            conn->keep_alive = true;
+        }
+    } else {
+        conn->keep_alive = true;
     }
 
     return true;
@@ -433,7 +528,7 @@ static bool parse_request_body(connection_t* conn, size_t headers_len, size_t re
     // Allocate full request body (+ null byte for safety).
     req->body = aligned_alloc(CACHE_LINE_SIZE, content_length + 1);
     if (!req->body) {
-        perror("malloc body");
+        perror("aligned_alloc for body");
         return false;
     }
 
@@ -1199,9 +1294,6 @@ static void process_request(connection_t* conn, size_t read_bytes) {
 
     finalize_response(conn, method);
 
-    // Clear context variables.
-    hashmap_clear(conn->locals);
-
     // Switch to writing response.
     conn->state         = STATE_WRITING_RESPONSE;
     conn->last_activity = time(NULL);
@@ -1420,7 +1512,7 @@ static inline void request_complete(connection_t* conn) {
 }
 #endif
 
-static void handle_write(int epoll_fd, connection_t* conn) {
+static void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state) {
     response_t* res         = conn->response;
     const bool sending_file = res->file_fd > 0 && res->file_size > 0;
     int client_fd           = conn->client_fd;
@@ -1492,6 +1584,7 @@ static void handle_write(int epoll_fd, connection_t* conn) {
                        (res->body_sent == res->body_len);
         }
 
+        conn->last_activity = time(NULL);
         if (complete) {
 #if ENABLE_LOGGING
             request_complete(conn);
@@ -1502,9 +1595,15 @@ static void handle_write(int epoll_fd, connection_t* conn) {
             }
 
             if (conn->keep_alive) {
-                reset_connection(conn);
-                struct epoll_event event = {.events = EPOLLIN | EPOLLET | EPOLLRDHUP, .data.ptr = conn};
-                if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
+                conn->last_activity = time(NULL);
+                AddKeepAliveConnection(conn, state);
+
+                if (reset_connection(conn)) {
+                    struct epoll_event event = {.events = EPOLLIN | EPOLLET | EPOLLRDHUP, .data.ptr = conn};
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
+                        conn->state = STATE_CLOSING;
+                    }
+                } else {
                     conn->state = STATE_CLOSING;
                 }
             } else {
@@ -1520,7 +1619,12 @@ handle_error:
         res->file_fd = -1;
     }
 
+    // Only mark for closing if it's a persistent error, not just EAGAIN/EWOULDBLOCK
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        // Ignore EPIPE (broken pipe), which just means client disconnected
+        if (errno != EPIPE) {
+            perror("write failed");
+        }
         conn->state = STATE_CLOSING;
     }
 }
@@ -1607,6 +1711,7 @@ typedef struct {
     int epoll_fd;
     int worker_id;
     int designated_core;
+    KeepAliveState* keep_alive_state;
 } WorkerData;
 
 static const char shutdown_msg[] =
@@ -1615,18 +1720,12 @@ static const char shutdown_msg[] =
     "Connection: close\r\n\r\n"
     "Server is shutting down";
 
-// Check timeouts.
-__attribute__((unused)) static bool connection_timedout(time_t last_activity) {
-    time_t now          = time(NULL);
-    int timeout_seconds = graceful_shutdown ? 5 : CONNECTION_TIMEOUT;
-    return (now - last_activity > timeout_seconds);
-}
-
 void* worker_thread(void* arg) {
-    WorkerData* worker = (WorkerData*)arg;
-    int epoll_fd       = worker->epoll_fd;
-    int worker_id      = worker->worker_id;
-    int cpu_core       = worker->designated_core;
+    WorkerData* worker       = (WorkerData*)arg;
+    int epoll_fd             = worker->epoll_fd;
+    int worker_id            = worker->worker_id;
+    int cpu_core             = worker->designated_core;
+    KeepAliveState* ka_state = worker->keep_alive_state;
 
     pin_current_thread_to_core(cpu_core);
 
@@ -1643,12 +1742,21 @@ void* worker_thread(void* arg) {
 
     printf("Worker %d started\n", worker_id);
 
+    long last_timeout_check = 0;
     while (server_running) {
         if (unlikely(force_shutdown)) {
             break;
         }
 
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 500);
+        // Check for Keep-Alive timeouts 5 seconds.
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec - last_timeout_check >= 5) {
+            CheckKeepAliveTimeouts(ka_state, worker_id, epoll_fd);
+            last_timeout_check = now.tv_sec;
+        }
+
+        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
         if (num_events == -1) {
             if (errno == EINTR) {
                 continue;
@@ -1683,16 +1791,15 @@ void* worker_thread(void* arg) {
                     if (events[i].events & EPOLLIN) handle_read(epoll_fd, conn);
 
                 } else if (state == STATE_WRITING_RESPONSE) {
-                    if (events[i].events & EPOLLOUT) handle_write(epoll_fd, conn);
+                    if (events[i].events & EPOLLOUT) handle_write(epoll_fd, conn, ka_state);
                 }
 
                 // State may have changed.
-                state            = conn->state;
                 bool sock_hangup = events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP);
 
                 // Check for connection errors or hangups
-                if (state == STATE_CLOSING || sock_hangup) {
-                    close_connection(epoll_fd, conn);
+                if (conn->state == STATE_CLOSING || sock_hangup) {
+                    close_connection(epoll_fd, conn, ka_state);
                 }
             }
         }
@@ -1707,18 +1814,6 @@ void* worker_thread(void* arg) {
     // Remove server socket from epoll
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, server_fd, NULL) < 0) {
         perror("epoll_ctl DEL for server socket");
-    }
-
-    // Force close any remaining connections
-    struct epoll_event evs[MAX_EVENTS];
-    int num_events = epoll_wait(epoll_fd, evs, MAX_EVENTS, 0);  // Non-blocking
-    for (int i = 0; i < num_events; i++) {
-        if (evs[i].data.fd != server_fd) {
-            connection_t* conn = (connection_t*)evs[i].data.ptr;
-            if (conn) {
-                close_connection(epoll_fd, conn);
-            }
-        }
     }
 
     close(epoll_fd);
@@ -1786,8 +1881,9 @@ int pulsar_run(const char* addr, int port) {
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
-    pthread_t workers[NUM_WORKERS];
-    WorkerData worker_data[NUM_WORKERS];
+    pthread_t workers[NUM_WORKERS]                = {};
+    WorkerData worker_data[NUM_WORKERS]           = {};
+    KeepAliveState keep_alive_states[NUM_WORKERS] = {};
 
     install_signal_handler();
     sort_routes();
@@ -1805,9 +1901,10 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].epoll_fd        = epoll_fd;
-        worker_data[i].worker_id       = i;
-        worker_data[i].designated_core = i % (num_cores - reserved_cores);
+        worker_data[i].epoll_fd         = epoll_fd;
+        worker_data[i].worker_id        = i;
+        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
+        worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
             perror("pthread_create");
