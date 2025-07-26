@@ -22,6 +22,11 @@
 #define NUM_WORKERS 8
 #endif
 
+// maximum path length
+#ifndef MAX_PATH_LEN
+#define MAX_PATH_LEN 1024
+#endif
+
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
 #define MAX_EVENTS 2048
@@ -54,11 +59,6 @@
  */
 #ifndef MAX_FILE_SIZE
 #define MAX_FILE_SIZE (25 * 1024)
-#endif
-
-// Arena memory per connection for request headers, query params and path params.
-#ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY (8 * 1024)
 #endif
 
 // Maximum number of routes to statically allocated for.
@@ -99,10 +99,6 @@ static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
 static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
 static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
 static_assert(HEADERS_CAPACITY > 0, "HEADERS_CAPACITY must be > 0");
-
-// Ensure arena capacity is reasonable
-static_assert(ARENA_CAPACITY >= 1024, "ARENA_CAPACITY must be >= 1024");
-static_assert(ARENA_CAPACITY <= 1024 * 1024, "ARENA_CAPACITY must be <= 1MB");
 
 // Ensure buffer sizes are reasonable
 static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");

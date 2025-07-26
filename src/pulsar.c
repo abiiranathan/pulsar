@@ -31,6 +31,12 @@
 #define RESPONSE_STATUS_CAPACITY BUFFER_HEADERS_OFFSET
 #define CACHE_LINE_SIZE          64
 
+// Arena memory per connection for request headers, query params and path params.
+// Base memory is 4K.
+#define ARENA_CAPACITY       NEXT_POWER_OF_TWO(1024 + MAX_PATH_LEN + READ_BUFFER_SIZE + (HEADERS_CAPACITY * 16))
+#define MAX_FREE_CONNECTIONS 4096  // Connections to put in GC per worker.
+#define GC_INTERVAL_SEC      5     // Seconds before workers run GC.
+
 // Flag bit definitions
 #define HTTP_CONTENT_TYPE_SET 0x01
 #define HTTP_HEADERS_WRITTEN  0x02
@@ -78,7 +84,7 @@ typedef struct response_t {
 // HTTP Request structure
 typedef struct request_t {
     char* path;               // Request path (arena allocated)
-    char method[15];          // HTTP method (GET, POST etc.)
+    char method[8];           // HTTP method (GET, POST etc.)
     HttpMethod method_type;   // MethodType Enum
     char* body;               // Request body (dynamically allocated)
     size_t content_length;    // Content-Length header value
@@ -87,22 +93,16 @@ typedef struct request_t {
     struct route_t* route;    // Matched route (has static lifetime)
 } request_t;
 
-typedef enum connection_state : int8_t {
-    STATE_READING_REQUEST,
-    STATE_WRITING_RESPONSE,
-    STATE_CLOSING,
-} connection_state;
-
 // Connection state structure
 typedef struct connection_t {
-    int client_fd;              // Client socket file descriptor
-    connection_state state;     // Connection state
+    bool closing;               // Server closing because of an error.
     bool keep_alive;            // Keep-alive flag
     bool abort;                 // Abort handler/middleware processing
     bool in_keep_alive;         // Flag for a tracked connection
+    char* read_buf;             // Buffer for incoming data.
+    int client_fd;              // Client socket file descriptor
     time_t last_activity;       // Timestamp of last I/O activity
     response_t* response;       // HTTP response data (arena allocated)
-    char* read_buf;             // Buffer for incoming data.
     struct request_t* request;  // HTTP request data (arena allocated)
     Arena* arena;               // Memory arena for allocations
 #if ENABLE_LOGGING
@@ -121,6 +121,12 @@ typedef struct KeepAliveState {
     size_t count;
 } KeepAliveState;
 
+typedef struct {
+    connection_t* free_connections[MAX_FREE_CONNECTIONS];
+    size_t count;
+    size_t worker_id;
+} connection_freelist_t;
+
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
@@ -131,7 +137,12 @@ static size_t global_mw_count                               = 0;     // Global m
 static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
-INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state);
+INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state,
+                             connection_freelist_t* freelist);
+
+static inline int get_num_available_cores() {
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
 
 INLINE bool conn_timedout(time_t now, time_t last_activity) {
     bool timed_out = (now - last_activity) > CONNECTION_TIMEOUT;
@@ -187,14 +198,15 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, connection_freelist_t* freelist, int worker_id,
+                                   int epoll_fd) {
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
         connection_t* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
             printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
-            close_connection(epoll_fd, current, state);
+            close_connection(epoll_fd, current, state, freelist);
         }
         current = next;
     }
@@ -286,8 +298,8 @@ INLINE void reset_response(response_t** resp) {
 }
 
 INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
+    conn->closing       = false;
     conn->client_fd     = client_fd;
-    conn->state         = STATE_READING_REQUEST;
     conn->keep_alive    = true;
     conn->in_keep_alive = false;
     conn->abort         = false;
@@ -306,10 +318,12 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
 }
 
 INLINE bool reset_connection(connection_t* conn) {
-    conn->state      = STATE_READING_REQUEST;
-    conn->keep_alive = true;          // Default to Keep-Alive
-    conn->abort      = false;         // Connection not aborted
-    free(conn->request->body);        // Free request body
+    conn->closing    = false;
+    conn->keep_alive = true;   // Default to Keep-Alive
+    conn->abort      = false;  // Connection not aborted
+    if (conn->request->body) {
+        free(conn->request->body);  // Free request body
+    }
     reset_response(&conn->response);  // Reset response buffer
     arena_reset(conn->arena);         // Reset arena and reuse.
 
@@ -330,7 +344,24 @@ INLINE bool reset_connection(connection_t* conn) {
     return (conn->request && conn->read_buf);
 }
 
-INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state) {
+INLINE void free_connection_resources(connection_t* conn) {
+    free_request(conn->request);
+    free_response(conn->response);
+    if (conn->arena) arena_destroy(conn->arena);
+    if (conn->locals) hashmap_destroy(conn->locals);
+    free(conn);
+}
+
+// Called in seperate thread to free connections.
+void process_freelist(connection_freelist_t* freelist) {
+    while (freelist->count > 0) {
+        connection_t* conn = freelist->free_connections[--freelist->count];
+        free_connection_resources(conn);
+    }
+}
+
+INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state,
+                             connection_freelist_t* freelist) {
     if (!conn || conn->client_fd == -1) return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
@@ -339,13 +370,12 @@ INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* k
 
     RemoveKeepAliveConnection(conn, ka_state);
 
-    free_request(conn->request);
-    free_response(conn->response);
-
-    if (conn->arena) arena_destroy(conn->arena);
-    if (conn->locals) hashmap_destroy(conn->locals);
-
-    free(conn);
+    // Add to free list if there's space, otherwise free immediately
+    if (freelist->count < MAX_FREE_CONNECTIONS) {
+        freelist->free_connections[freelist->count++] = conn;
+    } else {
+        free_connection_resources(conn);
+    }
 }
 
 // Send an error response during request processing.
@@ -358,76 +388,79 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
     conn_write_string(conn, msg);
     finalize_response(conn, conn->request->method_type);
 
-    // Switch to writing the response.
-    conn->state         = STATE_WRITING_RESPONSE;
     conn->last_activity = time(NULL);
+    // Switch to writing the response.
 }
 
 /* ================================================================
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* conn, HttpMethod method, size_t headers_len) {
-    const char* ptr = conn->read_buf;
-    const char* end = ptr + headers_len;
-    bool is_safe    = SAFE_METHOD(method);
-    request_t* req  = conn->request;
-    Arena* arena    = conn->arena;
+INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method, size_t headers_len) {
+    const char* restrict ptr = conn->read_buf;
+    const char* const end    = ptr + headers_len;
+    const bool is_safe       = SAFE_METHOD(method);
+    request_t* const req     = conn->request;
+    Arena* const arena       = conn->arena;
+    headers_t* const headers = req->headers;
+
+    // Initialize connection defaults and pack flags into single byte
+    conn->keep_alive = true;
+    uint8_t flags    = 0;  // bit 0: content_length_set, bit 1: connection_set
 
     while (ptr < end) {
         // Parse header name
-        const char* colon = (const char*)memchr(ptr, ':', end - ptr);
-        if (!colon) break;  // We are done with headers.
+        const char* const colon = (const char*)memchr(ptr, ':', end - ptr);
+        if (!colon) break;
 
-        size_t name_len = colon - ptr;
-        char* name      = arena_strdup2(arena, ptr, name_len);
-        if (unlikely(!name)) return false;
+        const size_t name_len = colon - ptr;
 
-        // Move to header value
-        ptr = colon + 1;
-        while (ptr < end && *ptr == ' ')
-            ptr++;
+        // Move to header value (combine pointer arithmetic)
+        const char* value_start = colon + 1;
+        while (value_start < end && *value_start == ' ')
+            value_start++;
 
         // Parse header value
-        const char* eol = (const char*)memchr(ptr, '\r', end - ptr);
+        const char* const eol = (const char*)memchr(value_start, '\r', end - value_start);
         if (!eol || eol + 1 >= end || eol[1] != '\n') break;
 
-        size_t value_len = eol - ptr;
-        char* value      = arena_strdup2(arena, ptr, value_len);
+        const size_t value_len = eol - value_start;
+
+        // Check for special headers with minimal branching
+        if (name_len == 14 && !(flags & 1) && !is_safe) {
+            // Check Content-Length (most common case first)
+            if (strncasecmp(ptr, "Content-Length", 14) == 0) {
+                bool content_len_valid;
+                char temp_buf[32];  // Enough for max uint64_t
+                if (value_len < sizeof(temp_buf)) {
+                    memcpy(temp_buf, value_start, value_len);
+                    temp_buf[value_len] = '\0';
+                    req->content_length = parse_ulong(temp_buf, &content_len_valid);
+                    if (!content_len_valid) {
+                        return false;  // Simplified error handling
+                    }
+                    flags |= 1;  // Set content_length_set
+                }
+            }
+        } else if (name_len == 10 && !(flags & 2)) {
+            if (strncasecmp(ptr, "Connection", 10) == 0) {
+                conn->keep_alive = !(value_len == 5 && strncasecmp(value_start, "close", 5) == 0);
+                flags |= 2;  // Set connection_set
+            }
+        }
+
+        // Allocate and store header (only if we still need to store it)
+        char* const name = arena_strdup2(arena, ptr, name_len);
+        if (unlikely(!name)) return false;
+
+        char* const value = arena_strdup2(arena, value_start, value_len);
         if (unlikely(!value)) return false;
 
-        if (!headers_set(req->headers, name, value)) {
+        if (unlikely(!headers_set(headers, name, value))) {
             return false;
         }
 
         ptr = eol + 2;  // Skip CRLF
-    }
-
-    // Parse content length if present.
-    if (!is_safe) {
-        const char* content_len = headers_get(req->headers, "Content-Length");
-        if (content_len) {
-            bool content_len_valid;
-            req->content_length = parse_ulong(content_len, &content_len_valid);
-            if (!content_len_valid) {
-                fprintf(stderr, "Invalid content-length header: %s\n", content_len);
-                return false;
-            }
-        }
-    }
-
-    // Parse keep alive.
-    const char* connection_header = headers_get(req->headers, "Connection");
-    if (connection_header) {
-        // Default to keep-alive for HTTP/1.1, close for HTTP/1.0
-        if (strcasecmp(connection_header, "close") == 0) {
-            conn->keep_alive = false;
-        } else {
-            // Be permissive - accept any non-"close" connection header
-            conn->keep_alive = true;
-        }
-    } else {
-        conn->keep_alive = true;
     }
 
     return true;
@@ -1108,99 +1141,34 @@ void pulsar_get_context_value(connection_t* conn, const char* key, void** value)
     }
 }
 
-/* ================================================================
- * Request Processing Functions
- * ================================================================ */
-bool parse_request_line(const char* read_buf, size_t buf_len, char* method, size_t method_size, char* path,
-                        size_t path_size, char* http_protocol, size_t protocol_size) {
-    const char* ptr     = read_buf;
-    const char* buf_end = read_buf + buf_len;
-    const char* start;
-    size_t len;
+// Support for dynamic sscanf string size.
+#define FORMAT(S)   "%" #S "s"
+#define RESOLVE(S)  FORMAT(S)
+#define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-    // Parse method
-    start = ptr;
-    while (ptr < buf_end && *ptr != ' ' && *ptr != '\t' && *ptr != '\0') {
-        ptr++;
-    }
-    if (ptr == start || ptr >= buf_end) return false;
-
-    len = ptr - start;
-    if (len >= method_size) return false;
-    memcpy(method, start, len);
-    method[len] = '\0';
-
-    // Skip whitespace
-    while (ptr < buf_end && (*ptr == ' ' || *ptr == '\t'))
-        ptr++;
-    if (ptr >= buf_end) return false;
-
-    // Parse path
-    start = ptr;
-    while (ptr < buf_end && *ptr != ' ' && *ptr != '\t' && *ptr != '\0') {
-        ptr++;
-    }
-    if (ptr == start || ptr >= buf_end) return false;
-
-    len = ptr - start;
-    if (len >= path_size) return false;
-    memcpy(path, start, len);
-    path[len] = '\0';
-
-    // Skip whitespace
-    while (ptr < buf_end && (*ptr == ' ' || *ptr == '\t'))
-        ptr++;
-    if (ptr >= buf_end) return false;
-
-    // Parse protocol
-    start = ptr;
-    while (ptr < buf_end && *ptr != ' ' && *ptr != '\t' && *ptr != '\r' && *ptr != '\n' && *ptr != '\0') {
-        ptr++;
-    }
-    if (ptr == start) return false;
-
-    len = ptr - start;
-    if (len >= protocol_size) return false;
-    memcpy(http_protocol, start, len);
-    http_protocol[len] = '\0';
-
-    return true;
-}
-
-static void process_request(connection_t* conn, size_t read_bytes) {
-    char path[1024];
-    char http_protocol[16];
-    const char* read_buf = conn->read_buf;
-
-    char* end_of_headers = strstr(read_buf, "\r\n\r\n");
+INLINE void process_request(connection_t* conn, size_t read_bytes) {
+    char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
     if (!end_of_headers) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
-    size_t headers_len = end_of_headers - read_buf + 4;
+    size_t headers_len = end_of_headers - conn->read_buf + 4;
 
-    // Parse method, path and HTTP version
-    if (!parse_request_line(read_buf, read_bytes, conn->request->method, sizeof(conn->request->method), path,
-                            sizeof(path), http_protocol, sizeof(http_protocol))) {
-        send_error_response(conn, StatusBadRequest);
-        return;
-    }
-
-    conn->request->path = arena_strdup(conn->arena, path);
+    // Allocate memory for path.
+    conn->request->path = arena_alloc(conn->arena, MAX_PATH_LEN + 1);
     if (!conn->request->path) {
         send_error_response(conn, StatusInternalServerError);
         return;
     }
 
-    // Validate HTTP version
-    if (strncmp(http_protocol, "HTTP/1.", 7) != 0) {
-        send_error_response(conn, StatusHTTPVersionNotSupported);
+    char http_protocol[16] = {};
+    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, conn->request->path, http_protocol) != 3) {
+        send_error_response(conn, StatusBadRequest);
         return;
     }
 
-    // Check the minor version character
-    char minor_version = http_protocol[7];
-    if (minor_version != '0' && minor_version != '1') {
+    // Validate HTTP version. We only support http 1.1
+    if (strcmp(http_protocol, "HTTP/1.1") != 0) {
         send_error_response(conn, StatusHTTPVersionNotSupported);
         return;
     }
@@ -1243,9 +1211,8 @@ static void process_request(connection_t* conn, size_t read_bytes) {
 
     finalize_response(conn, method);
 
-    // Switch to writing response.
-    conn->state         = STATE_WRITING_RESPONSE;
     conn->last_activity = time(NULL);
+    // Switch to writing response.
 }
 
 /* ================================================================
@@ -1403,7 +1370,6 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
         free(conn);
         return;
     }
-
     init_connection(conn, arena, client_fd);
 
     struct epoll_event event;
@@ -1412,41 +1378,48 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
         perror("epoll_ctl");
-        conn->state = STATE_CLOSING;
+        conn->closing = true;
         return;
     }
 }
 
-static void handle_read(int epoll_fd, connection_t* conn) {
+INLINE size_t MIN(size_t x, size_t y) {
+    return x < y ? x : y;
+}
+
+INLINE size_t MAX(size_t x, size_t y) {
+    return x > y ? x : y;
+}
+
+INLINE void handle_read(int epoll_fd, connection_t* conn) {
     char* read_buf     = conn->read_buf;
     ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            conn->state = STATE_CLOSING;  // read: connection reset by peer.
+            conn->closing = true;  // read: connection reset by peer.
         }
         return;
     } else if (bytes_read == 0) {
-        conn->state = STATE_CLOSING;  // Unexpected close.
+        conn->closing = true;  // Unexpected close.
         return;
     }
     read_buf[bytes_read] = '\0';
 
     process_request(conn, bytes_read);
 
-    if (conn->state == STATE_WRITING_RESPONSE) {
-        struct epoll_event event;
-        event.events   = EPOLLOUT | EPOLLET;
-        event.data.ptr = conn;
+    // Switch to writing response.
+    struct epoll_event event;
+    event.events   = EPOLLOUT | EPOLLET;
+    event.data.ptr = conn;
 
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
-            perror("epoll_ctl mod to EPOLLOUT");
-            conn->state = STATE_CLOSING;
-        }
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
+        perror("epoll_ctl mod to EPOLLOUT");
+        conn->closing = true;
     }
 }
 
 #if ENABLE_LOGGING
-static inline void request_complete(connection_t* conn) {
+INLINE void request_complete(connection_t* conn) {
     struct timespec end;
     clock_gettime(CLOCK_MONOTONIC, &end);
     uint64_t latency_ns =
@@ -1458,7 +1431,7 @@ static inline void request_complete(connection_t* conn) {
 }
 #endif
 
-static void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state) {
     response_t* res         = conn->response;
     const bool sending_file = res->file_fd > 0 && res->file_size > 0;
     int client_fd           = conn->client_fd;
@@ -1547,13 +1520,13 @@ static void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
                 if (reset_connection(conn)) {
                     struct epoll_event event = {.events = EPOLLIN | EPOLLET | EPOLLRDHUP, .data.ptr = conn};
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
-                        conn->state = STATE_CLOSING;
+                        conn->closing = true;
                     }
                 } else {
-                    conn->state = STATE_CLOSING;
+                    conn->closing = true;
                 }
             } else {
-                conn->state = STATE_CLOSING;
+                conn->closing = true;
             }
             return;
         }
@@ -1571,7 +1544,7 @@ handle_error:
         if (errno != EPIPE) {
             perror("write failed");
         }
-        conn->state = STATE_CLOSING;
+        conn->closing = true;
     }
 }
 
@@ -1658,14 +1631,16 @@ typedef struct {
     int worker_id;
     int designated_core;
     KeepAliveState* keep_alive_state;
+    connection_freelist_t* freelist;
 } WorkerData;
 
 void* worker_thread(void* arg) {
-    WorkerData* worker       = (WorkerData*)arg;
-    int epoll_fd             = worker->epoll_fd;
-    int worker_id            = worker->worker_id;
-    int cpu_core             = worker->designated_core;
-    KeepAliveState* ka_state = worker->keep_alive_state;
+    WorkerData* worker              = (WorkerData*)arg;
+    int epoll_fd                    = worker->epoll_fd;
+    int worker_id                   = worker->worker_id;
+    int cpu_core                    = worker->designated_core;
+    KeepAliveState* ka_state        = worker->keep_alive_state;
+    connection_freelist_t* freelist = worker->freelist;
 
     pin_current_thread_to_core(cpu_core);
 
@@ -1678,16 +1653,16 @@ void* worker_thread(void* arg) {
         return NULL;
     }
 
-    printf("Worker %d started\n", worker_id);
-
     struct epoll_event events[MAX_EVENTS] = {};
     long last_timeout_check               = 0;
+    uint32_t hangup_mask                  = EPOLLHUP | EPOLLERR | EPOLLRDHUP;
+
     while (server_running) {
         // Check for Keep-Alive timeouts 5 seconds.
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (now.tv_sec - last_timeout_check >= 5) {
-            CheckKeepAliveTimeouts(ka_state, worker_id, epoll_fd);
+            CheckKeepAliveTimeouts(ka_state, freelist, worker_id, epoll_fd);
             last_timeout_check = now.tv_sec;
         }
 
@@ -1709,22 +1684,23 @@ void* worker_thread(void* arg) {
                     add_connection_to_worker(epoll_fd, client_fd);
                 }
             } else {
-                connection_t* conn = (connection_t*)events[i].data.ptr;
-
-                switch (conn->state) {
-                    case STATE_READING_REQUEST:
-                        if (events[i].events & EPOLLIN) handle_read(epoll_fd, conn);
-                        break;
-                    case STATE_WRITING_RESPONSE:
-                        if (events[i].events & EPOLLOUT) handle_write(epoll_fd, conn, ka_state);
-                        break;
-                    default:
-                        // fall through
+                connection_t* conn        = (connection_t*)events[i].data.ptr;
+                const uint32_t event_mask = events[i].events;
+                if (event_mask & EPOLLIN) {
+                    // Prefetch conn->read_buf and the first cache line of the buffer itself
+                    __builtin_prefetch(&conn->read_buf, 0, 1);  // 0=read, 1=moderate locality
+                    __builtin_prefetch(conn->read_buf, 0, 3);   // Prefetch buffer contents (high locality)
+                    handle_read(epoll_fd, conn);
+                } else if (event_mask & EPOLLOUT) {
+                    __builtin_prefetch(&conn->response->buffer, 1, 1);  // 1=write, 1=moderate
+                    __builtin_prefetch(conn->response->buffer, 1, 3);   // Prefetch buffer
+                    handle_write(epoll_fd, conn, ka_state);
+                } else if (event_mask && hangup_mask) {
+                    conn->closing = true;
                 }
 
-                bool sock_hangup = events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP);
-                if (conn->state == STATE_CLOSING || sock_hangup) {
-                    close_connection(epoll_fd, conn, ka_state);
+                if (conn->closing) {
+                    close_connection(epoll_fd, conn, ka_state, freelist);
                 }
             }
         }
@@ -1736,12 +1712,36 @@ void* worker_thread(void* arg) {
     }
 
     close(epoll_fd);
-
     return NULL;
 }
 
-static inline int get_num_available_cores() {
-    return sysconf(_SC_NPROCESSORS_ONLN);
+void* gc_thread_handler(void* arg) {
+    connection_freelist_t* freelist = (connection_freelist_t*)arg;
+    struct timespec last_check;
+    clock_gettime(CLOCK_MONOTONIC, &last_check);
+
+    while (server_running) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+
+        // Check every GC_INTERVAL_SEC seconds.
+        if ((now.tv_sec - last_check.tv_sec) >= GC_INTERVAL_SEC) {
+            process_freelist(freelist);
+            // printf("Worker %lu: Running GC\n", freelist->worker_id);
+            last_check = now;
+        }
+
+        // Sleep to prevent busy waiting
+        struct timespec sleep_time = {
+            .tv_sec  = 0,
+            .tv_nsec = 500000000  // 500ms
+        };
+        nanosleep(&sleep_time, NULL);
+    }
+
+    // Final cleanup on shutdown
+    process_freelist(freelist);
+    return NULL;
 }
 
 int pulsar_run(const char* addr, int port) {
@@ -1749,8 +1749,10 @@ int pulsar_run(const char* addr, int port) {
     set_nonblocking(server_fd);
 
     pthread_t workers[NUM_WORKERS]                = {};
+    pthread_t gc_threads[NUM_WORKERS]             = {};
     WorkerData worker_data[NUM_WORKERS]           = {};
     KeepAliveState keep_alive_states[NUM_WORKERS] = {};
+    connection_freelist_t freelists[NUM_WORKERS]  = {};
 
     install_signal_handler();
     sort_routes();
@@ -1765,19 +1767,29 @@ int pulsar_run(const char* addr, int port) {
     int reserved_cores = 1;  // Leave one core free
 
     // Initialize worker data and create workers
-    for (int i = 0; i < NUM_WORKERS; i++) {
+    for (size_t i = 0; i < NUM_WORKERS; i++) {
         int epoll_fd = epoll_create1(0);
         if (epoll_fd == -1) {
             perror("epoll_create1");
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].epoll_fd         = epoll_fd;
-        worker_data[i].worker_id        = i;
-        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
-        worker_data[i].keep_alive_state = &keep_alive_states[i];
+        worker_data[i].epoll_fd            = epoll_fd;
+        worker_data[i].worker_id           = i;
+        worker_data[i].designated_core     = i % (num_cores - reserved_cores);
+        worker_data[i].keep_alive_state    = &keep_alive_states[i];
+        worker_data[i].freelist            = &freelists[i];
+        worker_data[i].freelist->worker_id = i;
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
+            perror("pthread_create");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Start the GC threads
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        if (pthread_create(&gc_threads[i], NULL, gc_thread_handler, &freelists[i])) {
             perror("pthread_create");
             exit(EXIT_FAILURE);
         }
@@ -1791,6 +1803,11 @@ int pulsar_run(const char* addr, int port) {
     // Join all worker threads
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
+    }
+
+    // Wait for GC threads.
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        pthread_join(gc_threads[i], NULL);
     }
 
     // Close server socket

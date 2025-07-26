@@ -67,7 +67,4 @@
 
 #define ALIGN_UP(size, alignment) (((size) + (alignment) - 1) & ~((alignment) - 1))
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-
 #endif  // MACROS_H__

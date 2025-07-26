@@ -18,7 +18,7 @@ ifeq ($(BUILD),debug)
     CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
-    CFLAGS := $(BASE_CFLAGS) -O3 -mtune=native -march=native -flto -funroll-loops -ffast-math -msse4.2 -mavx2
+    CFLAGS := $(BASE_CFLAGS) -O3 -g -mtune=native -march=native -flto -funroll-loops -ffast-math -msse4.2 -mavx2
     BUILD_DIR := build/release
 else
     $(error Invalid BUILD type: $(BUILD))
