@@ -94,8 +94,8 @@ allocator_t* str_create_tracking_allocator(allocator_t* base_allocator);
  * @param[out] allocation_count Number of allocations
  * @return true if statistics were retrieved, false if invalid allocator
  */
-bool str_get_allocation_stats(allocator_t* allocator, size_t* total_allocated, size_t* current_allocated,
-                              size_t* allocation_count);
+bool str_get_allocation_stats(allocator_t* allocator, size_t* total_allocated,
+                              size_t* current_allocated, size_t* allocation_count);
 
 /**
  * @brief Create a new arena allocator

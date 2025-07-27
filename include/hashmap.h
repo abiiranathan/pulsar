@@ -383,7 +383,8 @@ const char* hashmap_error_string(hashmap_error_t error);
  *        chains, max_len, memory / 1024);
  * ```
  */
-void hashmap_get_stats(hashmap_t* map, size_t* chain_count, size_t* max_chain_len, size_t* memory_used);
+void hashmap_get_stats(hashmap_t* map, size_t* chain_count, size_t* max_chain_len,
+                       size_t* memory_used);
 
 /**
  * @brief Reserve capacity to avoid resizing

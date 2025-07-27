@@ -82,8 +82,8 @@ INLINE void headers_clear(headers_t* headers) {
 }
 
 // Iterator
-#define headers_foreach(headers, item)                                                                       \
-    if (headers)                                                                                             \
+#define headers_foreach(headers, item)                                                             \
+    if (headers)                                                                                   \
         for (size_t _i = 0; _i < (headers)->count && ((item) = &(headers)->entries[_i], 1); _i++)
 
 #ifdef __cplusplus

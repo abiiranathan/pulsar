@@ -23,8 +23,9 @@ typedef enum {
 
 // Helper function to grow the files array
 INLINE bool grow_files_array(MultipartForm* form) {
-    size_t new_capacity    = form->files_capacity * 2;
-    FileHeader** new_files = (FileHeader**)arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
+    size_t new_capacity = form->files_capacity * 2;
+    FileHeader** new_files =
+        (FileHeader**)arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
     if (!new_files) return false;
 
     // Copy existing pointers
@@ -71,7 +72,8 @@ MpCode multipart_init(MultipartForm* form, size_t memory) {
     }
 
     // Allocate initial arrays from arena
-    form->files = (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
+    form->files =
+        (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
     if (!form->files) {
         return ARENA_ALLOC_ERROR;
     }
@@ -162,7 +164,8 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                     // Check if this is a file field
                     if (strncmp(ptr, "\"; filename=\"", 13) == 0) {
                         // Allocate field name from arena
-                        current_header.field_name = arena_strdup2(form->arena, key_start, key_length);
+                        current_header.field_name =
+                            arena_strdup2(form->arena, key_start, key_length);
                         if (!current_header.field_name) {
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
@@ -210,7 +213,8 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
             } break;
 
             case STATE_VALUE: {
-                if ((strncmp(ptr, "\r\n--", 4) == 0 || strncmp(ptr, boundary, boundary_length) == 0) &&
+                if ((strncmp(ptr, "\r\n--", 4) == 0 ||
+                     strncmp(ptr, boundary, boundary_length) == 0) &&
                     value_start != NULL) {
                     size_t value_length = ptr - value_start;
 
@@ -239,7 +243,8 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
                     size_t filename_length = ptr - key_start;
 
                     // Allocate filename from arena
-                    current_header.filename = arena_strdup2(form->arena, key_start, filename_length);
+                    current_header.filename =
+                        arena_strdup2(form->arena, key_start, filename_length);
                     if (!current_header.filename) {
                         code = ARENA_ALLOC_ERROR;
                         goto cleanup;
