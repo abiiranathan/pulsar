@@ -37,10 +37,15 @@
 #define READ_BUFFER_SIZE 2048
 #endif
 
-// Default buffer size for status + headers + body.
-// This is resizable with realloc but must be atleast 8K.
+// Default buffer size for body.
 #ifndef WRITE_BUFFER_SIZE
-#define WRITE_BUFFER_SIZE 8192
+#define WRITE_BUFFER_SIZE 4096
+#endif
+
+// Default buffer size for response body above which allocation happens, allocating
+// WRITE_BUFFER_SIZE.
+#ifndef STACK_BUFFER_SIZE
+#define STACK_BUFFER_SIZE 1024
 #endif
 
 // Amount of memory to allocate for small buffer size
@@ -107,7 +112,7 @@ static_assert(HEADERS_CAPACITY > 0, "HEADERS_CAPACITY must be > 0");
 
 // Ensure buffer sizes are reasonable
 static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
-static_assert(WRITE_BUFFER_SIZE >= 8192, "WRITE_BUFFER_SIZE must be at least 8KB");
+static_assert(WRITE_BUFFER_SIZE >= 1024, "WRITE_BUFFER_SIZE must be at least 1KB");
 
 // Ensure timeouts are reasonable
 static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 seconds");

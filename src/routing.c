@@ -58,8 +58,7 @@ INLINE size_t count_path_params(const char* pattern, bool* valid) {
  * @param pathParams: The PathParams struct to store the matched parameters
  * @return true if the pattern and URL match, false otherwise
  */
-INLINE bool match_path_parameters(const char* pattern, const char* url_path,
-                                  PathParams* path_params) {
+INLINE bool match_path_parameters(const char* pattern, const char* url_path, PathParams* path_params) {
     const char* pat = pattern;
     const char* url = url_path;
     size_t nparams  = 0;
@@ -228,13 +227,13 @@ typedef struct {
 
 static RouteCacheEntry route_cache[ROUTE_CACHE_SIZE];
 
-#define HASH_ROUTE_KEY(method, url, result)                                                        \
-    do {                                                                                           \
-        (result)      = (method);                                                                  \
-        const char* p = (url);                                                                     \
-        while (*p) {                                                                               \
-            (result) = (result) * 33 + *p++;                                                       \
-        }                                                                                          \
+#define HASH_ROUTE_KEY(method, url, result)                                                                  \
+    do {                                                                                                     \
+        (result)      = (method);                                                                            \
+        const char* p = (url);                                                                               \
+        while (*p) {                                                                                         \
+            (result) = (result) * 33 + *p++;                                                                 \
+        }                                                                                                    \
     } while (0)
 
 // Helper function to check if a route matches a URL

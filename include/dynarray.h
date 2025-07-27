@@ -68,11 +68,11 @@
  *   - len: current number of elements
  *   - cap: current capacity
  */
-#define DA_DECLARE(type, name)                                                                     \
-    typedef struct {                                                                               \
-        type* data;                                                                                \
-        size_t len;                                                                                \
-        size_t cap;                                                                                \
+#define DA_DECLARE(type, name)                                                                               \
+    typedef struct {                                                                                         \
+        type* data;                                                                                          \
+        size_t len;                                                                                          \
+        size_t cap;                                                                                          \
     } name
 
 // Get the length of a dynamic array
@@ -91,18 +91,17 @@
 #define da_at(arr, idx) (DA_ASSERT((idx) < (arr).len), (arr).data[idx])
 
 // Internal: Calculate new capacity
-#define DA_NEW_CAP(old_cap)                                                                        \
-    ((old_cap) == 0 ? DA_INITIAL_CAPACITY : (size_t)((old_cap) * DA_GROWTH_FACTOR))
+#define DA_NEW_CAP(old_cap) ((old_cap) == 0 ? DA_INITIAL_CAPACITY : (size_t)((old_cap) * DA_GROWTH_FACTOR))
 
 /*
  * da_reserve(arr_ptr, new_cap) - Ensure array has at least new_cap capacity
  *
  * Returns true on success, false on allocation failure.
  */
-#define da_reserve(arr_ptr, new_cap)                                                               \
-    ((arr_ptr)->cap >= (new_cap) ? true                                                            \
-                                 : da_grow_((void**)&(arr_ptr)->data, &(arr_ptr)->cap, (new_cap),  \
-                                            sizeof(*(arr_ptr)->data)))
+#define da_reserve(arr_ptr, new_cap)                                                                         \
+    ((arr_ptr)->cap >= (new_cap)                                                                             \
+         ? true                                                                                              \
+         : da_grow_((void**)&(arr_ptr)->data, &(arr_ptr)->cap, (new_cap), sizeof(*(arr_ptr)->data)))
 
 /*
  * da_resize(arr_ptr, new_len) - Resize array to new_len elements
@@ -110,7 +109,7 @@
  * If growing, new elements are uninitialized.
  * Returns true on success, false on allocation failure.
  */
-#define da_resize(arr_ptr, new_len)                                                                \
+#define da_resize(arr_ptr, new_len)                                                                          \
     (da_reserve((arr_ptr), (new_len)) ? ((arr_ptr)->len = (new_len), true) : false)
 
 /*
@@ -118,10 +117,8 @@
  *
  * Returns true on success, false on allocation failure.
  */
-#define da_push(arr_ptr, elem)                                                                     \
-    (da_reserve((arr_ptr), (arr_ptr)->len + 1)                                                     \
-         ? ((arr_ptr)->data[(arr_ptr)->len++] = (elem), true)                                      \
-         : false)
+#define da_push(arr_ptr, elem)                                                                               \
+    (da_reserve((arr_ptr), (arr_ptr)->len + 1) ? ((arr_ptr)->data[(arr_ptr)->len++] = (elem), true) : false)
 
 /*
  * da_pop(arr_ptr) - Remove and return last element
@@ -138,14 +135,14 @@
 /*
  * da_free(arr_ptr) - Free array memory and reset to empty state
  */
-#define da_free(arr_ptr)                                                                           \
-    do {                                                                                           \
-        if ((arr_ptr)->data) {                                                                     \
-            DA_FREE((arr_ptr)->data);                                                              \
-            (arr_ptr)->data = NULL;                                                                \
-        }                                                                                          \
-        (arr_ptr)->len = 0;                                                                        \
-        (arr_ptr)->cap = 0;                                                                        \
+#define da_free(arr_ptr)                                                                                     \
+    do {                                                                                                     \
+        if ((arr_ptr)->data) {                                                                               \
+            DA_FREE((arr_ptr)->data);                                                                        \
+            (arr_ptr)->data = NULL;                                                                          \
+        }                                                                                                    \
+        (arr_ptr)->len = 0;                                                                                  \
+        (arr_ptr)->cap = 0;                                                                                  \
     } while (0)
 
 /*
@@ -154,12 +151,12 @@
  * All elements at and after idx are shifted right.
  * Returns true on success, false on allocation failure.
  */
-#define da_insert(arr_ptr, idx, elem)                                                              \
-    (DA_ASSERT((idx) <= (arr_ptr)->len),                                                           \
-     da_reserve((arr_ptr), (arr_ptr)->len + 1)                                                     \
-         ? (memmove(&(arr_ptr)->data[(idx) + 1], &(arr_ptr)->data[idx],                            \
-                    ((arr_ptr)->len - (idx)) * sizeof(*(arr_ptr)->data)),                          \
-            (arr_ptr)->data[idx] = (elem), (arr_ptr)->len++, true)                                 \
+#define da_insert(arr_ptr, idx, elem)                                                                        \
+    (DA_ASSERT((idx) <= (arr_ptr)->len),                                                                     \
+     da_reserve((arr_ptr), (arr_ptr)->len + 1)                                                               \
+         ? (memmove(&(arr_ptr)->data[(idx) + 1], &(arr_ptr)->data[idx],                                      \
+                    ((arr_ptr)->len - (idx)) * sizeof(*(arr_ptr)->data)),                                    \
+            (arr_ptr)->data[idx] = (elem), (arr_ptr)->len++, true)                                           \
          : false)
 
 /*
@@ -168,10 +165,10 @@
  * All elements after idx are shifted left.
  * Returns the removed element.
  */
-#define da_remove(arr_ptr, idx)                                                                    \
-    (DA_ASSERT((idx) < (arr_ptr)->len), (arr_ptr)->len--,                                          \
-     memmove(&(arr_ptr)->data[idx], &(arr_ptr)->data[(idx) + 1],                                   \
-             ((arr_ptr)->len - (idx)) * sizeof(*(arr_ptr)->data)),                                 \
+#define da_remove(arr_ptr, idx)                                                                              \
+    (DA_ASSERT((idx) < (arr_ptr)->len), (arr_ptr)->len--,                                                    \
+     memmove(&(arr_ptr)->data[idx], &(arr_ptr)->data[(idx) + 1],                                             \
+             ((arr_ptr)->len - (idx)) * sizeof(*(arr_ptr)->data)),                                           \
      (arr_ptr)->data[(arr_ptr)->len])
 
 /*
@@ -179,11 +176,11 @@
  *
  * Returns true on success, false on allocation failure (array unchanged).
  */
-#define da_shrink_to_fit(arr_ptr)                                                                  \
-    ((arr_ptr)->len == (arr_ptr)->cap ? true                                                       \
-     : (arr_ptr)->len == 0            ? (da_free(arr_ptr), true)                                   \
-                           : da_shrink_((void**)&(arr_ptr)->data, &(arr_ptr)->cap, (arr_ptr)->len, \
-                                        sizeof(*(arr_ptr)->data)))
+#define da_shrink_to_fit(arr_ptr)                                                                            \
+    ((arr_ptr)->len == (arr_ptr)->cap ? true                                                                 \
+     : (arr_ptr)->len == 0                                                                                   \
+         ? (da_free(arr_ptr), true)                                                                          \
+         : da_shrink_((void**)&(arr_ptr)->data, &(arr_ptr)->cap, (arr_ptr)->len, sizeof(*(arr_ptr)->data)))
 
 // Function declarations
 static inline bool da_grow_(void** data, size_t* cap, size_t min_cap, size_t elem_size);

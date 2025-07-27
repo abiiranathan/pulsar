@@ -70,20 +70,16 @@ static inline uint32_t hash_xxhash32(const char* key, size_t len, uint32_t seed)
         uint32_t v4                = seed - PRIME32_1;
 
         do {
-            v1 = ((v1 + (*(uint32_t*)p * PRIME32_2)) << 13) |
-                 ((v1 + (*(uint32_t*)p * PRIME32_2)) >> 19);
+            v1 = ((v1 + (*(uint32_t*)p * PRIME32_2)) << 13) | ((v1 + (*(uint32_t*)p * PRIME32_2)) >> 19);
             v1 *= PRIME32_1;
             p += 4;
-            v2 = ((v2 + (*(uint32_t*)p * PRIME32_2)) << 13) |
-                 ((v2 + (*(uint32_t*)p * PRIME32_2)) >> 19);
+            v2 = ((v2 + (*(uint32_t*)p * PRIME32_2)) << 13) | ((v2 + (*(uint32_t*)p * PRIME32_2)) >> 19);
             v2 *= PRIME32_1;
             p += 4;
-            v3 = ((v3 + (*(uint32_t*)p * PRIME32_2)) << 13) |
-                 ((v3 + (*(uint32_t*)p * PRIME32_2)) >> 19);
+            v3 = ((v3 + (*(uint32_t*)p * PRIME32_2)) << 13) | ((v3 + (*(uint32_t*)p * PRIME32_2)) >> 19);
             v3 *= PRIME32_1;
             p += 4;
-            v4 = ((v4 + (*(uint32_t*)p * PRIME32_2)) << 13) |
-                 ((v4 + (*(uint32_t*)p * PRIME32_2)) >> 19);
+            v4 = ((v4 + (*(uint32_t*)p * PRIME32_2)) << 13) | ((v4 + (*(uint32_t*)p * PRIME32_2)) >> 19);
             v4 *= PRIME32_1;
             p += 4;
         } while (p <= limit);
@@ -195,8 +191,7 @@ void hashmap_clear(hashmap_t* map) {
 
 /* Internal resize function */
 static hashmap_error_t resize_internal(hashmap_t* map, size_t new_capacity) {
-    hashmap_entry_t** new_buckets =
-        aligned_alloc(CACHE_LINE_SIZE, new_capacity * sizeof(hashmap_entry_t*));
+    hashmap_entry_t** new_buckets = aligned_alloc(CACHE_LINE_SIZE, new_capacity * sizeof(hashmap_entry_t*));
     if (!new_buckets) return HASHMAP_ERROR_OUT_OF_MEMORY;
     memset(new_buckets, 0, new_capacity * sizeof(hashmap_entry_t*));
 

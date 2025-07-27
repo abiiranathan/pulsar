@@ -28,10 +28,9 @@
 #define CONTENT_TYPE_MSPPT   "application/vnd.ms-powerpoint"
 #define CONTENT_TYPE_DOCX    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 #define CONTENT_TYPE_XLSX    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-#define CONTENT_TYPE_PPTX                                                                          \
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-#define CONTENT_TYPE_ODT "application/vnd.oasis.opendocument.text"
-#define CONTENT_TYPE_ODS "application/vnd.oasis.opendocument.spreadsheet"
+#define CONTENT_TYPE_PPTX    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+#define CONTENT_TYPE_ODT     "application/vnd.oasis.opendocument.text"
+#define CONTENT_TYPE_ODS     "application/vnd.oasis.opendocument.spreadsheet"
 
 // Image types
 #define CONTENT_TYPE_PNG  "image/png"

@@ -30,14 +30,16 @@
 #define HTTP_FILE_RESPONSE    0x08
 
 // Buffer segment offsets (fixed positions)
-#define STATUS_LINE_SIZE 64
-#define HEADERS_BUF_SIZE 4096
-#define CACHE_LINE_SIZE  64
-#define ARENA_CAPACITY                                                                             \
-    NEXT_POWER_OF_TWO(1024 + MAX_PATH_LEN + READ_BUFFER_SIZE + (HEADERS_CAPACITY * 16))
-
-#define MAX_FREE_CONNECTIONS 4096  // Connections to put in GC per worker.
+#define STATUS_LINE_SIZE     64
+#define HEADERS_BUF_SIZE     4096
+#define CACHE_LINE_SIZE      64
+#define ARENA_CAPACITY       8192  // 8K
+#define MAX_FREE_CONNECTIONS 1024  // Connections to put in GC per worker.
 #define GC_INTERVAL_SEC      5     // Seconds before workers run GC.
+
+// Make sure they fit in uint8_t and uint16_t
+static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
+static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
 
 // Getters - check if flag is set
 #define HTTP_HAS_CONTENT_TYPE(flags)    (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
@@ -58,29 +60,35 @@ const char* CRLF = "\r\n";
 
 // HTTP Response structure
 typedef struct response_t {
-    http_status status_code;  // HTTP status code.
-    char status_buf[128];     // Null-terminated buffer for status line.
-    char headers_buf[4096];   // Null-terminated buffer for headers.
-    uint8_t* body_buf;        // Dynamically allocated body buffer. (not null-terminated)
-    uint32_t body_capacity;   // Capacity of body buffer.
+    http_status status_code;             // HTTP status code.
+    char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
+    char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.
+    bool heap_allocated;                 // If heap allocation is used.
+    union {
+        // stack buffer for smaller responses
+        uint8_t stack[STACK_BUFFER_SIZE];
+
+        // Dynamically allocated body buffer. (not null-terminated)
+        uint8_t* heap;
+    } body;  // Response body.
 
     // Pre-computed lengths of status line, headers, body.
-    uint32_t body_len;     // Actual length of body
+    size_t body_len;       // Actual length of body
+    size_t body_capacity;  // Capacity of body buffer.
     uint16_t headers_len;  // Actual length of headers
     uint8_t status_len;    // Actual length of status line
     uint8_t flags;         // 4 bytes for all flags.
 
     // EPOLL OUT retry state.
-    uint32_t status_sent;   // Bytes of status line sent
-    uint32_t headers_sent;  // Bytes of headers sent
-    uint32_t body_sent;     // Bytes of body sent
+    uint8_t status_sent;    // Bytes of status line sent
+    uint16_t headers_sent;  // Bytes of headers sent
+    size_t body_sent;       // Bytes of body sent
 
     // File response state.
     uint32_t file_size;    // Size of file to send (if applicable)
     uint32_t file_offset;  // Offset in file for sendfile
     uint32_t max_range;    // Maximum range of requested bytes in range request.
     int file_fd;           // File descriptor for file to send (if applicable)
-    int heap_allocated;    // If heap allocation is used.
 } response_t;
 
 // HTTP Request structure
@@ -97,16 +105,16 @@ typedef struct request_t {
 
 // Connection state structure
 typedef struct connection_t {
-    bool closing;               // Server closing because of an error.
-    bool keep_alive;            // Keep-alive flag
-    bool abort;                 // Abort handler/middleware processing
-    bool in_keep_alive;         // Flag for a tracked connection
-    char* read_buf;             // Buffer for incoming data.
-    int client_fd;              // Client socket file descriptor
-    time_t last_activity;       // Timestamp of last I/O activity
-    response_t* response;       // HTTP response data (arena allocated)
-    struct request_t* request;  // HTTP request data (arena allocated)
-    Arena* arena;               // Memory arena for allocations
+    bool closing;                     // Server closing because of an error.
+    bool keep_alive;                  // Keep-alive flag
+    bool abort;                       // Abort handler/middleware processing
+    bool in_keep_alive;               // Flag for a tracked connection
+    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
+    int client_fd;                    // Client socket file descriptor
+    time_t last_activity;             // Timestamp of last I/O activity
+    response_t* response;             // HTTP response data (arena allocated)
+    struct request_t* request;        // HTTP request data (arena allocated)
+    Arena* arena;                     // Memory arena for allocations
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
 #endif
@@ -132,11 +140,11 @@ typedef struct {
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
-static int server_fd                                        = -1;  // Server socket file descriptor
-static volatile sig_atomic_t server_running                 = 1;   // Server running flag
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
-static size_t global_mw_count                               = 0;   // Global middleware count
-static PulsarCallback LOGGER_CALLBACK = NULL;                      // No logger callback by default.
+static int server_fd                                        = -1;    // Server socket file descriptor
+static volatile sig_atomic_t server_running                 = 1;     // Server running flag
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
+static size_t global_mw_count                               = 0;     // Global middleware count
+static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
 
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
 INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state,
@@ -151,8 +159,8 @@ INLINE bool conn_timedout(time_t now, time_t last_activity) {
 
 // Remove debug printf in production, or make it conditional
 #ifdef DEBUG_TIMEOUTS
-    printf("conn_timedout: now=%ld, last_activity=%ld, timeout=%d, timed_out=%d\n", now,
-           last_activity, timeout_seconds, timed_out);
+    printf("conn_timedout: now=%ld, last_activity=%ld, timeout=%d, timed_out=%d\n", now, last_activity,
+           timeout_seconds, timed_out);
 #endif
     return timed_out;
 }
@@ -200,8 +208,8 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, connection_freelist_t* freelist,
-                                   int worker_id, int epoll_fd) {
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, connection_freelist_t* freelist, int worker_id,
+                                   int epoll_fd) {
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
@@ -270,17 +278,11 @@ INLINE response_t* create_response(Arena* arena) {
     response_t* resp = arena_alloc(arena, sizeof(response_t));
     if (!resp) return NULL;
 
-    // Initialize response structure.
     memset(resp, 0, sizeof(response_t));
-
-    // Allocate buffer in arena
-    resp->body_buf = aligned_alloc(CACHE_LINE_SIZE, WRITE_BUFFER_SIZE);
-    if (!resp->body_buf) {
-        return NULL;
-    }
-    resp->body_buf[0]   = '\0';
-    resp->body_capacity = WRITE_BUFFER_SIZE;
-    resp->file_fd       = -1;
+    resp->heap_allocated = false;
+    resp->body.stack[0]  = '\0';
+    resp->body_capacity  = 0;
+    resp->file_fd        = -1;
     return resp;
 }
 
@@ -294,13 +296,12 @@ INLINE void free_request(request_t* req) {
     }
 }
 
-// Free response buffer. response it-self is arena-allocated.
 INLINE void free_response(response_t* resp) {
     if (!resp) return;
 
-    if (resp->body_buf) {
-        free(resp->body_buf);
-        resp->body_buf = NULL;
+    if (resp->heap_allocated && resp->body.heap) {
+        free(resp->body.heap);
+        resp->body.heap = NULL;
     }
 }
 
@@ -312,7 +313,7 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->abort         = false;
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
-    conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
+    conn->read_buf[0]   = '\0';
     conn->request       = create_request(arena);
     conn->arena         = arena;
 #if ENABLE_LOGGING
@@ -321,7 +322,7 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->locals = hashmap_create();
     conn->next   = NULL;
     conn->prev   = NULL;
-    return (conn->request && conn->response && conn->locals && conn->read_buf);
+    return (conn->request && conn->response && conn->locals);
 }
 
 INLINE bool reset_connection(connection_t* conn) {
@@ -331,17 +332,17 @@ INLINE bool reset_connection(connection_t* conn) {
     free(conn->request->body);  // Free request body.
 
     // Reset response buffer before resetting arena.
-    if (conn->response->body_buf) {
-        free(conn->response->body_buf);
+    if (conn->response->heap_allocated) {
+        free(conn->response->body.heap);
     }
     arena_reset(conn->arena);  // Reset arena and reuse.
 
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
-    conn->request  = create_request(conn->arena);
-    conn->response = create_response(conn->arena);
-    conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
+    conn->request     = create_request(conn->arena);
+    conn->response    = create_response(conn->arena);
+    conn->read_buf[0] = '\0';
 
     hashmap_clear(conn->locals);
 
@@ -350,8 +351,7 @@ INLINE bool reset_connection(connection_t* conn) {
         conn->next = NULL;
         conn->prev = NULL;
     }
-
-    return (conn->request && conn->read_buf);
+    return (conn->request && conn->response);
 }
 
 INLINE void free_connection_resources(connection_t* conn) {
@@ -402,8 +402,7 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method,
-                                  size_t headers_len) {
+INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method, size_t headers_len) {
     const char* restrict ptr = conn->read_buf;
     const char* const end    = ptr + headers_len;
     const bool is_safe       = SAFE_METHOD(method);
@@ -597,8 +596,7 @@ const char* conn_set_status(connection_t* restrict conn, http_status code) {
     response_t* res             = conn->response;
     res->status_code            = code;
 
-    int written =
-        snprintf(res->status_buf, STATUS_LINE_SIZE, "HTTP/1.1 %hu %s\r\n", code, status->text);
+    int written = snprintf(res->status_buf, STATUS_LINE_SIZE, "HTTP/1.1 %hu %s\r\n", code, status->text);
 
     // Make sure there is no overflow.
     assert(written > 0 && written < STATUS_LINE_SIZE);
@@ -661,8 +659,8 @@ http_status res_get_status(connection_t* conn) {
     return conn->response->status_code;
 }
 
-INLINE void conn_writeheader_fast(connection_t* conn, const char* name, size_t name_len,
-                                  const char* value, size_t value_len) {
+INLINE void conn_writeheader_fast(connection_t* conn, const char* name, size_t name_len, const char* value,
+                                  size_t value_len) {
     response_t* res           = conn->response;
     const size_t required_len = name_len + value_len + 4;  // ": \r\n"
     const size_t current_len  = res->headers_len;
@@ -673,13 +671,12 @@ INLINE void conn_writeheader_fast(connection_t* conn, const char* name, size_t n
     }
 
     const size_t available = HEADERS_BUF_SIZE - required_len;
-    int written = snprintf(res->headers_buf + current_len, available, "%s: %s\r\n", name, value);
+    int written            = snprintf(res->headers_buf + current_len, available, "%s: %s\r\n", name, value);
     assert(written > 0 && (size_t)written < available);
     res->headers_len += required_len;
 }
 
-__attribute__((hot, flatten)) void conn_writeheader(connection_t* conn, const char* name,
-                                                    const char* value) {
+__attribute__((hot, flatten)) void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     size_t name_len  = strlen(name);
     size_t value_len = strlen(value);
     conn_writeheader_fast(conn, name, name_len, value, value_len);
@@ -699,26 +696,75 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
     size_t body_len = res->body_len;
     size_t required = body_len + len;
 
+    // Fast path: stack buffer without allocation
+    if (likely(!res->heap_allocated)) {
+        if (required <= STACK_BUFFER_SIZE) {
+            memcpy(res->body.stack + body_len, data, len);
+            res->body_len += len;
+            return (int)len;
+        } else {
+            // Need to migrate to heap - COPY FIRST before changing union state
+            size_t heap_capacity = WRITE_BUFFER_SIZE;
+
+            // Ensure heap capacity is sufficient
+            while (heap_capacity < required) {
+                // Check if we can safely double without overflow
+                if (heap_capacity <= SIZE_MAX / 2) {
+                    heap_capacity *= 2;
+                } else {
+                    // Can't double safely, check if we have enough room for required size
+                    if (required > SIZE_MAX) {
+                        fprintf(stderr, "Memory requirement exceeds maximum addressable space\n");
+                        return -1;
+                    }
+
+                    // Set to required size (largest safe allocation)
+                    heap_capacity = required;
+                    break;
+                }
+            }
+
+            uint8_t* heap_buffer = aligned_alloc(CACHE_LINE_SIZE, heap_capacity);
+            if (!heap_buffer) {
+                perror("aligned_alloc failed");
+                return -1;
+            }
+
+            // Copy existing stack data to heap BEFORE changing union state
+            memcpy(heap_buffer, res->body.stack, body_len);
+
+            // Now safe to switch to heap mode
+            res->heap_allocated = true;
+            res->body_capacity  = heap_capacity;
+            res->body.heap      = heap_buffer;
+        }
+    }
+
+    // Heap path: ensure sufficient capacity
     if (required > res->body_capacity) {
-        size_t new_capacity = res->body_capacity;  // not-zero because its well initialized.
-        while (res->body_capacity < required) {
-            new_capacity *= 2;  // TODO: Limit memory to SIZE_MAX/2 to prevent overflow.
+
+        size_t new_capacity = res->body_capacity;
+        while (new_capacity < required) {
+            // Check for overflow before doubling
+            if (new_capacity > SIZE_MAX / 2) {
+                fprintf(stderr, "Memory requirement too large\n");
+                return -1;
+            }
+            new_capacity *= 2;
         }
 
-        unsigned char* new_buffer = realloc(res->body_buf, new_capacity);
+        uint8_t* new_buffer = realloc(res->body.heap, new_capacity);
         if (!new_buffer) {
-            perror("realloc");
-            return 0;
+            perror("realloc failed");
+            return -1;
         }
-        res->body_buf      = new_buffer;
+        res->body.heap     = new_buffer;
         res->body_capacity = new_capacity;
     }
 
-    uint8_t* dst = res->body_buf + body_len;
-    memcpy(dst, data, len);
-
+    memcpy(res->body.heap + body_len, data, len);
     res->body_len += len;
-    return len;
+    return (int)len;
 }
 
 // Send a 404 response (StatusNotFound)
@@ -732,8 +778,7 @@ int conn_write_string(connection_t* conn, const char* str) {
     return str ? conn_write(conn, str, strlen(str)) : 0;
 }
 
-__attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* restrict fmt,
-                                                      ...) {
+__attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* restrict fmt, ...) {
     va_list args;
     va_start(args, fmt);
     int len = vsnprintf(NULL, 0, fmt, args);
@@ -766,8 +811,7 @@ void conn_send(connection_t* conn, http_status status, const void* data, size_t 
 }
 
 // Parses the Range header and extracts start and end values
-INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end,
-                        bool* has_end_range) {
+INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end, bool* has_end_range) {
     if (strstr(range_header, "bytes=") != NULL) {
         if (sscanf(range_header, "bytes=%ld-%ld", start, end) == 2) {
             *has_end_range = true;
@@ -793,9 +837,8 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
         // Http range requests can be negative :) Wieird but true
         // I had to read the RFC to understand this, who would have thought?
         // https://datatracker.ietf.org/doc/html/rfc7233
-        start_byte = file_size + start_byte;  // subtract from the file size
-        end_byte =
-            start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
+        start_byte = file_size + start_byte;   // subtract from the file size
+        end_byte   = start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
     } else if (end_byte < 0) {
         // Even the end range can be negative. Deal with it!
         end_byte = file_size + end_byte;
@@ -955,15 +998,13 @@ void static_file_handler(connection_t* conn) {
     size_t static_path_len  = strlen(static_path);
 
     // Validate path lengths
-    if (dirlen >= PATH_MAX || static_path_len >= PATH_MAX ||
-        (dirlen + static_path_len + 2) >= PATH_MAX) {
+    if (dirlen >= PATH_MAX || static_path_len >= PATH_MAX || (dirlen + static_path_len + 2) >= PATH_MAX) {
         goto path_toolong;
     }
 
     // Concatenate the dirname and the static path
     char filepath[PATH_MAX];
-    int n = snprintf(filepath, PATH_MAX, "%.*s%.*s", (int)dirlen, dirname, (int)static_path_len,
-                     static_path);
+    int n = snprintf(filepath, PATH_MAX, "%.*s%.*s", (int)dirlen, dirname, (int)static_path_len, static_path);
     if (n < 0 || n >= PATH_MAX) {
         goto path_toolong;
     }
@@ -1028,17 +1069,17 @@ const char* get_path_param(connection_t* conn, const char* name) {
 
 INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
     // Execute global middleware
-#define EXECUTE_MIDDLEWARE(mw, count)                                                              \
-    do {                                                                                           \
-        size_t index = 0;                                                                          \
-        if (count > 0) {                                                                           \
-            while (index < count) {                                                                \
-                mw[index++](conn);                                                                 \
-                if (conn->abort) {                                                                 \
-                    return;                                                                        \
-                }                                                                                  \
-            }                                                                                      \
-        }                                                                                          \
+#define EXECUTE_MIDDLEWARE(mw, count)                                                                        \
+    do {                                                                                                     \
+        size_t index = 0;                                                                                    \
+        if (count > 0) {                                                                                     \
+            while (index < count) {                                                                          \
+                mw[index++](conn);                                                                           \
+                if (conn->abort) {                                                                           \
+                    return;                                                                                  \
+                }                                                                                            \
+            }                                                                                                \
+        }                                                                                                    \
     } while (0)
 
     EXECUTE_MIDDLEWARE(global_middleware, global_mw_count);
@@ -1107,8 +1148,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     size_t headers_len = end_of_headers - conn->read_buf + 4;
 
     char http_protocol[16] = {};
-    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, conn->request->path,
-               http_protocol) != 3) {
+    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, conn->request->path, http_protocol) != 3) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
@@ -1147,9 +1187,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
 
     if (route) {
         // Prefetch response and buffer
-        __builtin_prefetch(conn->response, 0, 3);            // Read prefetch for response
-        __builtin_prefetch(conn->response->body_buf, 1, 3);  // Write prefetch for buffer
-
+        __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
         execute_all_middleware(conn, route);
         if (!conn->abort) {
             route->handler(conn);
@@ -1314,12 +1352,18 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
 
     Arena* arena = arena_create(ARENA_CAPACITY);
     if (!arena) {
-        perror("arena_create failed");
+        fprintf(stderr, "arena_create failed\n");
         close(client_fd);
         free(conn);
         return;
     }
-    init_connection(conn, arena, client_fd);
+
+    if (!init_connection(conn, arena, client_fd)) {
+        fprintf(stderr, "init_connection failed\n");
+        close(client_fd);
+        free(conn);
+        return;
+    }
 
     struct epoll_event event;
     event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
@@ -1413,9 +1457,8 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
             }
 
             // File data transfer
-            off_t chunk_size = HTTP_HAS_RANGE_REQUEST(res->flags)
-                                   ? MIN(1 << 20, res->max_range)
-                                   : res->file_size - res->file_offset;
+            off_t chunk_size = HTTP_HAS_RANGE_REQUEST(res->flags) ? MIN(1 << 20, res->max_range)
+                                                                  : res->file_size - res->file_offset;
 
 #ifdef __linux__
             // Use zero-copy sendfile if available
@@ -1435,7 +1478,8 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
             iov[0].iov_len  = res->status_len - res->status_sent;
             iov[1].iov_base = res->headers_buf + res->headers_sent;
             iov[1].iov_len  = res->headers_len - res->headers_sent;
-            iov[2].iov_base = res->body_buf + res->body_sent;
+
+            iov[2].iov_base = (res->heap_allocated ? res->body.heap : res->body.stack) + res->body_sent;
             iov[2].iov_len  = res->body_len - res->body_sent;
 
             sent = writev(client_fd, iov, 3);
@@ -1443,16 +1487,29 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
 
             // Update sent counts.
             size_t remaining = sent;
-            for (int i = 0; i < 3 && remaining > 0; i++) {
-                size_t seg = MIN(remaining, iov[i].iov_len);
-                *(i == 0   ? &res->status_sent
-                  : i == 1 ? &res->headers_sent
-                           : &res->body_sent) += seg;
+
+            // Update status_sent
+            if (remaining > 0) {
+                size_t seg = MIN(remaining, iov[0].iov_len);
+                res->status_sent += seg;
                 remaining -= seg;
             }
 
-            complete = (res->status_sent == res->status_len) &&
-                       (res->headers_sent == res->headers_len) && (res->body_sent == res->body_len);
+            // Update headers_sent
+            if (remaining > 0) {
+                size_t seg = MIN(remaining, iov[1].iov_len);
+                res->headers_sent += seg;
+                remaining -= seg;
+            }
+
+            // Update body_sent
+            if (remaining > 0) {
+                size_t seg = MIN(remaining, iov[2].iov_len);
+                res->body_sent += seg;
+            }
+
+            complete = (res->status_sent == res->status_len) && (res->headers_sent == res->headers_len) &&
+                       (res->body_sent == res->body_len);
         }
 
         conn->last_activity = time(NULL);
@@ -1470,8 +1527,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
                 AddKeepAliveConnection(conn, state);
 
                 if (reset_connection(conn)) {
-                    struct epoll_event event = {.events   = EPOLLIN | EPOLLET | EPOLLRDHUP,
-                                                .data.ptr = conn};
+                    struct epoll_event event = {.events = EPOLLIN | EPOLLET | EPOLLRDHUP, .data.ptr = conn};
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
                         conn->closing = true;
                     }
@@ -1747,8 +1803,8 @@ int pulsar_run(const char* addr, int port) {
     }
 
     usleep(1000);  // Give workers time to start
-    printf("\n\nServer with %d workers listening on http://%s:%d\n", NUM_WORKERS,
-           addr ? addr : "0.0.0.0", port);
+    printf("\n\nServer with %d workers listening on http://%s:%d\n", NUM_WORKERS, addr ? addr : "0.0.0.0",
+           port);
     printf("Press Ctrl+C once for graceful shutdown, twice for immediate shutdown\n");
 
     // Join all worker threads

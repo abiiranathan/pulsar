@@ -1,16 +1,6 @@
-#include <assert.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
 #include "include/content_types.h"
 #include "include/forms.h"
-#include "include/headers.h"
 #include "include/pulsar.h"
-#include "include/routing.h"
-#include "include/status_code.h"
 
 #define SENDFILE 0
 
@@ -27,6 +17,26 @@ void hello_world_handler(connection_t* conn) {
     conn_set_content_type(conn, "text/plain");
     const char* response = "Hello, World! This is Pulsar HTTP server.\n";
     conn_write(conn, response, strlen(response));
+
+    // // Write a value larger than STACK_BUFFER_SIZE to test migration to heap and reallocation
+    // // Generate a large string to test heap migration
+    // const size_t large_size = (STACK_BUFFER_SIZE * 4) + 1;  // Ensure it exceeds stack buffer
+    // char* large_data        = malloc(large_size);
+    // if (large_data) {
+    //     // Fill with some test pattern
+    //     memset(large_data, 'A', large_size - 1);
+    //     large_data[large_size - 1] = '\0';
+
+    //     conn_write(conn, "\n--- Large data test ---\n", 25);
+    //     conn_write(conn, large_data, large_size - 1);  // Don't include null terminator
+    //     conn_write(conn, large_data, large_size - 1);  // Don't include null terminator
+    //     conn_write(conn, "\n--- End test ---\n", 18);
+
+    //     free(large_data);
+    // } else {
+    //     const char* error_msg = "\nFailed to allocate test data\n";
+    //     conn_write(conn, error_msg, strlen(error_msg));
+    // }
 #endif
 }
 

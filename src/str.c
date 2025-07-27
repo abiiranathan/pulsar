@@ -58,10 +58,9 @@ struct allocator_t {
  * @param size_ Size to allocate
  * @return Pointer to allocated memory or NULL
  */
-#define allocator_alloc(alloc_, size_)                                                             \
-    ((alloc_) && (alloc_)->vtable && (alloc_)->vtable->alloc                                       \
-         ? (alloc_)->vtable->alloc((alloc_), (size_))                                              \
-         : NULL)
+#define allocator_alloc(alloc_, size_)                                                                       \
+    ((alloc_) && (alloc_)->vtable && (alloc_)->vtable->alloc ? (alloc_)->vtable->alloc((alloc_), (size_))    \
+                                                             : NULL)
 
 /**
  * @brief Reallocate memory using an allocator
@@ -71,9 +70,9 @@ struct allocator_t {
  * @param new_size New size to allocate
  * @return Pointer to reallocated memory or NULL
  */
-#define allocator_realloc(alloc, ptr, old_size, new_size)                                          \
-    ((alloc) && (alloc)->vtable && (alloc)->vtable->realloc                                        \
-         ? (alloc)->vtable->realloc((alloc), (ptr), (old_size), (new_size))                        \
+#define allocator_realloc(alloc, ptr, old_size, new_size)                                                    \
+    ((alloc) && (alloc)->vtable && (alloc)->vtable->realloc                                                  \
+         ? (alloc)->vtable->realloc((alloc), (ptr), (old_size), (new_size))                                  \
          : NULL)
 
 /**
@@ -82,20 +81,19 @@ struct allocator_t {
  * @param ptr Pointer to memory to free
  * @param size Size of memory block
  */
-#define allocator_free(alloc, ptr, size)                                                           \
-    do {                                                                                           \
-        if ((alloc) && (alloc)->vtable && (alloc)->vtable->free)                                   \
-            (alloc)->vtable->free((alloc), (ptr), (size));                                         \
+#define allocator_free(alloc, ptr, size)                                                                     \
+    do {                                                                                                     \
+        if ((alloc) && (alloc)->vtable && (alloc)->vtable->free)                                             \
+            (alloc)->vtable->free((alloc), (ptr), (size));                                                   \
     } while (0)
 
 /**
  * @brief Destroy an allocator instance
  * @param alloc Allocator instance to destroy
  */
-#define allocator_destroy(alloc)                                                                   \
-    do {                                                                                           \
-        if ((alloc) && (alloc)->vtable && (alloc)->vtable->destroy)                                \
-            (alloc)->vtable->destroy(alloc);                                                       \
+#define allocator_destroy(alloc)                                                                             \
+    do {                                                                                                     \
+        if ((alloc) && (alloc)->vtable && (alloc)->vtable->destroy) (alloc)->vtable->destroy(alloc);         \
     } while (0)
 
 /* =========================================================================*/
@@ -219,8 +217,8 @@ allocator_t* str_create_tracking_allocator(allocator_t* base_allocator) {
     return allocator;
 }
 
-bool str_get_allocation_stats(allocator_t* allocator, size_t* total_allocated,
-                              size_t* current_allocated, size_t* allocation_count) {
+bool str_get_allocation_stats(allocator_t* allocator, size_t* total_allocated, size_t* current_allocated,
+                              size_t* allocation_count) {
     if (!allocator || allocator->vtable != &tracking_vtable) {
         return false;
     }
@@ -256,8 +254,7 @@ static void* arena_alloc(allocator_t* allocator, size_t size) {
 
     size = (size + 7) & ~7;
 
-    if (!state->current_block ||
-        (state->current_block->used + size > state->current_block->capacity)) {
+    if (!state->current_block || (state->current_block->used + size > state->current_block->capacity)) {
         size_t block_size = state->default_block_size;
         if (size > block_size) {
             block_size = size + sizeof(arena_block);
@@ -333,10 +330,9 @@ allocator_t* arena_allocator_create(size_t initial_size) {
         return NULL;
     }
 
-    *state =
-        (arena_state){.first_block        = NULL,
-                      .current_block      = NULL,
-                      .default_block_size = initial_size ? initial_size : ARENA_DEFAULT_BLOCK_SIZE};
+    *state = (arena_state){.first_block        = NULL,
+                           .current_block      = NULL,
+                           .default_block_size = initial_size ? initial_size : ARENA_DEFAULT_BLOCK_SIZE};
 
     *allocator = (allocator_t){.vtable = &arena_vtable, .user_data = state, .name = "arena"};
 
@@ -492,10 +488,8 @@ static str_result_t str_buf_grow(str_buf* buf, size_t required_capacity) {
 
 str_result_t str_buf_init(str_buf* buf, allocator_t* allocator) {
     if (!buf) return STR_ERR_NULL_PTR;
-    *buf = (str_buf){.data      = NULL,
-                     .size      = 0,
-                     .capacity  = 0,
-                     .allocator = allocator ? allocator : str_default_allocator()};
+    *buf = (str_buf){
+        .data = NULL, .size = 0, .capacity = 0, .allocator = allocator ? allocator : str_default_allocator()};
     return str_buf_grow(buf, 0);
 }
 
