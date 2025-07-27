@@ -226,6 +226,7 @@ void mw2(connection_t* conn) {
     pulsar_get_context_value(conn, "name", (void**)&value);
 
     assert(value);
+    printf("Hello: %s\n", value);
     free(value);
 }
 

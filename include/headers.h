@@ -78,6 +78,7 @@ static inline const char* headers_get(const headers_t* headers, const char* name
 // Clear all headers
 static inline void headers_clear(headers_t* headers) {
     headers->count = 0;
+    memset(headers->entries, 0, sizeof(headers->entries));
 }
 
 // Iterator

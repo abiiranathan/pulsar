@@ -6,19 +6,19 @@ ARCH := $(shell uname -m)
 BUILD ?= release
 
 # Compiler
-CC := gcc
+CC := clang
 
 DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
 
 # Base compiler flags
-BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -fPIC -Iinclude $(DEFINES) -Wno-unused-function
+BASE_CFLAGS := -Wall -Werror -Wextra -pedantic -std=c23 -fPIC -Iinclude $(DEFINES) -Wno-unused-function -Wno-gnu-zero-variadic-macro-arguments
 
 # Mode-specific flags and directories
 ifeq ($(BUILD),debug)
     CFLAGS := $(BASE_CFLAGS) -O0 -g3 -DDEBUG
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
-    CFLAGS := $(BASE_CFLAGS) -O3 -mtune=native -march=native -flto -mavx2
+    CFLAGS := $(BASE_CFLAGS) -O3 -g -mtune=native -march=native -flto -mavx2
     BUILD_DIR := build/release
 else
     $(error Invalid BUILD type: $(BUILD))

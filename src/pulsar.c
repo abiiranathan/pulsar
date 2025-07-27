@@ -237,18 +237,30 @@ static void install_signal_handler(void) {
  * ================================================================ */
 
 INLINE request_t* create_request(Arena* arena) {
+    // Allocate request structure.
     request_t* req = arena_alloc(arena, sizeof(request_t));
-    if (unlikely(!req)) return NULL;
+    if (!req) {
+        return NULL;
+    }
 
-    // Initialize request structure
-    memset(req, 0, sizeof(request_t));
-    req->path = NULL;
-
+    // Allocate request headers
     req->headers = headers_new(arena);
-    if (unlikely(!req->headers)) return NULL;
+    if (!req->headers) {
+        return NULL;
+    };
 
-    req->query_params = NULL;          // No query params initially
-    req->method_type  = HTTP_INVALID;  // Initial method is not valid
+    /* Allocate path */
+    req->path = arena_alloc(arena, MAX_PATH_LEN + 1);
+    if (!req->path) {
+        return NULL;
+    }
+
+    req->method[0]      = '\0';          // Init method to empty string.
+    req->method_type    = HTTP_INVALID;  // Initial method is not valid
+    req->content_length = 0;             // No content length.
+    req->body           = NULL;          /* Init body to NULL */
+    req->query_params   = NULL;          // No query params initially
+    req->route          = NULL;          // No matching route.
     return req;
 }
 
@@ -319,11 +331,9 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
 
 INLINE bool reset_connection(connection_t* conn) {
     conn->closing    = false;
-    conn->keep_alive = true;   // Default to Keep-Alive
-    conn->abort      = false;  // Connection not aborted
-    if (conn->request->body) {
-        free(conn->request->body);  // Free request body
-    }
+    conn->keep_alive = true;          // Default to Keep-Alive
+    conn->abort      = false;         // Connection not aborted
+    free(conn->request->body);        // Free request body.
     reset_response(&conn->response);  // Reset response buffer
     arena_reset(conn->arena);         // Reset arena and reuse.
 
@@ -380,14 +390,10 @@ INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* k
 
 // Send an error response during request processing.
 INLINE void send_error_response(connection_t* conn, http_status status) {
-    conn_set_status(conn, status);
+    const char* status_text = conn_set_status(conn, status);
     conn_set_content_type(conn, CONTENT_TYPE_PLAIN);
-
-    // use resp status code as it might have already been set.
-    const char* msg = http_status_text(conn->response->status_code);
-    conn_write_string(conn, msg);
+    conn_write_string(conn, status_text ? status_text : "Internal Server Error");
     finalize_response(conn, conn->request->method_type);
-
     conn->last_activity = time(NULL);
     // Switch to writing the response.
 }
@@ -577,33 +583,38 @@ size_t req_content_len(connection_t* conn) {
  * Response Handling Functions
  * ================================================================ */
 
-// Set HTTP status code and message
-void conn_set_status(connection_t* conn, http_status code) {
+// Fast integer to string conversion for 3-digit HTTP status codes
+static inline int format_status_code(char* restrict dest, int code) {
+    dest[0] = '0' + (code / 100);
+    dest[1] = '0' + ((code / 10) % 10);
+    dest[2] = '0' + (code % 10);
+    return 3;
+}
+
+#ifndef RESPONSE_STATUS_CAPACITY
+#define RESPONSE_STATUS_CAPACITY 64
+#endif
+
+const char* conn_set_status(connection_t* restrict conn, http_status code) {
     static_assert(RESPONSE_STATUS_CAPACITY >= 64, "Response status buffer must be at least 64 bytes");
 
-    // Validate status code (unlikely branch)
-    if (unlikely(code < StatusContinue || code > StatusNetworkAuthenticationRequired)) {
-        fprintf(stderr, "Invalid HTTP status code: %d\n", code);
-        exit(EXIT_FAILURE);
-    }
+    // Prefetch response and buffer
+    __builtin_prefetch(conn->response, 0, 3);          // Read prefetch for response
+    __builtin_prefetch(conn->response->buffer, 1, 3);  // Write prefetch for buffer
 
-    response_t* res  = conn->response;
+    const status_info_t* restrict status = get_http_status(code);
+    assert(status != NULL);
+
+    response_t* restrict res = conn->response;
+    assert(res->buffer != NULL);
+
     res->status_code = code;
-    char* dest       = (char*)(res->buffer + BUFFER_STATUS_OFFSET);
+    int written =
+        snprintf((char*)res->buffer, RESPONSE_STATUS_CAPACITY, "HTTP/1.1 %hu %s\r\n", code, status->text);
+    assert(written > 0 && written < RESPONSE_STATUS_CAPACITY);
+    res->status_len = written;
 
-    // Single snprintf call for the entire status line
-    const char* status_text = http_status_text(code);
-    int len = snprintf(dest, RESPONSE_STATUS_CAPACITY, "HTTP/1.1 %d %s\r\n", code, status_text);
-
-    // Safety check (should never trigger due to static_assert)
-    if (unlikely(len >= RESPONSE_STATUS_CAPACITY)) {
-        len           = RESPONSE_STATUS_CAPACITY - 2;
-        dest[len]     = '\r';
-        dest[len + 1] = '\n';
-        len += 2;
-    }
-
-    res->status_len = len;
+    return status->text;
 }
 
 // Get the value of a response header. Returns a dynamically allocated char* pointer or NULL
@@ -1154,13 +1165,6 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
     size_t headers_len = end_of_headers - conn->read_buf + 4;
 
-    // Allocate memory for path.
-    conn->request->path = arena_alloc(conn->arena, MAX_PATH_LEN + 1);
-    if (!conn->request->path) {
-        send_error_response(conn, StatusInternalServerError);
-        return;
-    }
-
     char http_protocol[16] = {};
     if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, conn->request->path, http_protocol) != 3) {
         send_error_response(conn, StatusBadRequest);
@@ -1173,12 +1177,11 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
         return;
     }
 
-    HttpMethod method = http_method_from_string(conn->request->method);
-    if (!METHOD_VALID(method)) {
+    conn->request->method_type = http_method_from_string(conn->request->method);
+    if (!METHOD_VALID(conn->request->method_type)) {
         send_error_response(conn, StatusMethodNotAllowed);
         return;
     }
-    conn->request->method_type = method;
 
     if (!parse_query_params(conn)) {
         send_error_response(conn, StatusInternalServerError);
@@ -1186,12 +1189,12 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
 
     // We need to parse the headers even for 404.
-    if (!parse_request_headers(conn, method, headers_len)) {
+    if (!parse_request_headers(conn, conn->request->method_type, headers_len)) {
         send_error_response(conn, StatusInternalServerError);
         return;
     };
 
-    route_t* route = route_match(conn->request->path, method);
+    route_t* route = route_match(conn->request->path, conn->request->method_type);
     if (route) {
         conn->request->route = route;
         if (!parse_request_body(conn, headers_len, read_bytes)) {
@@ -1209,10 +1212,10 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
         conn_notfound(conn);
     }
 
-    finalize_response(conn, method);
+    finalize_response(conn, conn->request->method_type);
 
-    conn->last_activity = time(NULL);
     // Switch to writing response.
+    conn->last_activity = time(NULL);
 }
 
 /* ================================================================

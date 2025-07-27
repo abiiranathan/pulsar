@@ -161,12 +161,13 @@ void conn_set_content_type(connection_t* conn, const char* content_type);
 void conn_writeheader(connection_t* conn, const char* name, const char* value);
 
 /**
- * @brief Sets the HTTP response status
+ * @brief Sets the HTTP response status and returns the status text.
  *
  * @param conn The connection object
  * @param code HTTP status code
+ * @return const char* Status text or NULL if invalid status code.
  */
-void conn_set_status(connection_t* conn, http_status code);
+const char* conn_set_status(connection_t* conn, http_status code);
 
 /**
  * @brief Gets a query parameter value
