@@ -163,7 +163,7 @@ INLINE_FUNC const status_info_t* get_http_status(http_status code) {
         return NULL;
     }
     const status_info_t* info = &status_info[code - STATUS_MIN];
-    return info->text ? info : NULL;  // Check if slot is populated
+    return info->text ? info : &status_info[100];  // default to 200 OK if invalid.
 }
 
 INLINE_FUNC bool http_status_valid(http_status code) {

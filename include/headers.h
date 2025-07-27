@@ -24,7 +24,7 @@ typedef struct {
 } headers_t;
 
 // Initialize headers
-static inline headers_t* headers_new(Arena* arena) {
+INLINE headers_t* headers_new(Arena* arena) {
     headers_t* headers = arena_alloc(arena, sizeof(headers_t));
     if (unlikely(!headers)) return NULL;
 
@@ -34,7 +34,7 @@ static inline headers_t* headers_new(Arena* arena) {
 }
 
 // Set a header (case-insensitive)
-static inline bool headers_set(headers_t* headers, const char* name, const char* value) {
+INLINE bool headers_set(headers_t* headers, const char* name, const char* value) {
     if (unlikely(headers->count >= HEADERS_CAPACITY)) return false;
 
     // Check if header already exists (update if found)
@@ -66,7 +66,7 @@ new_header:
 }
 
 // Get a header (case-insensitive)
-static inline const char* headers_get(const headers_t* headers, const char* name) {
+INLINE const char* headers_get(const headers_t* headers, const char* name) {
     for (size_t i = 0; i < headers->count; i++) {
         if (strcasecmp(headers->entries[i].name, name) == 0) {
             return headers->entries[i].value;
@@ -76,7 +76,7 @@ static inline const char* headers_get(const headers_t* headers, const char* name
 }
 
 // Clear all headers
-static inline void headers_clear(headers_t* headers) {
+INLINE void headers_clear(headers_t* headers) {
     headers->count = 0;
     memset(headers->entries, 0, sizeof(headers->entries));
 }

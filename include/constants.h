@@ -43,6 +43,11 @@
 #define WRITE_BUFFER_SIZE 8192
 #endif
 
+// Amount of memory to allocate for small buffer size
+#ifndef SMALL_BUFFER_SIZE
+#define SMALL_BUFFER_SIZE 512
+#endif
+
 // Keep-Alive connection timeout in seconds
 #ifndef CONNECTION_TIMEOUT
 #define CONNECTION_TIMEOUT 30

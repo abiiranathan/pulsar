@@ -63,11 +63,15 @@ const char* CRLF = "\r\n";
 // HTTP Response structure
 typedef struct response_t {
     http_status status_code;  // HTTP status code.
-    uint8_t* buffer;          // Single response buffer: [STATUS | HEADERS | BODY]
-    uint32_t buffer_size;     // / Total size of the response buffer (supports up to 4GB)
-    uint32_t status_len;      // Actual length of status line
-    uint32_t headers_len;     // Actual length of headers
-    uint32_t body_len;        // Actual length of body
+
+    // Single heap-allocated buffer: [STATUS | HEADERS | BODY]
+    alignas(32) uint8_t* buffer;
+
+    uint32_t buffer_size;  // / Total size of the response buffer (supports up to 4GB)
+    uint32_t status_len;   // Actual length of status line
+    uint32_t headers_len;  // Actual length of headers
+    uint32_t body_len;     // Actual length of body
+    uint32_t flags;        // 4 bytes for all flags.
 
     uint32_t status_sent;   // Bytes of status line sent
     uint32_t headers_sent;  // Bytes of headers sent
@@ -76,9 +80,7 @@ typedef struct response_t {
     uint32_t file_size;    // Size of file to send (if applicable)
     uint32_t file_offset;  // Offset in file for sendfile
     uint32_t max_range;    // Maximum range of requested bytes in range request.
-
-    int file_fd;    // File descriptor for file to send (if applicable)
-    uint8_t flags;  // 1 byte for all flags.
+    int file_fd;           // File descriptor for file to send (if applicable)
 } response_t;
 
 // HTTP Request structure
@@ -264,15 +266,17 @@ INLINE request_t* create_request(Arena* arena) {
     return req;
 }
 
-INLINE response_t* create_response() {
-    response_t* resp = malloc(sizeof(response_t));
-    if (!resp) return NULL;
+INLINE response_t* create_response(Arena* arena) {
+    // Allocate response structure in arena
+    response_t* resp = arena_alloc(arena, sizeof(response_t));
+    if (!resp) {
+        return NULL;
+    }
     memset(resp, 0, sizeof(*resp));
 
-    // Allocate a a resizble buffer for the response.
+    // Allocate buffer in arena
     resp->buffer = aligned_alloc(CACHE_LINE_SIZE, WRITE_BUFFER_SIZE);
     if (!resp->buffer) {
-        free(resp);
         return NULL;
     }
     memset(resp->buffer, 0, WRITE_BUFFER_SIZE);
@@ -292,7 +296,7 @@ INLINE void free_request(request_t* req) {
     }
 }
 
-// Free response buffer and dynmically allocated response itself.
+// Free response buffer. response it-self is arena-allocated.
 INLINE void free_response(response_t* resp) {
     if (!resp) return;
 
@@ -300,13 +304,6 @@ INLINE void free_response(response_t* resp) {
         free(resp->buffer);
         resp->buffer = NULL;
     }
-    free(resp);
-}
-
-INLINE void reset_response(response_t** resp) {
-    free((*resp)->buffer);
-    free(*resp);
-    *resp = create_response();
 }
 
 INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
@@ -316,7 +313,7 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->in_keep_alive = false;
     conn->abort         = false;
     conn->last_activity = time(NULL);
-    conn->response      = create_response();
+    conn->response      = create_response(arena);
     conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
     conn->request       = create_request(arena);
     conn->arena         = arena;
@@ -331,16 +328,21 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
 
 INLINE bool reset_connection(connection_t* conn) {
     conn->closing    = false;
-    conn->keep_alive = true;          // Default to Keep-Alive
-    conn->abort      = false;         // Connection not aborted
-    free(conn->request->body);        // Free request body.
-    reset_response(&conn->response);  // Reset response buffer
-    arena_reset(conn->arena);         // Reset arena and reuse.
+    conn->keep_alive = true;    // Default to Keep-Alive
+    conn->abort      = false;   // Connection not aborted
+    free(conn->request->body);  // Free request body.
+
+    // Reset response buffer
+    if (conn->response->buffer) {
+        free(conn->response->buffer);
+    }
+    arena_reset(conn->arena);  // Reset arena and reuse.
 
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
     conn->request  = create_request(conn->arena);
+    conn->response = create_response(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
 
     hashmap_clear(conn->locals);
@@ -390,9 +392,9 @@ INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* k
 
 // Send an error response during request processing.
 INLINE void send_error_response(connection_t* conn, http_status status) {
-    const char* status_text = conn_set_status(conn, status);
+    const char* status_text = conn_set_status(conn, status);  // is non-NULL.
     conn_set_content_type(conn, CONTENT_TYPE_PLAIN);
-    conn_write_string(conn, status_text ? status_text : "Internal Server Error");
+    conn_write_string(conn, status_text);
     finalize_response(conn, conn->request->method_type);
     conn->last_activity = time(NULL);
     // Switch to writing the response.
@@ -598,22 +600,13 @@ static inline int format_status_code(char* restrict dest, int code) {
 const char* conn_set_status(connection_t* restrict conn, http_status code) {
     static_assert(RESPONSE_STATUS_CAPACITY >= 64, "Response status buffer must be at least 64 bytes");
 
-    // Prefetch response and buffer
-    __builtin_prefetch(conn->response, 0, 3);          // Read prefetch for response
-    __builtin_prefetch(conn->response->buffer, 1, 3);  // Write prefetch for buffer
-
     const status_info_t* restrict status = get_http_status(code);
-    assert(status != NULL);
-
-    response_t* restrict res = conn->response;
-    assert(res->buffer != NULL);
-
-    res->status_code = code;
+    response_t* restrict res             = conn->response;
+    res->status_code                     = code;
     int written =
         snprintf((char*)res->buffer, RESPONSE_STATUS_CAPACITY, "HTTP/1.1 %hu %s\r\n", code, status->text);
     assert(written > 0 && written < RESPONSE_STATUS_CAPACITY);
     res->status_len = written;
-
     return status->text;
 }
 
@@ -691,25 +684,11 @@ __attribute__((hot, flatten, always_inline)) static inline void conn_writeheader
         return;
     }
 
-    uint8_t* dest = res->buffer + BUFFER_HEADERS_OFFSET + current_len;
-
-    // Bulk copy name
-    __builtin_memcpy(dest, name, name_len);
-    dest += name_len;
-
-    // Write separator as 16-bit store (": ")
-    *(uint16_t*)dest = 0x203A;  // ':' | (' ' << 8) in little-endian
-    dest += 2;
-
-    // Bulk copy value
-    __builtin_memcpy(dest, value, value_len);
-    dest += value_len;
-
-    // Write CRLF as 16-bit store ("\r\n")
-    *(uint16_t*)dest = 0x0A0D;  // '\r' | ('\n' << 8) in little-endian
+    char* dest = (char*)res->buffer + BUFFER_HEADERS_OFFSET + current_len;
+    snprintf(dest, RESPONSE_HEADER_CAPACITY - required_len, "%s: %s\r\n", name, value);
 
     // Single update to headers_len
-    res->headers_len = current_len + required_len;
+    res->headers_len += required_len;
 }
 
 __attribute__((hot, flatten)) void conn_writeheader(connection_t* conn, const char* name, const char* value) {
@@ -754,14 +733,15 @@ INLINE size_t grow_buffer(size_t current_size, size_t required) {
 }
 
 int conn_write(connection_t* conn, const void* data, size_t len) {
-    response_t* res = conn->response;
-    size_t required = BUFFER_BODY_OFFSET + res->body_len + len;
+    response_t* res         = conn->response;
+    size_t current_body_len = res->body_len;
+    size_t required         = BUFFER_BODY_OFFSET + current_body_len + len;
 
     if (required > res->buffer_size) {
         size_t new_size = grow_buffer(res->buffer_size, required);
         if (new_size == 0) {
             fprintf(stderr, "Failed to grow response buffer\n");
-            return 0;  // Failed to allocate more memory
+            return 0;
         }
 
         unsigned char* new_buffer = realloc(res->buffer, new_size);
@@ -774,9 +754,16 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
         res->buffer_size = new_size;
     }
 
-    // Append data
-    memcpy(res->buffer + BUFFER_BODY_OFFSET + res->body_len, data, len);
-    res->body_len += len;
+    uint8_t* restrict dst = res->buffer + BUFFER_BODY_OFFSET + current_body_len;
+    if (((uintptr_t)dst | (uintptr_t)data) & 31) {
+        // Unaligned path - let memcpy handle it
+        memcpy(dst, data, len);
+    } else {
+        // Aligned path - compiler can use aligned instructions
+        memcpy(__builtin_assume_aligned(dst, 32), __builtin_assume_aligned(data, 32), len);
+    }
+
+    res->body_len = current_body_len + len;
     return len;
 }
 
@@ -1204,6 +1191,10 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
 
     if (route) {
+        // Prefetch response and buffer
+        __builtin_prefetch(conn->response, 0, 3);          // Read prefetch for response
+        __builtin_prefetch(conn->response->buffer, 1, 3);  // Write prefetch for buffer
+
         execute_all_middleware(conn, route);
         if (!conn->abort) {
             route->handler(conn);

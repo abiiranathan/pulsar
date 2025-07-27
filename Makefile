@@ -6,7 +6,7 @@ ARCH := $(shell uname -m)
 BUILD ?= release
 
 # Compiler
-CC := clang
+CC := gcc
 
 DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
 
