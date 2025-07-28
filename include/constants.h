@@ -32,12 +32,12 @@
 #define MAX_EVENTS 2048
 #endif
 
-// Buffer size for incoming statusline + headers.
+// Buffer size for incoming request excluding body.
 #ifndef READ_BUFFER_SIZE
 #define READ_BUFFER_SIZE 2048
 #endif
 
-// Default buffer size for body.
+// Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
 #ifndef WRITE_BUFFER_SIZE
 #define WRITE_BUFFER_SIZE 4096
 #endif
@@ -48,30 +48,26 @@
 #define STACK_BUFFER_SIZE 1024
 #endif
 
-// Amount of memory to allocate for small buffer size
-#ifndef SMALL_BUFFER_SIZE
-#define SMALL_BUFFER_SIZE 512
-#endif
-
-// Keep-Alive connection timeout in seconds
+// Keep-Alive connection timeout in seconds.
 #ifndef CONNECTION_TIMEOUT
 #define CONNECTION_TIMEOUT 30
 #endif
 
 // Max Request body allowed. Default 2 MB
+// You need to increase this to allow large file uploads.
 #ifndef MAX_BODY_SIZE
 #define MAX_BODY_SIZE (2 << 20)
 #endif
 
 /**
  * @def MAX_FILE_SIZE
- * @brief Maximum allowed file size (25KB default)
+ * @brief Maximum allowed file size (25KB default) in multipart forms.
  */
 #ifndef MAX_FILE_SIZE
 #define MAX_FILE_SIZE (25 * 1024)
 #endif
 
-// Maximum number of routes to statically allocated for.
+// Maximum number of routes to support.
 #ifndef MAX_ROUTES
 #define MAX_ROUTES 64
 #endif
@@ -93,11 +89,12 @@
 
 // Timeout in seconds for graceful shutdown on SIGINT/SIGTERM before forceful shutdown.
 #ifndef SHUTDOWN_TIMEOUT_SECONDS
-#define SHUTDOWN_TIMEOUT_SECONDS 10
+#define SHUTDOWN_TIMEOUT_SECONDS 5
 #endif
 
+// Maximum number of connection context variables set by the user.
 #ifndef LOCALS_CAPACITY
-#define LOCALS_CAPACITY 64
+#define LOCALS_CAPACITY 32
 #endif
 
 CHECK_POWER_OF_2(LOCALS_CAPACITY);

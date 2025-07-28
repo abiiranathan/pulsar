@@ -23,13 +23,6 @@
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
 
-// Flag bit definitions
-#define HTTP_CONTENT_TYPE_SET 0x01
-#define HTTP_HEADERS_WRITTEN  0x02
-#define HTTP_RANGE_REQUEST    0x04
-#define HTTP_FILE_RESPONSE    0x08
-
-// Buffer segment offsets (fixed positions)
 #define STATUS_LINE_SIZE     64
 #define HEADERS_BUF_SIZE     4096
 #define CACHE_LINE_SIZE      64
@@ -41,17 +34,19 @@
 static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
 static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
 
-// Getters - check if flag is set
-#define HTTP_HAS_CONTENT_TYPE(flags)    (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
-#define HTTP_HAS_HEADERS_WRITTEN(flags) (((flags) & HTTP_HEADERS_WRITTEN) != 0)
-#define HTTP_HAS_RANGE_REQUEST(flags)   (((flags) & HTTP_RANGE_REQUEST) != 0)
-#define HTTP_HAS_FILE_RESPONSE(flags)   (((flags) & HTTP_FILE_RESPONSE) != 0)
+// Flag bit definitions
+typedef enum : uint8_t {
+    HTTP_CONTENT_TYPE_SET = (1 << 0),  // 0x01 (1)
+    HTTP_HEADERS_WRITTEN  = (1 << 1),  // 0x02 (2)
+    HTTP_RANGE_REQUEST    = (1 << 2),  // 0x04 (4)
+} bit_flags;
 
-// Setters - set flag bits
-#define HTTP_SET_CONTENT_TYPE(flags)    ((flags) |= HTTP_CONTENT_TYPE_SET)
-#define HTTP_SET_HEADERS_WRITTEN(flags) ((flags) |= HTTP_HEADERS_WRITTEN)
-#define HTTP_SET_RANGE_REQUEST(flags)   ((flags) |= HTTP_RANGE_REQUEST)
-#define HTTP_SET_FILE_RESPONSE(flags)   ((flags) |= HTTP_FILE_RESPONSE)
+#define HAS_CONTENT_TYPE(flags)    (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
+#define HAS_HEADERS_WRITTEN(flags) (((flags) & HTTP_HEADERS_WRITTEN) != 0)
+#define HAS_RANGE_REQUEST(flags)   (((flags) & HTTP_RANGE_REQUEST) != 0)
+#define SET_CONTENT_TYPE(flags)    ((flags) |= HTTP_CONTENT_TYPE_SET)
+#define SET_HEADERS_WRITTEN(flags) ((flags) |= HTTP_HEADERS_WRITTEN)
+#define SET_RANGE_REQUEST(flags)   ((flags) |= HTTP_RANGE_REQUEST)
 
 /* ================================================================
  * Data Structures and Type Definitions
@@ -59,7 +54,7 @@ static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
 const char* CRLF = "\r\n";
 
 // HTTP Response structure
-typedef struct response_t {
+typedef struct __attribute__((aligned(64))) response_t {
     http_status status_code;             // HTTP status code.
     char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
     char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.
@@ -92,7 +87,7 @@ typedef struct response_t {
 } response_t;
 
 // HTTP Request structure
-typedef struct request_t {
+typedef struct __attribute__((aligned(64))) request_t {
     char* path;               // Request path (arena allocated)
     char method[8];           // HTTP method (GET, POST etc.)
     HttpMethod method_type;   // MethodType Enum
@@ -104,7 +99,7 @@ typedef struct request_t {
 } request_t;
 
 // Connection state structure
-typedef struct connection_t {
+typedef struct __attribute__((aligned(64))) connection_t {
     bool closing;                     // Server closing because of an error.
     bool keep_alive;                  // Keep-alive flag
     bool abort;                       // Abort handler/middleware processing
@@ -125,13 +120,13 @@ typedef struct connection_t {
     connection_t* prev;
 } connection_t;
 
-typedef struct KeepAliveState {
+typedef struct __attribute__((aligned(64))) KeepAliveState {
     connection_t* head;
     connection_t* tail;
     size_t count;
 } KeepAliveState;
 
-typedef struct {
+typedef struct __attribute__((aligned(64))) {
     connection_t* free_connections[MAX_FREE_CONNECTIONS];
     size_t count;
     size_t worker_id;
@@ -683,12 +678,12 @@ __attribute__((hot, flatten)) void conn_writeheader(connection_t* conn, const ch
 }
 
 void conn_set_content_type(connection_t* conn, const char* content_type) {
-    if (HTTP_HAS_CONTENT_TYPE(conn->response->flags)) {
+    if (HAS_CONTENT_TYPE(conn->response->flags)) {
         return;
     }
 
     conn_writeheader(conn, "Content-Type", content_type);
-    HTTP_SET_CONTENT_TYPE(conn->response->flags);
+    SET_CONTENT_TYPE(conn->response->flags);
 }
 
 int conn_write(connection_t* conn, const void* data, size_t len) {
@@ -894,7 +889,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
     conn_writeheader(conn, "Last-Modified", time_buf);
 
     // Set mime type if not already set
-    if (!HTTP_HAS_CONTENT_TYPE(conn->response->flags)) {
+    if (!HAS_CONTENT_TYPE(conn->response->flags)) {
         const char* mimetype = get_mimetype((char*)filename);
         conn_set_content_type(conn, mimetype);
     }
@@ -929,7 +924,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
         conn->response->file_offset = start_offset;
         conn->response->file_size   = stat_buf.st_size;
         conn->response->max_range   = end_offset - start_offset + 1;
-        HTTP_SET_RANGE_REQUEST(conn->response->flags);
+        SET_RANGE_REQUEST(conn->response->flags);
     }
 
     return true;
@@ -941,7 +936,7 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     if (resp->status_len == 0) conn_set_status(conn, StatusOK);
 
     // If range request flag is not set, set content-length.
-    if (likely(!HTTP_HAS_RANGE_REQUEST(resp->flags))) {
+    if (likely(!HAS_RANGE_REQUEST(resp->flags))) {
         size_t content_length = resp->body_len;
         char content_length_str[32];
 
@@ -1434,7 +1429,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
         bool complete = false;
 
         if (sending_file) {
-            if (!HTTP_HAS_HEADERS_WRITTEN(res->flags)) {
+            if (!HAS_HEADERS_WRITTEN(res->flags)) {
                 // Send headers.
                 struct iovec iov[2];
                 iov[0].iov_base = res->status_buf + res->status_sent;
@@ -1445,32 +1440,64 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
                 sent = writev(client_fd, iov, 2);
                 if (unlikely(sent < 0)) goto handle_error;
 
+                // Handle zero bytes sent (socket buffer full)
+                if (sent == 0) {
+                    // Socket buffer is full, wait for next EPOLLOUT event
+                    return;
+                }
+
                 // Branchless update of sent counts
                 size_t status_part = MIN((size_t)sent, iov[0].iov_len);
                 res->status_sent += status_part;
                 res->headers_sent += sent - status_part;
 
                 if (res->status_sent == res->status_len && res->headers_sent == res->headers_len) {
-                    HTTP_SET_HEADERS_WRITTEN(res->flags);
+                    SET_HEADERS_WRITTEN(res->flags);
                 }
                 continue;
             }
 
             // File data transfer
-            off_t chunk_size = HTTP_HAS_RANGE_REQUEST(res->flags) ? MIN(1 << 20, res->max_range)
-                                                                  : res->file_size - res->file_offset;
+            off_t remaining_file = res->file_size - res->file_offset;
+            if (remaining_file <= 0) {
+                complete = true;
+            } else {
+                off_t chunk_size =
+                    HAS_RANGE_REQUEST(res->flags) ? (off_t)MIN(1 << 20, remaining_file) : remaining_file;
 
 #ifdef __linux__
-            // Use zero-copy sendfile if available
-            sent = sendfile(client_fd, res->file_fd, (off_t*)&res->file_offset, chunk_size);
+                // Use zero-copy sendfile if available
+                off_t offset = res->file_offset;
+                sent         = sendfile(client_fd, res->file_fd, &offset, chunk_size);
+                if (sent > 0) {
+                    res->file_offset = offset;
+                }
 #else
-            // Fallback for non-Linux systems
-            sent = write(conn->client_fd, res->buffer + res->file_offset, chunk_size);
-            if (sent > 0) res->file_offset += sent;
-#endif
-            if (unlikely(sent < 0)) goto handle_error;
+                // Fallback for non-Linux systems - need to read from file first
+                static thread_local char file_buffer[1 << 20];  // 1MB buffer
+                chunk_size = MIN(chunk_size, sizeof(file_buffer));
 
-            complete = (res->file_offset == res->file_size);
+                ssize_t read_bytes = pread(res->file_fd, file_buffer, chunk_size, res->file_offset);
+                if (read_bytes <= 0) {
+                    sent  = -1;
+                    errno = EIO;
+                } else {
+                    sent = write(client_fd, file_buffer, read_bytes);
+                    if (sent > 0) {
+                        res->file_offset += sent;
+                    }
+                }
+#endif
+                if (unlikely(sent < 0)) goto handle_error;
+
+                // Handle zero bytes sent (socket buffer full)
+                if (sent == 0) {
+                    // Socket buffer is full, wait for next EPOLLOUT event
+                    return;
+                }
+
+                complete = (res->file_offset >= res->file_size);
+            }
         } else {
             // Normal buffer mode with optimized iovec setup
             struct iovec iov[3];
@@ -1484,6 +1511,12 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
 
             sent = writev(client_fd, iov, 3);
             if (unlikely(sent < 0)) goto handle_error;
+
+            // Handle zero bytes sent (socket buffer full)
+            if (sent == 0) {
+                // Socket buffer is full, wait for next EPOLLOUT event
+                return;
+            }
 
             // Update sent counts.
             size_t remaining = sent;
