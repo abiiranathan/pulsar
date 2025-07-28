@@ -113,8 +113,7 @@ typedef struct __attribute__((aligned(64))) connection_t {
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
 #endif
-    hashmap_t* locals;  // Per-request context variables set by the user.
-
+    Locals* locals;  // Per-request context variables set by the user.
     // Linked List nodes.
     connection_t* next;
     connection_t* prev;
@@ -140,6 +139,7 @@ static volatile sig_atomic_t server_running                 = 1;     // Server r
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
 static size_t global_mw_count                               = 0;     // Global middleware count
 static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
+static LocalsCreateCallback localsCreateCallback            = NULL;
 
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
 INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state,
@@ -314,10 +314,12 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
-    conn->locals = hashmap_create();
+
+    // Create locals or set to NULL.
+    conn->locals = localsCreateCallback ? localsCreateCallback() : NULL;
     conn->next   = NULL;
     conn->prev   = NULL;
-    return (conn->request && conn->response && conn->locals);
+    return (conn->request && conn->response);
 }
 
 INLINE bool reset_connection(connection_t* conn) {
@@ -339,7 +341,9 @@ INLINE bool reset_connection(connection_t* conn) {
     conn->response    = create_response(conn->arena);
     conn->read_buf[0] = '\0';
 
-    hashmap_clear(conn->locals);
+    if (conn->locals) {
+        LocalsReset(conn->locals);
+    }
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
@@ -353,7 +357,7 @@ INLINE void free_connection_resources(connection_t* conn) {
     free_request(conn->request);
     free_response(conn->response);
     if (conn->arena) arena_destroy(conn->arena);
-    if (conn->locals) hashmap_destroy(conn->locals);
+    if (conn->locals) LocalsDestroy(conn->locals);
     free(conn);
 }
 
@@ -1107,26 +1111,22 @@ void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
+void pulsar_set_locals_callback(LocalsCreateCallback callback) {
+    localsCreateCallback = callback;
+}
+
 // Set the context value by key.
-void pulsar_set_context_value(connection_t* conn, const char* key, void* value) {
-    if (!conn) return;
-    hashmap_error_t code;
-    code = hashmap_put(conn->locals, key, value);
-    if (code != HASHMAP_OK) {
-        fprintf(stderr, "pulsar_set_value failed: %s\n", hashmap_error_string(code));
-    }
+bool pulsar_set_context_value(connection_t* conn, const char* key, void* value) {
+    if (!conn || !conn->locals) return false;
+    return LocalsSetValue(conn->locals, key, value);
 }
 
 // Get a context value. The user controlled value is written to value.
 // Its your responsibility to free it if no longer required.
-void pulsar_get_context_value(connection_t* conn, const char* key, void** value) {
-    if (!conn) return;
+void* pulsar_get_context_value(connection_t* conn, const char* key) {
+    if (!conn || !conn->locals) return NULL;
 
-    hashmap_error_t code;
-    code = hashmap_get(conn->locals, key, value);
-    if (code != HASHMAP_OK) {
-        fprintf(stderr, "pulsar_get_value failed: %s\n", hashmap_error_string(code));
-    }
+    return LocalsGetValue(conn->locals, key);
 }
 
 // Support for dynamic sscanf string size.
@@ -1420,9 +1420,11 @@ INLINE void request_complete(connection_t* conn) {
 #endif
 
 INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state) {
+    __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
+
     response_t* res         = conn->response;
-    const bool sending_file = res->file_fd > 0 && res->file_size > 0;
     int client_fd           = conn->client_fd;
+    const bool sending_file = res->file_fd > 0 && res->file_size > 0;
 
     while (1) {
         ssize_t sent  = 0;

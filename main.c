@@ -223,24 +223,43 @@ void pulsar_callback(connection_t* conn, uint64_t total_ns) {
     write(STDOUT_FILENO, log_buffer, ptr - log_buffer);
 }
 
+// The callback function to free context values.
+static void value_free_func(const char* key, void* value, void* user_data) {
+    UNUSED(user_data);
+
+    if (strcmp(key, "PULSAR") == 0) {
+        free(value);
+    }
+}
+
+// Setting request context.
+// We create a Locals map creation factory function and set it.
+Locals* locals_create_factory(void) {
+    Locals* locals = LocalsNew(value_free_func, NULL);
+    ASSERT(locals);
+    return locals;
+}
+
 void mw1(connection_t* conn) {
-    // Pass context to mw2.
-    char* value = strdup("PULSAR");
+    char* value = strdup("PULSAR");  // value dynamically allocated.
     if (value) {
         pulsar_set_context_value(conn, "name", value);
+        // printf("Set value in context as: %s\n", value);
     }
 }
 
 void mw2(connection_t* conn) {
-    char* value = NULL;
-    pulsar_get_context_value(conn, "name", (void**)&value);
-
+    // value retrieved from context.
+    char* value = pulsar_get_context_value(conn, "name");
     assert(value);
-    printf("Hello: %s\n", value);
-    free(value);
+    // printf("Hello: %s\n", value);
 }
 
 int main() {
+    // set local context map creation callback.
+    pulsar_set_locals_callback(locals_create_factory);
+
+    // Set post-request callback handler.
     pulsar_set_callback(pulsar_callback);
 
     // Register routes using the new API
