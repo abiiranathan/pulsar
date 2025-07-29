@@ -2,6 +2,7 @@
 #define CONSTANTS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 // Include helper macros
 #include "macros.h"
@@ -58,10 +59,10 @@
 #define CONNECTION_TIMEOUT 30
 #endif
 
-// Max Request body allowed. Default 2 MB
+// Max Request body allowed. Default 10 MB
 // You need to increase this to allow large file uploads.
 #ifndef MAX_BODY_SIZE
-#define MAX_BODY_SIZE (2 << 20)
+#define MAX_BODY_SIZE (10 << 20)
 #endif
 
 /**
@@ -74,17 +75,17 @@
 
 // Maximum number of routes to support.
 #ifndef MAX_ROUTES
-#define MAX_ROUTES 64
+#define MAX_ROUTES 128
 #endif
 
 // Maximum number of global middleware
 #ifndef MAX_GLOBAL_MIDDLEWARE
-#define MAX_GLOBAL_MIDDLEWARE 32
+#define MAX_GLOBAL_MIDDLEWARE 16
 #endif
 
 // Maximum number of route middleware
 #ifndef MAX_ROUTE_MIDDLEWARE
-#define MAX_ROUTE_MIDDLEWARE 4
+#define MAX_ROUTE_MIDDLEWARE 2
 #endif
 
 // Maximum number of headers in a request.
@@ -107,9 +108,18 @@
 #define LOCALS_KEY_CAPACITY 16
 #endif
 
-static_assert(LOCALS_KEY_CAPACITY >= 4);
+// Constants
+#define STATUS_LINE_SIZE 128
+#define HEADERS_BUF_SIZE 2048
+#define CACHE_LINE_SIZE  64
 
 // Assertions for all constants
+
+// Make sure they fit in uint8_t and uint16_t
+static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
+static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
+static_assert(LOCALS_KEY_CAPACITY >= 4);
+
 static_assert(ARENA_CAPACITY > 4 * 1024, "ARENA_CAPACITY must be > 4KB");
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");

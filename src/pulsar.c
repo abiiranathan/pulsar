@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <assert.h>
 #include <fcntl.h>
 #include <malloc.h>
 #include <netdb.h>
@@ -8,7 +7,6 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -22,10 +20,6 @@
 #include "../include/method.h"
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
-
-#define STATUS_LINE_SIZE 64
-#define HEADERS_BUF_SIZE 4096
-#define CACHE_LINE_SIZE  64
 
 // Make sure they fit in uint8_t and uint16_t
 static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
