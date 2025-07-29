@@ -1,6 +1,5 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <malloc.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -15,6 +14,10 @@
 #if defined(__FreeBSD__)
 #include <sys/cpuset.h>
 #include <sys/param.h>
+#endif
+
+#if defined(__linux__)
+#include <malloc.h>
 #endif
 
 #include "../include/method.h"
@@ -183,8 +186,10 @@ INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epo
         current = next;
     }
 
+#if defined(__linux__)
     // Release memory to OS
     malloc_trim(0);
+#endif
 }
 
 // Signal handler for graceful shutdown.
