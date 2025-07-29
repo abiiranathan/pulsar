@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/uio.h>
 
 // Platform-specific includes
@@ -20,12 +21,8 @@
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #elif defined(__APPLE__) || defined(__FreeBSD__)
-#include <sys/event.h>
-#include <sys/sendfile.h>
-#endif
-
-#if defined(__FreeBSD__)
 #include <sys/cpuset.h>
+#include <sys/event.h>
 #include <sys/param.h>
 #endif
 
