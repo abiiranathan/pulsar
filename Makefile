@@ -6,6 +6,8 @@ ARCH := $(shell uname -m)
 BUILD ?= release
 
 # Compiler
+# use aarch64-linux-gnu-gcc for cross compilation
+# On Arch: yay -S aarch64-linux-gnu-gcc
 CC := gcc
 
 DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
