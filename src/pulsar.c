@@ -1,3 +1,8 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#define _FILE_OFFSET_BITS 64
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -6,23 +11,53 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <sys/epoll.h>
-#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+
+// Platform-specific includes
+#if defined(__linux__)
+#include <malloc.h>
+#include <sys/epoll.h>
+#include <sys/sendfile.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/event.h>
+#include <sys/sendfile.h>
+#endif
 
 #if defined(__FreeBSD__)
 #include <sys/cpuset.h>
 #include <sys/param.h>
 #endif
 
-#if defined(__linux__)
-#include <malloc.h>
-#endif
-
 #include "../include/method.h"
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
+
+// Platform abstraction macros
+#if defined(__linux__)
+#define USE_EPOLL  1
+#define USE_KQUEUE 0
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+#define USE_EPOLL  0
+#define USE_KQUEUE 1
+#else
+#error "Unsupported platform"
+#endif
+
+// Event system abstraction
+#if USE_EPOLL
+typedef struct epoll_event event_t;
+#define EVENT_READ           EPOLLIN
+#define EVENT_WRITE          EPOLLOUT
+#define EVENT_ERROR          (EPOLLERR | EPOLLHUP | EPOLLRDHUP)
+#define EVENT_EDGE_TRIGGERED EPOLLET
+#elif USE_KQUEUE
+typedef struct kevent event_t;
+#define EVENT_READ           EVFILT_READ
+#define EVENT_WRITE          EVFILT_WRITE
+#define EVENT_ERROR          0  // kqueue handles errors differently
+#define EVENT_EDGE_TRIGGERED EV_CLEAR
+#endif
 
 typedef enum : uint8_t {
     HTTP_CONTENT_TYPE_SET = (1 << 0),  // 0x01 (1)
@@ -58,7 +93,7 @@ typedef struct __attribute__((aligned(64))) response_t {
     uint8_t status_len;    // Actual length of status line
     uint8_t flags;         // 4 bytes for all flags.
 
-    // EPOLL OUT retry state.
+    // Event retry state.
     uint8_t status_sent;    // Bytes of status line sent
     uint16_t headers_sent;  // Bytes of headers sent
     size_t body_sent;       // Bytes of body sent
@@ -111,7 +146,157 @@ typedef struct __attribute__((aligned(64))) KeepAliveState {
 } KeepAliveState;
 
 /* ================================================================
- * Global Variables and Constants
+ * Event System Abstraction Functions
+ * ================================================================ */
+
+// Create event queue (epoll_fd or kqueue)
+INLINE int event_queue_create() {
+#if USE_EPOLL
+    return epoll_create1(0);
+#elif USE_KQUEUE
+    return kqueue();
+#endif
+}
+
+// Add file descriptor to event queue for reading
+INLINE int event_add_read(int queue_fd, int fd, void* data) {
+#if USE_EPOLL
+    struct epoll_event event;
+    event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.data.ptr = data;
+    return epoll_ctl(queue_fd, EPOLL_CTL_ADD, fd, &event);
+#elif USE_KQUEUE
+    struct kevent event;
+    EV_SET(&event, fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, data);
+    return kevent(queue_fd, &event, 1, NULL, 0, NULL);
+#endif
+}
+
+// Modify file descriptor to write mode
+INLINE int event_mod_write(int queue_fd, int fd, void* data) {
+#if USE_EPOLL
+    struct epoll_event event;
+    event.events   = EPOLLOUT | EPOLLET;
+    event.data.ptr = data;
+    return epoll_ctl(queue_fd, EPOLL_CTL_MOD, fd, &event);
+#elif USE_KQUEUE
+    struct kevent events[2];
+    // Disable read events and enable write events
+    EV_SET(&events[0], fd, EVFILT_READ, EV_DISABLE, 0, 0, data);
+    EV_SET(&events[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, data);
+    return kevent(queue_fd, events, 2, NULL, 0, NULL);
+#endif
+}
+
+// Modify file descriptor back to read mode
+INLINE int event_mod_read(int queue_fd, int fd, void* data) {
+#if USE_EPOLL
+    struct epoll_event event;
+    event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.data.ptr = data;
+    return epoll_ctl(queue_fd, EPOLL_CTL_MOD, fd, &event);
+#elif USE_KQUEUE
+    struct kevent events[2];
+    // Disable write events and enable read events
+    EV_SET(&events[0], fd, EVFILT_WRITE, EV_DISABLE, 0, 0, data);
+    EV_SET(&events[1], fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, data);
+    return kevent(queue_fd, events, 2, NULL, 0, NULL);
+#endif
+}
+
+// Remove file descriptor from event queue
+INLINE int event_delete(int queue_fd, int fd) {
+#if USE_EPOLL
+    return epoll_ctl(queue_fd, EPOLL_CTL_DEL, fd, NULL);
+#elif USE_KQUEUE
+    struct kevent events[2];
+    EV_SET(&events[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    EV_SET(&events[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    // Note: kqueue automatically removes events when fd is closed,
+    // but we'll try to remove them explicitly anyway
+    kevent(queue_fd, events, 2, NULL, 0, NULL);
+    return 0;  // kqueue delete doesn't fail the same way epoll does
+#endif
+}
+
+// Add server socket with EPOLLEXCLUSIVE-like behavior
+INLINE int event_add_server(int queue_fd, int server_fd) {
+#if USE_EPOLL
+    struct epoll_event event;
+    event.events  = EPOLLIN | EPOLLEXCLUSIVE;
+    event.data.fd = server_fd;
+    return epoll_ctl(queue_fd, EPOLL_CTL_ADD, server_fd, &event);
+#elif USE_KQUEUE
+    struct kevent event;
+    EV_SET(&event, server_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    return kevent(queue_fd, &event, 1, NULL, 0, NULL);
+#endif
+}
+
+// Wait for events
+INLINE int event_wait(int queue_fd, event_t* events, int max_events, int timeout_ms) {
+#if USE_EPOLL
+    return epoll_wait(queue_fd, events, max_events, timeout_ms);
+#elif USE_KQUEUE
+    struct timespec timeout;
+    struct timespec* timeout_ptr = NULL;
+
+    if (timeout_ms >= 0) {
+        timeout.tv_sec  = timeout_ms / 1000;
+        timeout.tv_nsec = (timeout_ms % 1000) * 1000000;
+        timeout_ptr     = &timeout;
+    }
+    return kevent(queue_fd, NULL, 0, events, max_events, timeout_ptr);
+#endif
+}
+
+// Get event data pointer
+INLINE void* event_get_data(const event_t* event) {
+#if USE_EPOLL
+    return event->data.ptr;
+#elif USE_KQUEUE
+    return event->udata;
+#endif
+}
+
+// Get event file descriptor
+INLINE int event_get_fd(const event_t* event) {
+#if USE_EPOLL
+    return event->data.fd;
+#elif USE_KQUEUE
+    return (int)event->ident;
+#endif
+}
+
+// Check if event is for reading
+INLINE bool event_is_read(const event_t* event) {
+#if USE_EPOLL
+    return (event->events & EPOLLIN) != 0;
+#elif USE_KQUEUE
+    return event->filter == EVFILT_READ;
+#endif
+}
+
+// Check if event is for writing
+INLINE bool event_is_write(const event_t* event) {
+#if USE_EPOLL
+    return (event->events & EPOLLOUT) != 0;
+#elif USE_KQUEUE
+    return event->filter == EVFILT_WRITE;
+#endif
+}
+
+// Check if event indicates error/hangup
+INLINE bool event_is_error(const event_t* event) {
+#if USE_EPOLL
+    return (event->events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) != 0;
+#elif USE_KQUEUE
+    return (event->flags & EV_EOF) != 0 || (event->flags & EV_ERROR) != 0;
+#endif
+}
+
+/* ================================================================
+ * Global Variables and Constants (unchanged)
  * ================================================================ */
 static int server_fd                                        = -1;  // Server socket file descriptor
 static volatile sig_atomic_t server_running                 = 1;   // Server running flag
@@ -121,7 +306,7 @@ static size_t global_mw_count                               = 0;   // Global mid
 static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
 
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
-INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state);
+INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state);
 
 static inline int get_num_available_cores() {
     return sysconf(_SC_NPROCESSORS_ONLN);
@@ -324,10 +509,14 @@ INLINE bool reset_connection(connection_t* conn) {
     return (conn->request && conn->response && conn->read_buf);
 }
 
-INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state) {
+/* ================================================================
+ * Updated Connection Management Functions
+ * ================================================================ */
+
+INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state) {
     if (!conn || conn->client_fd == -1) return;
 
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
+    event_delete(queue_fd, conn->client_fd);
     close(conn->client_fd);
     conn->client_fd = -1;
 
@@ -1272,7 +1461,11 @@ INLINE int conn_accept(int worker_id) {
     return client_fd;
 }
 
-INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
+/* ================================================================
+ * Socket and Connection I/O Functions
+ * ================================================================ */
+
+INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
     connection_t* conn = malloc(sizeof(connection_t));
     if (!conn) {
         perror("malloc");
@@ -1295,12 +1488,8 @@ INLINE void add_connection_to_worker(int epoll_fd, int client_fd) {
         return;
     }
 
-    struct epoll_event event;
-    event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
-    event.data.ptr = conn;
-
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
-        perror("epoll_ctl");
+    if (event_add_read(queue_fd, client_fd, conn) < 0) {
+        perror("event_add_read");
         conn->closing = true;
         return;
     }
@@ -1314,7 +1503,7 @@ INLINE size_t MAX(size_t x, size_t y) {
     return x > y ? x : y;
 }
 
-INLINE void handle_read(int epoll_fd, connection_t* conn) {
+INLINE void handle_read(int queue_fd, connection_t* conn) {
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -1330,30 +1519,13 @@ INLINE void handle_read(int epoll_fd, connection_t* conn) {
     process_request(conn, bytes_read);
 
     // Switch to writing response.
-    struct epoll_event event;
-    event.events   = EPOLLOUT | EPOLLET;
-    event.data.ptr = conn;
-
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
-        perror("epoll_ctl mod to EPOLLOUT");
+    if (event_mod_write(queue_fd, conn->client_fd, conn) < 0) {
+        perror("event_mod_write");
         conn->closing = true;
     }
 }
 
-#if ENABLE_LOGGING
-INLINE void request_complete(connection_t* conn) {
-    struct timespec end;
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    uint64_t latency_ns =
-        (end.tv_sec - conn->start.tv_sec) * 1000000000ULL + (end.tv_nsec - conn->start.tv_nsec);
-
-    if (LOGGER_CALLBACK) {
-        LOGGER_CALLBACK(conn, latency_ns);
-    };
-}
-#endif
-
-INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
     __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
 
     response_t* res         = conn->response;
@@ -1378,7 +1550,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
 
                 // Handle zero bytes sent (socket buffer full)
                 if (unlikely(sent == 0)) {
-                    // Socket buffer is full, wait for next EPOLLOUT event
+                    // Socket buffer is full, wait for next write event
                     return;
                 }
 
@@ -1401,15 +1573,25 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
                 off_t chunk_size =
                     HAS_RANGE_REQUEST(res->flags) ? (off_t)MIN(1 << 20, remaining_file) : remaining_file;
 
-#ifdef __linux__
+#if defined(__linux__)
                 // Use zero-copy sendfile if available
                 off_t offset = res->file_offset;
                 sent         = sendfile(client_fd, res->file_fd, &offset, chunk_size);
                 if (sent > 0) {
                     res->file_offset = offset;
                 }
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+                // BSD-style sendfile
+                off_t len  = chunk_size;
+                int result = sendfile(res->file_fd, client_fd, res->file_offset, &len, NULL, 0);
+                if (result == 0 || (result == -1 && errno == EAGAIN)) {
+                    sent = len;
+                    res->file_offset += sent;
+                } else {
+                    sent = -1;
+                }
 #else
-                // Fallback for non-Linux systems - need to read from file first
+                // Fallback for other systems - need to read from file first
                 static thread_local char file_buffer[1 << 20];  // 1MB buffer
                 chunk_size = MIN(chunk_size, sizeof(file_buffer));
 
@@ -1428,7 +1610,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
 
                 // Handle zero bytes sent (socket buffer full)
                 if (sent == 0) {
-                    // Socket buffer is full, wait for next EPOLLOUT event
+                    // Socket buffer is full, wait for next write event
                     return;
                 }
 
@@ -1450,7 +1632,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
 
             // Handle zero bytes sent (socket buffer full)
             if (sent == 0) {
-                // Socket buffer is full, wait for next EPOLLOUT event
+                // Socket buffer is full, wait for next write event
                 return;
             }
 
@@ -1496,8 +1678,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
                 AddKeepAliveConnection(conn, state);
 
                 if (reset_connection(conn)) {
-                    struct epoll_event event = {.events = EPOLLIN | EPOLLET | EPOLLRDHUP, .data.ptr = conn};
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->client_fd, &event) < 0) {
+                    if (event_mod_read(queue_fd, conn->client_fd, conn) < 0) {
                         conn->closing = true;
                     }
                 } else {
@@ -1527,8 +1708,15 @@ handle_error:
 }
 
 /* ================================================================
- * Worker Thread Functions
+ * Updated Worker Thread Functions
  * ================================================================ */
+
+typedef struct {
+    int queue_fd;
+    int worker_id;
+    int designated_core;
+    KeepAliveState* keep_alive_state;
+} WorkerData;
 
 // Returns 0 on success, -1 on failure
 int pin_current_thread_to_core(int core_id) {
@@ -1604,85 +1792,73 @@ int pin_current_thread_to_core(int core_id) {
     return 0;
 }
 
-typedef struct {
-    int epoll_fd;
-    int worker_id;
-    int designated_core;
-    KeepAliveState* keep_alive_state;
-} WorkerData;
-
 void* worker_thread(void* arg) {
     WorkerData* worker       = (WorkerData*)arg;
-    int epoll_fd             = worker->epoll_fd;
+    int queue_fd             = worker->queue_fd;
     int worker_id            = worker->worker_id;
     int cpu_core             = worker->designated_core;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
     pin_current_thread_to_core(cpu_core);
 
-    struct epoll_event server_event;
-    server_event.events  = EPOLLIN | EPOLLEXCLUSIVE;
-    server_event.data.fd = server_fd;
-
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event) < 0) {
-        perror("epoll_ctl for server socket");
+    if (event_add_server(queue_fd, server_fd) < 0) {
+        perror("event_add_server");
         return NULL;
     }
 
-    struct epoll_event events[MAX_EVENTS] = {};
-    long last_timeout_check               = 0;
-    uint32_t hangup_mask                  = EPOLLHUP | EPOLLERR | EPOLLRDHUP;
+    event_t events[MAX_EVENTS] = {};
+    long last_timeout_check    = 0;
 
     while (server_running) {
-        // Check for Keep-Alive timeouts 5 seconds.
+        // Check for Keep-Alive timeouts every 5 seconds.
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (now.tv_sec - last_timeout_check >= 5) {
-            CheckKeepAliveTimeouts(ka_state, worker_id, epoll_fd);
+            CheckKeepAliveTimeouts(ka_state, worker_id, queue_fd);
             last_timeout_check = now.tv_sec;
         }
 
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 500);
+        int num_events = event_wait(queue_fd, events, MAX_EVENTS, 500);
         if (num_events == -1) {
             if (errno == EINTR) {
                 continue;
             }
-            perror("epoll_wait");
+            perror("event_wait");
             continue;
         }
 
         // During graceful shutdown, don't accept new connections
         // but continue processing existing ones
         for (int i = 0; i < num_events; i++) {
-            if (events[i].data.fd == server_fd) {
+            const event_t* event = &events[i];
+
+            if (event_get_fd(event) == server_fd) {
                 int client_fd = conn_accept(worker_id);
                 if (client_fd > 0) {
-                    add_connection_to_worker(epoll_fd, client_fd);
+                    add_connection_to_worker(queue_fd, client_fd);
                 }
             } else {
-                connection_t* conn        = (connection_t*)events[i].data.ptr;
-                const uint32_t event_mask = events[i].events;
-                if (event_mask & EPOLLIN) {
-                    handle_read(epoll_fd, conn);
-                } else if (event_mask & EPOLLOUT) {
-                    handle_write(epoll_fd, conn, ka_state);
-                } else if (event_mask && hangup_mask) {
+                connection_t* conn = (connection_t*)event_get_data(event);
+                if (!conn) continue;
+
+                if (event_is_read(event)) {
+                    handle_read(queue_fd, conn);
+                } else if (event_is_write(event)) {
+                    handle_write(queue_fd, conn, ka_state);
+                } else if (event_is_error(event)) {
                     conn->closing = true;
                 }
 
                 if (conn->closing) {
-                    close_connection(epoll_fd, conn, ka_state);
+                    close_connection(queue_fd, conn, ka_state);
                 }
             }
         }
     }
 
-    // Remove server socket from epoll
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, server_fd, NULL) < 0) {
-        perror("epoll_ctl DEL for server socket");
-    }
-
-    close(epoll_fd);
+    // Remove server socket from event queue
+    event_delete(queue_fd, server_fd);
+    close(queue_fd);
     return NULL;
 }
 
@@ -1698,9 +1874,11 @@ int pulsar_run(const char* addr, int port) {
     sort_routes();
     init_mimetypes();
 
+#if defined(__linux__)
     // Tune malloc.
     mallopt(M_MMAP_THRESHOLD, 128 * 1024);  // Larger allocations use mmap
     mallopt(M_TRIM_THRESHOLD, 128 * 1024);  // More aggressive trimming
+#endif
 
     // When creating worker threads
     int num_cores      = get_num_available_cores();
@@ -1708,13 +1886,13 @@ int pulsar_run(const char* addr, int port) {
 
     // Initialize worker data and create workers
     for (size_t i = 0; i < NUM_WORKERS; i++) {
-        int epoll_fd = epoll_create1(0);
-        if (epoll_fd == -1) {
-            perror("epoll_create1");
+        int queue_fd = event_queue_create();
+        if (queue_fd == -1) {
+            perror("event_queue_create");
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].epoll_fd         = epoll_fd;
+        worker_data[i].queue_fd         = queue_fd;
         worker_data[i].worker_id        = i;
         worker_data[i].designated_core  = i % (num_cores - reserved_cores);
         worker_data[i].keep_alive_state = &keep_alive_states[i];
@@ -1725,12 +1903,11 @@ int pulsar_run(const char* addr, int port) {
         }
     }
 
-    usleep(1000);  // Give workers time to start
-    printf("\n\nServer with %d workers listening on http://%s:%d\n", NUM_WORKERS, addr ? addr : "0.0.0.0",
-           port);
-    printf("Press Ctrl+C once for graceful shutdown, twice for immediate shutdown\n");
+    const char* event_system = USE_EPOLL ? "epoll" : "kqueue";
+    printf("\n\nStarting server with %d workers (%s)\n", NUM_WORKERS, event_system);
+    printf("Listening on http://%s:%d\n", addr ? addr : "0.0.0.0", port);
 
-    // Join all worker threads
+    // Wait for all worker threads to exit.
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }

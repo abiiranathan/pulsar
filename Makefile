@@ -50,6 +50,7 @@ ifeq ($(UNAME), Darwin)
     LIBEXT := dylib
     SONAME_FLAG := -install_name
     SHARED_FLAG := -dynamiclib
+	CC = clang
 else ifeq ($(UNAME), Linux)
     LIBEXT := so
     SONAME_FLAG := -soname
