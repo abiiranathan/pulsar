@@ -1,128 +1,123 @@
-# Pulsar - A High Performance C Webserver
 
-Pulsar is a lightweight, high-performance web server written in C designed for building fast HTTP services and APIs. It uses modern Linux system calls like `epoll` and `sendfile` for optimal performance.
+# Pulsar Web Server Library
 
-## Key Features
+[![Build Status](https://github.com/abiiranathan/pulsar/actions/workflows/ci.yml/badge.svg)](https://github.com/abiiranathan/pulsar/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- **Multi-threaded** with worker thread pool (8 workers by default)
-- **Event-driven** architecture using epoll for high concurrency
-- **Zero-copy file transfers** with sendfile
-- **Memory efficient** with arena allocation per connection
-- **Simple routing API** with path parameters
-- **Middleware support** (global and per-route)
-- **Keep-alive connections** with timeout
-- **Static file serving** with directory traversal protection
-- **Query parameter parsing**
-- **Request/response abstractions**
+Pulsar is a high-performance web server library written in C, designed for building scalable web applications and APIs.
+
+## Features
+
+- Lightweight and fast HTTP/1.1 with Keep-Alive support.
+- Routing system with path parameters
+- Form data parsing
+- Linux/macOS support.
+- Both static and shared library builds
+- Profile-Guided Optimization (PGO) support
+- Extremely low memory and CPU usage.
+- High throughput (approx > 400K req/sec) on 8 threads
+  and about 200K-300K when serving files.
+- Intuitive API for request/response life-cycle.
+- Customizable through the compiler build options.
 
 ## Benchmarks
-***pulsar reaches*** ~ **400k - 500k requests / sec** on a HelloWorld web server.
+For a simple Hello World response, 90% of requests return within 2ms and 99% within 10ms.
 
-## Architecture
-
-Pulsar follows these key architectural principles:
-
-1. **Multi-threaded with epoll**: 
-   - Uses a thread pool (8 workers by default)
-   - Each worker has its own epoll instance
-   - Uses EPOLLEXCLUSIVE to avoid thundering herd
-
-2. **Connection lifecycle**:
-   - Each connection is handled by a single worker.
-   - Connections can be kept alive (Keep-Alive)
-   - Timeout for idle connections
-
-3. **Memory management**:
-   - Per-connection memory arena (8KB initially)
-   - Zero-copy file transfers with sendfile
-   - Minimal allocations after connection setup
-
-4. **Request processing**:
-   - Header parsing with minimal copying
-   - Query parameter extraction
-   - Path parameter matching
-   - Middleware chaining
-
-## API Reference
-
-### Server Management
-
-```c
-int pulsar_run(const char *addr, int port);
-```
-Starts the server on the specified address (or IP address) and port. 
-Runs until SIGINT/SIGTERM is received and then graceful shutdown is performed.
-
-### Routing
-
-```c
-route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler);
-```
-Registers a route with a URL pattern, HTTP method, and handler function.
-
-```c
-route_t* register_static_route(const char* pattern, const char* dir);
-```
-Registers a static file serving route for a directory.
-
-### Request Handling
-
-```c
-const char* req_method(connection_t* conn);
-const char* req_path(connection_t* conn); 
-const char* req_body(connection_t* conn);
-size_t req_content_len(connection_t* conn);
-```
-Access request method, path, body and content length.
-
-### Query Parameters
-
-```c 
-const char* query_get(connection_t* conn, const char* name);
-headers_t* query_params(connection_t* conn);
-```
-Access query parameters by name or get all parameters.
-
-### Path Parameters
-
-```c
-const char* get_path_param(connection_t* conn, const char* name);
-```
-Get path parameter value by name (for routes like `/users/{id}`).
-
-### Response Writing
-
-```c
-void conn_set_status(connection_t* conn, http_status code);
-bool conn_writeheader(connection_t* conn, const char* name, const char* value);
-int conn_write(connection_t* conn, const void* data, size_t len);
-int conn_write_string(connection_t* conn, const char* str);
-int conn_writef(connection_t* conn, const char* fmt, ...);
-bool conn_servefile(connection_t* conn, const char* filename);
-```
-Functions to set status code, headers, and write response data.
-
-### Middleware
-
-```c
-void use_global_middleware(HttpHandler *middleware, size_t count);
-void use_route_middleware(route_t* route, HttpHandler *middleware, size_t count);
+```txt
+wrk -t8 -c100 -d5s --latency http://localhost:8080/
+Running 5s test @ http://localhost:8080/
+  8 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   657.96us    2.34ms  59.24ms   95.95%
+    Req/Sec    54.56k    14.89k  105.38k    73.58%
+  Latency Distribution
+     50%  144.00us
+     75%  398.00us
+     90%    1.35ms
+     99%    8.82ms
+  2199214 requests in 5.10s, 406.88MB read
+Requests/sec: 431261.64
+Transfer/sec:     79.79MB
 ```
 
-Register global or route-specific middleware functions.
+## Installation
 
-### User Data
+### Prerequisites
 
-```c
-void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
-void* get_userdata(connection_t* conn);
+- CMake 3.20 or higher
+- C compiler (GCC, Clang, or Apple Clang)
+- Git
+- Optional: Ninja for faster builds
+
+### Building with CMake
+
+```bash
+# Clone the repository
+git clone https://github.com/abiiranathan/pulsar.git
+cd pulsar
+
+# Create build directory
+mkdir build && cd build
+
+# Configure with CMake (default options)
+cmake ..
+
+# Build the project
+cmake --build .
+
+# Install (may need sudo)
+cmake --install .
 ```
-Store and retrieve per-request user data.
 
-## Example Usage
+### Build Options
+
+Configure with custom options:
+
+```bash
+cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=ON ..
+```
+
+Available options:
+- `-DCMAKE_BUILD_TYPE`: Debug, Release, or Profile (default: Release)
+- `-DBUILD_SHARED_LIBS`: Build shared library (ON/OFF, default: ON)
+- `-DBUILD_STATIC_LIBS`: Build static library (ON/OFF, default: ON)
+- `-DBUILD_TESTS`: Build tests (ON/OFF, default: ON)
+- `-DENABLE_PGO`: Enable Profile-Guided Optimization (ON/OFF, default: OFF)
+- `-DCMAKE_INSTALL_PREFIX`: Custom install path
+
+### Profile-Guided Optimization (PGO)
+
+To build with PGO:
+
+```bash
+# First build with profile generation
+cmake -DCMAKE_BUILD_TYPE=Profile -DENABLE_PGO=ON ..
+cmake --build .
+
+# Run the server to generate profile data
+./bin/server
+
+# Rebuild with profile data
+cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_PGO=ON ..
+cmake --build .
+```
+
+## Testing
+
+Tests are built by default when `BUILD_TESTS=ON`. To run tests:
+
+```bash
+# Build and run tests with CMake
+cd build
+ctest --output-on-failure
+```
+
+## Usage
+
+Example: [Hello World Server](example/server.c)
 
 ```c
-#include "pulsar.h"
+#include <pulsar/pulsar.h>
 
 bool hello_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
@@ -134,6 +129,7 @@ bool hello_handler(connection_t* conn) {
 bool auth_middleware(connection_t* conn) {
     const char* token = req_header_get(conn, "Authorization");
     if (!token) {
+        conn_abort(conn);
         conn_set_status(conn, StatusUnauthorized);
         return false;
     }
@@ -141,191 +137,33 @@ bool auth_middleware(connection_t* conn) {
 }
 
 int main() {
-    // Register routes
     route_t* hello_route = route_register("/hello", HTTP_GET, hello_handler);
     use_route_middleware(hello_route, 1, auth_middleware);
-    
-    // Serve static files
-    register_static_route("/static/", "./public");
-    
-    // Start server
+    route_static("/static/", "./public");
     return pulsar_run(NULL, 8080);
 }
 ```
 
-## Performance Considerations
+### Linking with your project
 
-- Uses non-blocking I/O throughout
-- Minimal memory copies
-- sendfile for zero-copy file transfers
-- Arena allocation reduces malloc/free overhead
-- Sorted routes for efficient matching
-- Keep-alive connections reduce TCP overhead
+See Example [example/CMakeLists.txt](example/CMakeLists.txt)
 
-## Limitations
+CMake:
+```cmake
+find_package(Pulsar REQUIRED)
+target_link_libraries(your_target PRIVATE Pulsar::pulsar_shared)
+```
 
-- Linux-only (uses epoll, sendfile)
-- No HTTPS support (could be added with OpenSSL)
-- Limited to HTTP/1.1
-
-## Building the Library
-
-Clone the repository:
-
+pkg-config:
 ```bash
-git clone https://github.com/abiiranathan/pulsar
-cd pulsar
-
-# Build everything (executable and both libraries)
-make all
-
-# Build just the static library
-make static
-
-# Build just the shared library
-make shared
-
-# Build both libraries
-make lib
-
-# Install to system
-sudo make install
-
-# Clean build artifacts
-make clean
+gcc your_program.c -o your_program $(pkg-config --cflags --libs pulsar)
 ```
 
-## Linking
-Link your binary with `-lpulsar` flag after installation.
-
-# Configuration
-
-Here's a comprehensive README section documenting these constants:
-
----
-
-## Configuration Constants
-
-This document explains the compile-time configuration options available in the server.
-
-## Table of Contents
-1. [Performance Tuning](#performance-tuning)
-2. [Memory Management](#memory-management)
-3. [Network Settings](#network-settings)
-4. [Security Limits](#security-limits)
-5. [Middleware & Routing](#middleware--routing)
-6. [Debugging Features](#debugging-features)
-
----
-
-## Performance Tuning
-
-| Constant             | Default | Description                                         |
-| -------------------- | ------- | --------------------------------------------------- |
-| `NUM_WORKERS`        | 8       | Number of worker processes (should match CPU cores) |
-| `MAX_EVENTS`         | 1024    | Maximum ready events processed per epoll iteration  |
-| `CONNECTION_TIMEOUT` | 30      | Keep-Alive timeout in seconds                       |
-
-**Recommendations:**
-- Set `NUM_WORKERS` to your CPU core count
-- Increase `MAX_EVENTS` for high connection loads (requires more RAM)
-
----
-
-## Memory Management
-
-| Constant            | Default | Description                                    |
-| ------------------- | ------- | ---------------------------------------------- |
-| `READ_BUFFER_SIZE`  | 4096    | Buffer for incoming request headers (bytes)    |
-| `WRITE_BUFFER_SIZE` | 8192    | Initial buffer for responses (grows as needed) |
-| `ARENA_CAPACITY`    | 4096    | Per-connection memory pool size (bytes)        |
-
-**Constraints:**
-```c
-static_assert(READ_BUFFER_SIZE >= 1024);
-static_assert(WRITE_BUFFER_SIZE >= 8192);
-static_assert(ARENA_CAPACITY between 1KB-1MB);
-```
-
----
-
-## Network Settings
-
-| Constant                   | Default | Description                       |
-| -------------------------- | ------- | --------------------------------- |
-| `MAX_BODY_SIZE`            | 2MB     | Maximum allowed request body size |
-| `SHUTDOWN_TIMEOUT_SECONDS` | 10      | Graceful shutdown window          |
-
-**Security Note:**
-- `MAX_BODY_SIZE` prevents memory exhaustion attacks
-- Minimum 10-second shutdown ensures clean exit
-
----
-
-## Middleware & Routing
-
-| Constant                | Default | Description                |
-| ----------------------- | ------- | -------------------------- |
-| `MAX_ROUTES`            | 64      | Maximum registered routes  |
-| `MAX_GLOBAL_MIDDLEWARE` | 32      | Global middleware slots    |
-| `MAX_ROUTE_MIDDLEWARE`  | 4       | Per-route middleware slots |
-| `HEADERS_CAPACITY`      | 32      | Maximum request headers    |
-
-**Architecture:**
-- Middleware executes in registration order
-- Exceeding header capacity returns `431 Request Header Fields Too Large`
-
----
-
-## Debugging Features
-
-| Constant                       | Default | Description                       |
-| ------------------------------ | ------- | --------------------------------- |
-| `DETECT_DUPLICATE_RES_HEADERS` | 0       | Filter duplicate response headers |
-| `WRITE_SERVER_HEADERS`         | 0       | Auto-add Server/Date headers      |
-
-**Performance Tradeoffs:**
-```text
-DETECT_DUPLICATE_RES_HEADERS=1 adds ~2% overhead
-WRITE_SERVER_HEADERS=1 adds ~1% overhead
-```
-
----
-
-## Build Configuration
-
-Override defaults during compilation:
-```bash
-# Example: 16 workers, 8MB max body
-make CFLAGS="-DNUM_WORKERS=16 -DMAX_BODY_SIZE=$((8<<20))"
-```
-
-
----
-
-See [constants.h](src/constants.h) for implementation details.
-
-## Kernel Tuning (sysctl)
-
-```txt
-# TCP Performance Tuning
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.ipv4.tcp_fastopen = 3
-
-# Socket buffer tuning
-net.core.netdev_max_backlog = 30000
-net.core.somaxconn = 1024
-net.ipv4.tcp_max_syn_backlog = 1024
-
-# Connection reuse
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_tw_recycle = 1  # Warning: Disable if behind NAT
-```
-
+## Documentation
+For detailed API documentation, see the [API Reference](docs/API.md).
 
 ## License
 
-MIT License
+Pulsar is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+

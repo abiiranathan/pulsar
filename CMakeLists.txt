@@ -1,0 +1,309 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(pulsar
+    VERSION 1.0.0
+    DESCRIPTION "Pulsar web server library"
+    LANGUAGES C
+)
+
+# Set C standard
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+
+enable_testing()
+
+# Build type handling
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# Custom build types
+set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Profile" CACHE STRING "" FORCE)
+
+# Build mode options
+option(ENABLE_PGO "Enable Profile-Guided Optimization" OFF)
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(BUILD_STATIC_LIBS "Build static libraries" ON)
+option(BUILD_TESTS "Build test executables" ON)
+option(INSTALL_HEADERS "Install header files" ON)
+
+# Platform detection
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(PLATFORM_MACOS TRUE)
+    set(LIB_EXTENSION "dylib")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PLATFORM_LINUX TRUE)
+    set(LIB_EXTENSION "so")
+else()
+    message(FATAL_ERROR "Unsupported platform: ${CMAKE_SYSTEM_NAME}")
+endif()
+
+# Compiler definitions
+add_compile_definitions(
+    DA_IMPLEMENTATION
+    _GNU_SOURCE
+)
+
+# Base compiler flags
+set(BASE_C_FLAGS
+    -Wall -Werror -Wextra -pedantic -fPIC
+    -Wno-unused-function -Wno-gnu-zero-variadic-macro-arguments
+)
+
+# Debug flags
+set(CMAKE_C_FLAGS_DEBUG "-O0 -g3 -DDEBUG")
+
+# Release flags
+set(CMAKE_C_FLAGS_RELEASE "-O3 -g -mtune=native -march=native -flto -mavx2")
+
+# Profile flags (custom build type)
+set(CMAKE_C_FLAGS_PROFILE "-O3 -g -mtune=native -march=native -flto -mavx2 -fprofile-generate")
+
+# Apply base flags to all configurations
+add_compile_options(${BASE_C_FLAGS})
+
+# PGO support
+if(ENABLE_PGO AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-fprofile-use -fprofile-correction)
+    add_link_options(-lgcov)
+endif()
+
+# Include directories
+include_directories(include)
+
+# Source files
+set(BASE_SOURCES
+    src/routing.c
+    src/locals.c
+    src/pulsar.c
+    src/forms.c
+    src/str.c
+)
+
+# Header files
+file(GLOB HEADERS "include/*.h")
+
+# Create object library for shared code
+add_library(pulsar_objects OBJECT ${BASE_SOURCES})
+
+target_include_directories(pulsar_objects PUBLIC 
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+# Platform-specific settings
+if(PLATFORM_MACOS)
+    target_compile_options(pulsar_objects PRIVATE -arch x86_64 -arch arm64)
+    set_target_properties(pulsar_objects PROPERTIES
+        OSX_ARCHITECTURES "x86_64;arm64"
+    )
+endif()
+
+# Static library
+if(BUILD_STATIC_LIBS)
+    add_library(pulsar_static STATIC $<TARGET_OBJECTS:pulsar_objects>)
+    set_target_properties(pulsar_static PROPERTIES
+        OUTPUT_NAME pulsar
+        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    )
+    target_include_directories(pulsar_static PUBLIC 
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    )
+endif()
+
+# Shared library
+if(BUILD_SHARED_LIBS)
+    add_library(pulsar_shared SHARED $<TARGET_OBJECTS:pulsar_objects>)
+    set_target_properties(pulsar_shared PROPERTIES
+        OUTPUT_NAME pulsar
+        VERSION ${PROJECT_VERSION}
+        SOVERSION ${PROJECT_VERSION_MAJOR}
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    )
+    target_include_directories(pulsar_shared PUBLIC 
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    target_link_libraries(pulsar_shared PRIVATE pthread)
+    
+    if(ENABLE_PGO AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        target_link_libraries(pulsar_shared PRIVATE gcov)
+    endif()
+endif()
+
+# Main executable
+add_executable(server main.c)
+target_link_libraries(server PRIVATE pulsar_objects pthread)
+set_target_properties(server PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# Tests
+if(BUILD_TESTS)
+    file(GLOB TEST_SOURCES "tests/*.c")
+    foreach(test_source ${TEST_SOURCES})
+        get_filename_component(test_name ${test_source} NAME_WE)
+        add_executable(test_${test_name} ${test_source})
+        target_link_libraries(test_${test_name} PRIVATE pulsar_objects pthread)
+        set_target_properties(test_${test_name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+        )
+        
+        # Register the test with CTest
+        add_test(NAME ${test_name} COMMAND test_${test_name})
+        
+        # Optional: Set working directory if tests need specific files
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+        )
+    endforeach()
+endif()
+
+# Valgrind check target
+find_program(VALGRIND_EXECUTABLE valgrind)
+if(VALGRIND_EXECUTABLE)
+    add_custom_target(check
+        COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
+                --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/glibc.supp 
+                ${CMAKE_BINARY_DIR}/bin/server
+        DEPENDS server
+        COMMENT "Running valgrind memory check"
+    )
+endif()
+
+# Profile build target
+add_custom_target(profile
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target clean
+    COMMAND ${CMAKE_COMMAND} -DCMAKE_BUILD_TYPE=Profile ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+    COMMENT "Building with profiling enabled"
+)
+
+# Verification target
+add_custom_target(verify
+    COMMENT "Verifying built libraries"
+)
+
+if(PLATFORM_MACOS)
+    add_custom_command(TARGET verify POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "Verifying universal binary..."
+        COMMAND lipo -archs ${CMAKE_BINARY_DIR}/lib/libpulsar.${LIB_EXTENSION}
+    )
+else()
+    add_custom_command(TARGET verify POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "Verifying shared library..."
+        COMMAND file ${CMAKE_BINARY_DIR}/lib/libpulsar.${LIB_EXTENSION}
+    )
+endif()
+
+# Installation
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# Install libraries
+if(BUILD_STATIC_LIBS)
+    install(TARGETS pulsar_static
+        EXPORT PulsarTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        COMPONENT Development
+    )
+endif()
+
+if(BUILD_SHARED_LIBS)
+    install(TARGETS pulsar_shared
+        EXPORT PulsarTargets
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT Runtime
+    )
+endif()
+
+# Install headers
+if(INSTALL_HEADERS)
+    install(FILES ${HEADERS}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pulsar
+        COMPONENT Development
+    )
+endif()
+
+# Install main executable
+# install(TARGETS server
+#     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+#     COMPONENT Runtime
+# )
+
+# Generate and install CMake config files
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/PulsarConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY AnyNewerVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PulsarConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/PulsarConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pulsar
+)
+
+install(EXPORT PulsarTargets
+    FILE PulsarTargets.cmake
+    NAMESPACE Pulsar::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pulsar
+    COMPONENT Development
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/PulsarConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/PulsarConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pulsar
+    COMPONENT Development
+)
+
+# Generate pkg-config file
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/pulsar.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/pulsar.pc"
+    @ONLY
+)
+
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pulsar.pc"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+    COMPONENT Development
+)
+
+# Update linker cache on Linux
+if(PLATFORM_LINUX)
+    install(CODE "execute_process(COMMAND ldconfig)")
+endif()
+
+# CPack configuration for packaging
+set(CPACK_PACKAGE_NAME "pulsar")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Pulsar web server library")
+set(CPACK_PACKAGE_VENDOR "Your Organization")
+set(CPACK_PACKAGE_CONTACT "your-email@example.com")
+
+if(PLATFORM_LINUX)
+    set(CPACK_GENERATOR "DEB;RPM;TGZ")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6 (>= 2.17)")
+    set(CPACK_RPM_PACKAGE_REQUIRES "glibc >= 2.17")
+elseif(PLATFORM_MACOS)
+    set(CPACK_GENERATOR "TGZ;ZIP")
+endif()
+
+include(CPack)
+
+# Print configuration summary
+message(STATUS "=== Pulsar Build Configuration ===")
+message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "C Compiler: ${CMAKE_C_COMPILER}")
+message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
+message(STATUS "Architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+message(STATUS "Build Shared: ${BUILD_SHARED_LIBS}")
+message(STATUS "Build Static: ${BUILD_STATIC_LIBS}")
+message(STATUS "Build Tests: ${BUILD_TESTS}")
+message(STATUS "PGO Enabled: ${ENABLE_PGO}")
+message(STATUS "Install Prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "===================================")

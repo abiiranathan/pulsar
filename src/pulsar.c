@@ -80,7 +80,7 @@ typedef struct __attribute__((aligned(64))) request_t {
 } request_t;
 
 // Connection state structure
-typedef struct __attribute__((aligned(64))) connection_t {
+typedef struct connection_t {
     int client_fd;              // Client socket file descriptor
     char* read_buf;             // Buffer for incoming data.
     Locals* locals;             // Per-request context variables set by the user.
@@ -1053,6 +1053,10 @@ bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, 
 
 void* pulsar_get_context_value(connection_t* conn, const char* key) {
     return LocalsGetValue(conn->locals, key);
+}
+
+void pulsar_delete_context_value(connection_t* conn, const char* key) {
+    LocalsRemove(conn->locals, key);
 }
 
 // Support for dynamic sscanf string size.

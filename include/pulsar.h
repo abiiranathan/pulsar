@@ -82,6 +82,9 @@ bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, 
 // Get a context value.
 void* pulsar_get_context_value(connection_t* conn, const char* key);
 
+// Delete the context value.
+void pulsar_delete_context_value(connection_t* conn, const char* key);
+
 /**
  * @brief Serves a file as the response
  *

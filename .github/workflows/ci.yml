@@ -1,0 +1,31 @@
+name: Pulsar CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        build_type: [Debug, Release]
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+    
+    - name: Configure CMake
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBUILD_TESTS=ON
+    
+    - name: Build
+      run: |
+        cmake --build build --config ${{ matrix.build_type }}
+    
+    - name: Test
+      run: |
+        cd build
+        ctest --output-on-failure

@@ -1,0 +1,14 @@
+# cmake/libpulsar.pc.in
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: libpulsar
+Description: @PROJECT_DESCRIPTION@
+Version: @PROJECT_VERSION@
+URL: https://github.com/yourusername/pulsar
+Requires:
+Libs: -L${libdir} -lpulsar
+Libs.private: -pthread
+Cflags: -I${includedir}/pulsar

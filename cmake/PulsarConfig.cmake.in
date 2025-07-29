@@ -1,0 +1,22 @@
+# cmake/PulsarConfig.cmake.in
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find required dependencies
+find_dependency(Threads REQUIRED)
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/PulsarTargets.cmake")
+
+# Set up imported targets
+if(TARGET Pulsar::pulsar_shared)
+    set(Pulsar_SHARED_FOUND TRUE)
+    add_library(Pulsar::pulsar ALIAS Pulsar::pulsar_shared)
+elseif(TARGET Pulsar::pulsar_static)
+    set(Pulsar_STATIC_FOUND TRUE)
+    add_library(Pulsar::pulsar ALIAS Pulsar::pulsar_static)
+endif()
+
+check_required_components(Pulsar)
+
