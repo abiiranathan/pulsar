@@ -4,14 +4,11 @@
 #include <string.h>
 
 void LocalsInit(Locals* locals) {
-    if (!locals) return;
     memset(locals->entries, 0, sizeof(locals->entries));
     locals->size = 0;
 }
 
 bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc free_func) {
-    if (!locals || !key) return false;
-
     // Check if key already exists and replace if found
     for (size_t i = 0; i < locals->size; ++i) {
         if (strcmp(locals->entries[i].key, key) == 0) {
@@ -50,10 +47,6 @@ bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc 
 }
 
 void* LocalsGetValue(Locals* locals, const char* key) {
-    if (!locals || !key) {
-        return NULL;
-    }
-
     for (size_t i = 0; i < locals->size; ++i) {
         if (strcmp(locals->entries[i].key, key) == 0) {
             return locals->entries[i].value;
@@ -63,10 +56,6 @@ void* LocalsGetValue(Locals* locals, const char* key) {
 }
 
 void LocalsRemove(Locals* locals, const char* key) {
-    if (!locals || !key) {
-        return;
-    }
-
     for (size_t i = 0; i < locals->size; ++i) {
         if (strcmp(locals->entries[i].key, key) == 0) {
             // Free the value if it has a free function
@@ -88,10 +77,6 @@ void LocalsRemove(Locals* locals, const char* key) {
 }
 
 void LocalsReset(Locals* locals) {
-    if (!locals) {
-        return;
-    }
-
     // Free all values.
     for (size_t i = 0; i < locals->size; ++i) {
         if (locals->entries[i].free_func) {

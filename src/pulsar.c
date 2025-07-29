@@ -141,14 +141,7 @@ static inline int get_num_available_cores() {
 }
 
 INLINE bool conn_timedout(time_t now, time_t last_activity) {
-    bool timed_out = (now - last_activity) > CONNECTION_TIMEOUT;
-
-// Remove debug printf in production, or make it conditional
-#ifdef DEBUG_TIMEOUTS
-    printf("conn_timedout: now=%ld, last_activity=%ld, timeout=%d, timed_out=%d\n", now, last_activity,
-           timeout_seconds, timed_out);
-#endif
-    return timed_out;
+    return (now - last_activity) > CONNECTION_TIMEOUT;
 }
 
 INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
@@ -324,7 +317,7 @@ INLINE bool reset_connection(connection_t* conn) {
     if (conn->response->heap_allocated) {
         free(conn->response->body.heap);
     }
-    arena_reset(conn->arena);  // Reset arena and reuse.
+    arena_reset(conn->arena);
 
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
