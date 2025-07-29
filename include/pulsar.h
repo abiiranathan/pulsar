@@ -75,9 +75,9 @@ void pulsar_set_callback(PulsarCallback cb);
 
 void pulsar_set_locals_callback(LocalsCreateCallback callback);
 
-// Set a user-owned value pointer to the context.
+// Set a user-owned value pointer to the context with a callback function to free the value.
 // Returns true on success.
-bool pulsar_set_context_value(connection_t* conn, const char* key, void* value);
+bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func);
 
 // Get a context value.
 void* pulsar_get_context_value(connection_t* conn, const char* key);

@@ -6,6 +6,11 @@
 // Include helper macros
 #include "macros.h"
 
+// Per-connection arena memory.
+#ifndef ARENA_CAPACITY
+#define ARENA_CAPACITY 16 * 1024
+#endif
+
 // Enable logging callback.
 #ifndef ENABLE_LOGGING
 #define ENABLE_LOGGING 0
@@ -34,7 +39,7 @@
 
 // Buffer size for incoming request excluding body.
 #ifndef READ_BUFFER_SIZE
-#define READ_BUFFER_SIZE 2048
+#define READ_BUFFER_SIZE 1024
 #endif
 
 // Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
@@ -97,9 +102,15 @@
 #define LOCALS_CAPACITY 32
 #endif
 
-CHECK_POWER_OF_2(LOCALS_CAPACITY);
+// Maximum capacity of the locals key.
+#ifndef LOCALS_KEY_CAPACITY
+#define LOCALS_KEY_CAPACITY 16
+#endif
+
+static_assert(LOCALS_KEY_CAPACITY >= 4);
 
 // Assertions for all constants
+static_assert(ARENA_CAPACITY > 4 * 1024, "ARENA_CAPACITY must be > 4KB");
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
 static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");

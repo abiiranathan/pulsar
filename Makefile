@@ -19,13 +19,25 @@ ifeq ($(BUILD),debug)
     BUILD_DIR := build/debug
 else ifeq ($(BUILD),release)
     CFLAGS := $(BASE_CFLAGS) -O3 -g -mtune=native -march=native -flto -mavx2
+	ifeq ($(PGO), 1)
+		CFLAGS += -fprofile-use -fprofile-correction
+	endif
+
     BUILD_DIR := build/release
+else ifeq ($(BUILD),profile)
+	# First build with profiling
+	CFLAGS := $(BASE_CFLAGS) -O3 -g -mtune=native -march=native -flto -mavx2 -fprofile-generate
+	BUILD_DIR := build/release
 else
     $(error Invalid BUILD type: $(BUILD))
 endif
 
 # Linker flags
-LDFLAGS := -lpthread
+LDFLAGS := -lpthread 
+
+ifeq ($(PGO), 1)
+	LDFLAGS += -lgcov
+endif
 
 # Installation path
 INSTALL_PREFIX := /usr/local
@@ -53,7 +65,6 @@ TEST_TARGETS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
 # Source and header directories
 SRC_DIR := src
 HEADERS_DIR := include
-
 
 # Source files
 BASE_SRC := $(SRC_DIR)/routing.c \
@@ -159,8 +170,17 @@ clean:
 # Explicit targets for debug and release
 debug:
 	$(MAKE) BUILD=debug all
-
+	
 release:
-	$(MAKE) BUILD=release all
+	@if [ -n "$$(find $(BUILD_DIR) -name '*.gcda' 2>/dev/null)" ]; then \
+        echo "Found .gcda files, removing release binary to trigger rebuild with PGO"; \
+        rm -rf $(TARGET); \
+		$(MAKE) BUILD=release PGO=1 all
+	@else
+		$(MAKE) BUILD=release all
+	fi
+
+profile: clean
+	$(MAKE) BUILD=profile all
 
 .PHONY: all test static shared lib install verify clean debug release

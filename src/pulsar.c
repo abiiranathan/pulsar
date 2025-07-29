@@ -23,12 +23,9 @@
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
 
-#define STATUS_LINE_SIZE     64
-#define HEADERS_BUF_SIZE     4096
-#define CACHE_LINE_SIZE      64
-#define ARENA_CAPACITY       8192  // 8K
-#define MAX_FREE_CONNECTIONS 1024  // Connections to put in GC per worker.
-#define GC_INTERVAL_SEC      5     // Seconds before workers run GC.
+#define STATUS_LINE_SIZE 64
+#define HEADERS_BUF_SIZE 4096
+#define CACHE_LINE_SIZE  64
 
 // Make sure they fit in uint8_t and uint16_t
 static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
@@ -100,23 +97,24 @@ typedef struct __attribute__((aligned(64))) request_t {
 
 // Connection state structure
 typedef struct __attribute__((aligned(64))) connection_t {
-    bool closing;                     // Server closing because of an error.
-    bool keep_alive;                  // Keep-alive flag
-    bool abort;                       // Abort handler/middleware processing
-    bool in_keep_alive;               // Flag for a tracked connection
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
-    int client_fd;                    // Client socket file descriptor
-    time_t last_activity;             // Timestamp of last I/O activity
-    response_t* response;             // HTTP response data (arena allocated)
-    struct request_t* request;        // HTTP request data (arena allocated)
-    Arena* arena;                     // Memory arena for allocations
+    int client_fd;              // Client socket file descriptor
+    char* read_buf;             // Buffer for incoming data.
+    Locals* locals;             // Per-request context variables set by the user.
+    response_t* response;       // HTTP response data (arena allocated)
+    struct request_t* request;  // HTTP request data (arena allocated)
+    Arena* arena;               // Memory arena for allocations
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
 #endif
-    Locals* locals;  // Per-request context variables set by the user.
+    time_t last_activity;  // Timestamp of last I/O activity
+
     // Linked List nodes.
     connection_t* next;
     connection_t* prev;
+    bool closing;        // Server closing because of an error.
+    bool keep_alive;     // Keep-alive flag
+    bool abort;          // Abort handler/middleware processing
+    bool in_keep_alive;  // Flag for a tracked connection
 } connection_t;
 
 typedef struct __attribute__((aligned(64))) KeepAliveState {
@@ -125,25 +123,18 @@ typedef struct __attribute__((aligned(64))) KeepAliveState {
     size_t count;
 } KeepAliveState;
 
-typedef struct __attribute__((aligned(64))) {
-    connection_t* free_connections[MAX_FREE_CONNECTIONS];
-    size_t count;
-    size_t worker_id;
-} connection_freelist_t;
-
 /* ================================================================
  * Global Variables and Constants
  * ================================================================ */
-static int server_fd                                        = -1;    // Server socket file descriptor
-static volatile sig_atomic_t server_running                 = 1;     // Server running flag
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};    // Global middleware array
-static size_t global_mw_count                               = 0;     // Global middleware count
-static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
-static LocalsCreateCallback localsCreateCallback            = NULL;
+static int server_fd                                        = -1;  // Server socket file descriptor
+static volatile sig_atomic_t server_running                 = 1;   // Server running flag
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
+static size_t global_mw_count                               = 0;   // Global middleware count
+
+static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
 
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
-INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state,
-                             connection_freelist_t* freelist);
+INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state);
 
 static inline int get_num_available_cores() {
     return sysconf(_SC_NPROCESSORS_ONLN);
@@ -203,15 +194,14 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, connection_freelist_t* freelist, int worker_id,
-                                   int epoll_fd) {
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
         connection_t* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
             printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
-            close_connection(epoll_fd, current, state, freelist);
+            close_connection(epoll_fd, current, state);
         }
         current = next;
     }
@@ -308,18 +298,20 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->abort         = false;
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
-    conn->read_buf[0]   = '\0';
+    conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
     conn->request       = create_request(arena);
-    conn->arena         = arena;
+    conn->locals        = arena_alloc(arena, sizeof(Locals));
+    if (conn->locals) {
+        LocalsInit(conn->locals);
+    }
+    conn->arena = arena;
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
 
-    // Create locals or set to NULL.
-    conn->locals = localsCreateCallback ? localsCreateCallback() : NULL;
-    conn->next   = NULL;
-    conn->prev   = NULL;
-    return (conn->request && conn->response);
+    conn->next = NULL;
+    conn->prev = NULL;
+    return (conn->request && conn->response && conn->read_buf && conn->locals);
 }
 
 INLINE bool reset_connection(connection_t* conn) {
@@ -337,40 +329,20 @@ INLINE bool reset_connection(connection_t* conn) {
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
-    conn->request     = create_request(conn->arena);
-    conn->response    = create_response(conn->arena);
-    conn->read_buf[0] = '\0';
-
-    if (conn->locals) {
-        LocalsReset(conn->locals);
-    }
+    conn->request  = create_request(conn->arena);
+    conn->response = create_response(conn->arena);
+    conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
+    LocalsReset(conn->locals);
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
         conn->next = NULL;
         conn->prev = NULL;
     }
-    return (conn->request && conn->response);
+    return (conn->request && conn->response && conn->read_buf);
 }
 
-INLINE void free_connection_resources(connection_t* conn) {
-    free_request(conn->request);
-    free_response(conn->response);
-    if (conn->arena) arena_destroy(conn->arena);
-    if (conn->locals) LocalsDestroy(conn->locals);
-    free(conn);
-}
-
-// Called in seperate thread to free connections.
-void process_freelist(connection_freelist_t* freelist) {
-    while (freelist->count > 0) {
-        connection_t* conn = freelist->free_connections[--freelist->count];
-        free_connection_resources(conn);
-    }
-}
-
-INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state,
-                             connection_freelist_t* freelist) {
+INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* ka_state) {
     if (!conn || conn->client_fd == -1) return;
 
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client_fd, NULL);
@@ -379,12 +351,11 @@ INLINE void close_connection(int epoll_fd, connection_t* conn, KeepAliveState* k
 
     RemoveKeepAliveConnection(conn, ka_state);
 
-    // Add to free list if there's space, otherwise free immediately
-    if (freelist->count < MAX_FREE_CONNECTIONS) {
-        freelist->free_connections[freelist->count++] = conn;
-    } else {
-        free_connection_resources(conn);
-    }
+    free_request(conn->request);
+    free_response(conn->response);
+    LocalsReset(conn->locals);
+    if (conn->arena) arena_destroy(conn->arena);
+    free(conn);
 }
 
 // Send an error response during request processing.
@@ -1111,21 +1082,14 @@ void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
-void pulsar_set_locals_callback(LocalsCreateCallback callback) {
-    localsCreateCallback = callback;
-}
-
 // Set the context value by key.
-bool pulsar_set_context_value(connection_t* conn, const char* key, void* value) {
-    if (!conn || !conn->locals) return false;
-    return LocalsSetValue(conn->locals, key, value);
+bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func) {
+    return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
 // Get a context value. The user controlled value is written to value.
 // Its your responsibility to free it if no longer required.
 void* pulsar_get_context_value(connection_t* conn, const char* key) {
-    if (!conn || !conn->locals) return NULL;
-
     return LocalsGetValue(conn->locals, key);
 }
 
@@ -1380,8 +1344,7 @@ INLINE size_t MAX(size_t x, size_t y) {
 }
 
 INLINE void handle_read(int epoll_fd, connection_t* conn) {
-    char* read_buf     = conn->read_buf;
-    ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
+    ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             conn->closing = true;  // read: connection reset by peer.
@@ -1391,7 +1354,7 @@ INLINE void handle_read(int epoll_fd, connection_t* conn) {
         conn->closing = true;  // Unexpected close.
         return;
     }
-    read_buf[bytes_read] = '\0';
+    conn->read_buf[bytes_read] = '\0';
 
     process_request(conn, bytes_read);
 
@@ -1675,16 +1638,14 @@ typedef struct {
     int worker_id;
     int designated_core;
     KeepAliveState* keep_alive_state;
-    connection_freelist_t* freelist;
 } WorkerData;
 
 void* worker_thread(void* arg) {
-    WorkerData* worker              = (WorkerData*)arg;
-    int epoll_fd                    = worker->epoll_fd;
-    int worker_id                   = worker->worker_id;
-    int cpu_core                    = worker->designated_core;
-    KeepAliveState* ka_state        = worker->keep_alive_state;
-    connection_freelist_t* freelist = worker->freelist;
+    WorkerData* worker       = (WorkerData*)arg;
+    int epoll_fd             = worker->epoll_fd;
+    int worker_id            = worker->worker_id;
+    int cpu_core             = worker->designated_core;
+    KeepAliveState* ka_state = worker->keep_alive_state;
 
     pin_current_thread_to_core(cpu_core);
 
@@ -1706,7 +1667,7 @@ void* worker_thread(void* arg) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (now.tv_sec - last_timeout_check >= 5) {
-            CheckKeepAliveTimeouts(ka_state, freelist, worker_id, epoll_fd);
+            CheckKeepAliveTimeouts(ka_state, worker_id, epoll_fd);
             last_timeout_check = now.tv_sec;
         }
 
@@ -1731,9 +1692,6 @@ void* worker_thread(void* arg) {
                 connection_t* conn        = (connection_t*)events[i].data.ptr;
                 const uint32_t event_mask = events[i].events;
                 if (event_mask & EPOLLIN) {
-                    // Prefetch conn->read_buf and the first cache line of the buffer itself
-                    __builtin_prefetch(&conn->read_buf, 0, 1);  // 0=read, 1=moderate locality
-                    __builtin_prefetch(conn->read_buf, 0, 3);
                     handle_read(epoll_fd, conn);
                 } else if (event_mask & EPOLLOUT) {
                     handle_write(epoll_fd, conn, ka_state);
@@ -1742,7 +1700,7 @@ void* worker_thread(void* arg) {
                 }
 
                 if (conn->closing) {
-                    close_connection(epoll_fd, conn, ka_state, freelist);
+                    close_connection(epoll_fd, conn, ka_state);
                 }
             }
         }
@@ -1757,44 +1715,13 @@ void* worker_thread(void* arg) {
     return NULL;
 }
 
-void* gc_thread_handler(void* arg) {
-    connection_freelist_t* freelist = (connection_freelist_t*)arg;
-    struct timespec last_check;
-    clock_gettime(CLOCK_MONOTONIC, &last_check);
-
-    while (server_running) {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-
-        // Check every GC_INTERVAL_SEC seconds.
-        if ((now.tv_sec - last_check.tv_sec) >= GC_INTERVAL_SEC) {
-            process_freelist(freelist);
-            // printf("Worker %lu: Running GC\n", freelist->worker_id);
-            last_check = now;
-        }
-
-        // Sleep to prevent busy waiting
-        struct timespec sleep_time = {
-            .tv_sec  = 0,
-            .tv_nsec = 500000000  // 500ms
-        };
-        nanosleep(&sleep_time, NULL);
-    }
-
-    // Final cleanup on shutdown
-    process_freelist(freelist);
-    return NULL;
-}
-
 int pulsar_run(const char* addr, int port) {
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
     pthread_t workers[NUM_WORKERS]                = {};
-    pthread_t gc_threads[NUM_WORKERS]             = {};
     WorkerData worker_data[NUM_WORKERS]           = {};
     KeepAliveState keep_alive_states[NUM_WORKERS] = {};
-    connection_freelist_t freelists[NUM_WORKERS]  = {};
 
     install_signal_handler();
     sort_routes();
@@ -1816,22 +1743,12 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].epoll_fd            = epoll_fd;
-        worker_data[i].worker_id           = i;
-        worker_data[i].designated_core     = i % (num_cores - reserved_cores);
-        worker_data[i].keep_alive_state    = &keep_alive_states[i];
-        worker_data[i].freelist            = &freelists[i];
-        worker_data[i].freelist->worker_id = i;
+        worker_data[i].epoll_fd         = epoll_fd;
+        worker_data[i].worker_id        = i;
+        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
+        worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
-            perror("pthread_create");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Start the GC threads
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        if (pthread_create(&gc_threads[i], NULL, gc_thread_handler, &freelists[i])) {
             perror("pthread_create");
             exit(EXIT_FAILURE);
         }
@@ -1845,11 +1762,6 @@ int pulsar_run(const char* addr, int port) {
     // Join all worker threads
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
-    }
-
-    // Wait for GC threads.
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        pthread_join(gc_threads[i], NULL);
     }
 
     // Close server socket
