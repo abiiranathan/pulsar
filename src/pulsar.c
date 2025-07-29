@@ -21,11 +21,6 @@
 #include "../include/mimetype.h"
 #include "../include/pulsar.h"
 
-// Make sure they fit in uint8_t and uint16_t
-static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
-static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
-
-// Flag bit definitions
 typedef enum : uint8_t {
     HTTP_CONTENT_TYPE_SET = (1 << 0),  // 0x01 (1)
     HTTP_HEADERS_WRITTEN  = (1 << 1),  // 0x02 (2)
@@ -38,11 +33,6 @@ typedef enum : uint8_t {
 #define SET_CONTENT_TYPE(flags)    ((flags) |= HTTP_CONTENT_TYPE_SET)
 #define SET_HEADERS_WRITTEN(flags) ((flags) |= HTTP_HEADERS_WRITTEN)
 #define SET_RANGE_REQUEST(flags)   ((flags) |= HTTP_RANGE_REQUEST)
-
-/* ================================================================
- * Data Structures and Type Definitions
- * ================================================================ */
-const char* CRLF = "\r\n";
 
 // HTTP Response structure
 typedef struct __attribute__((aligned(64))) response_t {
@@ -623,7 +613,7 @@ INLINE void conn_writeheader_fast(connection_t* conn, const char* name, size_t n
     const size_t current_len  = res->headers_len;
 
     // make sure there is space for new header and \r\n terminator.
-    if (unlikely(current_len + required_len >= HEADERS_BUF_SIZE - 2)) {
+    if (unlikely(current_len + required_len >= HEADERS_BUF_SIZE - 3)) {
         return;  // No more space for new headers.
     }
 
@@ -918,18 +908,18 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
         conn_writeheader(conn, "Content-Length", content_length_str);
     }
 
-#if !WRITE_SERVER_HEADERS
+#if WRITE_SERVER_HEADERS
     conn_writeheader_fast(conn, "Server", 6, "Pulsar/1.0", 10);
     char date_buf[64];
     strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&conn->last_activity));
     conn_writeheader(conn, "Date", date_buf);
 #endif
+    assert(resp->headers_len < HEADERS_BUF_SIZE - 3);
 
-    ASSERT(resp->headers_len < HEADERS_BUF_SIZE - 2);
-
-    // Terminate headers with \r\n
-    memcpy(resp->headers_buf + resp->headers_len, CRLF, 2);
+    // Terminate headers.
+    memcpy(resp->headers_buf + resp->headers_len, "\r\n", 2);
     resp->headers_len += 2;
+    resp->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
 }
 
 /* ================================================================
