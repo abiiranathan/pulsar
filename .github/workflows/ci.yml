@@ -1,31 +1,70 @@
 name: Pulsar CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  build:
+  build-and-test:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-22.04, macos-12]
         build_type: [Debug, Release]
-    
+        include:
+          - os: ubuntu-22.04
+            cc: gcc
+            cxx: g++
+          - os: macos-12
+            cc: clang
+            cxx: clang++
+      fail-fast: false
+
     steps:
-    - uses: actions/checkout@v2
-    
+    - uses: actions/checkout@v3
+
+    - name: Install CMake and Ninja
+      uses: lukka/get-cmake@latest
+      with:
+        cmakeVersion: 3.25.x
+        
     - name: Install dependencies
       run: |
-        sudo apt-get update
-    
-    - name: Configure CMake
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build
+        elif [[ "$RUNNER_OS" == "macOS" ]]; then
+          brew update
+          brew install ninja
+        fi
+
+    - name: Configure CMake with Ninja
       run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBUILD_TESTS=ON
-    
-    - name: Build
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DBUILD_TESTS=ON \
+          -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+          -DCMAKE_MAKE_PROGRAM=ninja
+
+    - name: Build with Ninja
       run: |
-        cmake --build build --config ${{ matrix.build_type }}
-    
-    - name: Test
+        cmake --build build --config ${{ matrix.build_type }} --parallel 4
+
+    - name: Run Tests
       run: |
         cd build
-        ctest --output-on-failure
+        ctest --output-on-failure --parallel 4
+
+    - name: Verify Installation
+      run: |
+        cmake --install build --prefix ./install
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          ldd install/lib/libpulsar.so
+        elif [[ "$RUNNER_OS" == "macOS" ]]; then
+          otool -L install/lib/libpulsar.dylib
+        fi
+
