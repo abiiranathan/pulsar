@@ -11,6 +11,8 @@ set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+# Enable testing support
+include(CTest)
 enable_testing()
 
 # Build type handling
@@ -18,11 +20,10 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# Custom build types
-set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Profile" CACHE STRING "" FORCE)
-
 # Build mode options
 option(ENABLE_PGO "Enable Profile-Guided Optimization" OFF)
+option(ENABLE_NATIVE_OPTIMIZATION "Enable native optimization flags (-march=native etc.)" ON)
+option(ENABLE_UNIVERSAL_BINARY "Build fat binary for macOS (x86_64+arm64)" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(BUILD_STATIC_LIBS "Build static libraries" ON)
 option(BUILD_TESTS "Build test executables" ON)
@@ -39,6 +40,11 @@ else()
     message(FATAL_ERROR "Unsupported platform: ${CMAKE_SYSTEM_NAME}")
 endif()
 
+# macOS universal binary
+if(APPLE AND ENABLE_UNIVERSAL_BINARY AND NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "" FORCE)
+endif()
+
 # Compiler definitions
 add_compile_definitions(
     DA_IMPLEMENTATION
@@ -48,19 +54,19 @@ add_compile_definitions(
 # Base compiler flags
 set(BASE_C_FLAGS
     -Wall -Werror -Wextra -pedantic -fPIC
-    -Wno-unused-function -Wno-gnu-zero-variadic-macro-arguments
+    -Wno-unused-function -Wno-unused-result -Wno-gnu-zero-variadic-macro-arguments
 )
 
-# Debug flags
+if(ENABLE_NATIVE_OPTIMIZATION AND PLATFORM_LINUX)
+    set(NATIVE_FLAGS "-mtune=native -march=native -mavx2")
+endif()
+
+# Build-type-specific flags
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g3 -DDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "-O3 -g ${NATIVE_FLAGS} -flto")
+set(CMAKE_C_FLAGS_PROFILE "-O3 -g ${NATIVE_FLAGS} -flto -fprofile-generate")
 
-# Release flags
-set(CMAKE_C_FLAGS_RELEASE "-O3 -g -mtune=native -march=native -flto -mavx2")
-
-# Profile flags (custom build type)
-set(CMAKE_C_FLAGS_PROFILE "-O3 -g -mtune=native -march=native -flto -mavx2 -fprofile-generate")
-
-# Apply base flags to all configurations
+# Apply base flags to all configs
 add_compile_options(${BASE_C_FLAGS})
 
 # PGO support
@@ -69,10 +75,7 @@ if(ENABLE_PGO AND CMAKE_BUILD_TYPE STREQUAL "Release")
     add_link_options(-lgcov)
 endif()
 
-# Include directories
-include_directories(include)
-
-# Source files
+# Source and header files
 set(BASE_SOURCES
     src/routing.c
     src/locals.c
@@ -81,10 +84,9 @@ set(BASE_SOURCES
     src/str.c
 )
 
-# Header files
 file(GLOB HEADERS "include/*.h")
 
-# Create object library for shared code
+# Create object library
 add_library(pulsar_objects OBJECT ${BASE_SOURCES})
 
 target_include_directories(pulsar_objects PUBLIC 
@@ -92,24 +94,12 @@ target_include_directories(pulsar_objects PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Platform-specific settings
-if(PLATFORM_MACOS)
-    target_compile_options(pulsar_objects PRIVATE -arch x86_64 -arch arm64)
-    set_target_properties(pulsar_objects PROPERTIES
-        OSX_ARCHITECTURES "x86_64;arm64"
-    )
-endif()
-
 # Static library
 if(BUILD_STATIC_LIBS)
     add_library(pulsar_static STATIC $<TARGET_OBJECTS:pulsar_objects>)
     set_target_properties(pulsar_static PROPERTIES
         OUTPUT_NAME pulsar
         ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-    )
-    target_include_directories(pulsar_static PUBLIC 
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
     )
 endif()
 
@@ -122,12 +112,8 @@ if(BUILD_SHARED_LIBS)
         SOVERSION ${PROJECT_VERSION_MAJOR}
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     )
-    target_include_directories(pulsar_shared PUBLIC 
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-    )
     target_link_libraries(pulsar_shared PRIVATE pthread)
-    
+
     if(ENABLE_PGO AND CMAKE_BUILD_TYPE STREQUAL "Release")
         target_link_libraries(pulsar_shared PRIVATE gcov)
     endif()
@@ -150,30 +136,35 @@ if(BUILD_TESTS)
         set_target_properties(test_${test_name} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
         )
-        
-        # Register the test with CTest
         add_test(NAME ${test_name} COMMAND test_${test_name})
-        
-        # Optional: Set working directory if tests need specific files
         set_tests_properties(${test_name} PROPERTIES
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests
         )
     endforeach()
 endif()
 
-# Valgrind check target
+# Valgrind check
 find_program(VALGRIND_EXECUTABLE valgrind)
 if(VALGRIND_EXECUTABLE)
-    add_custom_target(check
-        COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
-                --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/glibc.supp 
-                ${CMAKE_BINARY_DIR}/bin/server
-        DEPENDS server
-        COMMENT "Running valgrind memory check"
-    )
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/glibc.supp")
+        add_custom_target(check
+            COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
+                    --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/glibc.supp 
+                    ${CMAKE_BINARY_DIR}/bin/server
+            DEPENDS server
+            COMMENT "Running valgrind memory check with suppressions"
+        )
+    else()
+        add_custom_target(check
+            COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
+                    ${CMAKE_BINARY_DIR}/bin/server
+            DEPENDS server
+            COMMENT "Running valgrind memory check (no suppressions)"
+        )
+    endif()
 endif()
 
-# Profile build target
+# Profile target
 add_custom_target(profile
     COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target clean
     COMMAND ${CMAKE_COMMAND} -DCMAKE_BUILD_TYPE=Profile ${CMAKE_CURRENT_SOURCE_DIR}
@@ -198,11 +189,10 @@ else()
     )
 endif()
 
-# Installation
+# Install headers and libraries
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-# Install libraries
 if(BUILD_STATIC_LIBS)
     install(TARGETS pulsar_static
         EXPORT PulsarTargets
@@ -220,7 +210,6 @@ if(BUILD_SHARED_LIBS)
     )
 endif()
 
-# Install headers
 if(INSTALL_HEADERS)
     install(FILES ${HEADERS}
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pulsar
@@ -228,13 +217,7 @@ if(INSTALL_HEADERS)
     )
 endif()
 
-# Install main executable
-# install(TARGETS server
-#     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-#     COMPONENT Runtime
-# )
-
-# Generate and install CMake config files
+# Package config files
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/PulsarConfigVersion.cmake"
     VERSION ${PROJECT_VERSION}
@@ -261,7 +244,7 @@ install(FILES
     COMPONENT Development
 )
 
-# Generate pkg-config file
+# pkg-config support
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/pulsar.pc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/pulsar.pc"
@@ -273,12 +256,12 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pulsar.pc"
     COMPONENT Development
 )
 
-# Update linker cache on Linux
+# Linux-specific: update linker cache
 if(PLATFORM_LINUX)
     install(CODE "execute_process(COMMAND ldconfig)")
 endif()
 
-# CPack configuration for packaging
+# Packaging
 set(CPACK_PACKAGE_NAME "pulsar")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Pulsar web server library")
