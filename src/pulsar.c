@@ -922,10 +922,6 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     resp->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
 }
 
-/* ================================================================
- * Static File Handling
- * ================================================================ */
-
 void static_file_handler(connection_t* conn) {
     route_t* route = conn->request->route;
     ASSERT((route->flags & STATIC_ROUTE_FLAG) != 0 && route);
@@ -1010,12 +1006,7 @@ const char* get_path_param(connection_t* conn, const char* name) {
     return NULL;
 }
 
-/* ================================================================
- * Middleware Handling Functions
- * ================================================================ */
-
 INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
-    // Execute global middleware
 #define EXECUTE_MIDDLEWARE(mw, count)                                                                        \
     do {                                                                                                     \
         size_t index = 0;                                                                                    \
@@ -1035,10 +1026,7 @@ INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
 }
 
 void use_global_middleware(HttpHandler* middleware, size_t count) {
-    if (count == 0) {
-        return;
-    }
-
+    if (count == 0) return;
     ASSERT(count + global_mw_count <= MAX_GLOBAL_MIDDLEWARE);
 
     for (size_t i = 0; i < count; i++) {
@@ -1059,13 +1047,10 @@ void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
-// Set the context value by key.
 bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func) {
     return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
-// Get a context value. The user controlled value is written to value.
-// Its your responsibility to free it if no longer required.
 void* pulsar_get_context_value(connection_t* conn, const char* key) {
     return LocalsGetValue(conn->locals, key);
 }
@@ -1123,7 +1108,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
 
     if (route) {
         // Prefetch response and buffer
-        __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
+        __builtin_prefetch(conn->response, 0, 3);
         execute_all_middleware(conn, route);
         if (!conn->abort) {
             route->handler(conn);
@@ -1133,9 +1118,9 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
 
     finalize_response(conn, conn->request->method_type);
+    conn->last_activity = time(NULL);
 
     // Switch to writing response.
-    conn->last_activity = time(NULL);
 }
 
 /* ================================================================
@@ -1383,7 +1368,7 @@ INLINE void handle_write(int epoll_fd, connection_t* conn, KeepAliveState* state
                 if (unlikely(sent < 0)) goto handle_error;
 
                 // Handle zero bytes sent (socket buffer full)
-                if (sent == 0) {
+                if (unlikely(sent == 0)) {
                     // Socket buffer is full, wait for next EPOLLOUT event
                     return;
                 }
