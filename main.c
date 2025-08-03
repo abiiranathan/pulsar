@@ -92,12 +92,12 @@ void pathparams_query_params_handler(connection_t* conn) {
 }
 
 void handle_form(connection_t* conn) {
-    MultipartForm form = {};
+    MultipartForm form = {0};
     char boundary[128];
-    MpCode code;
+    MultipartCode code;
 
     code = multipart_init(&form, 1 << 20);
-    if (code != MP_OK) {
+    if (code != MULTIPART_OK) {
         conn_set_status(conn, StatusBadRequest);
         conn_write_string(conn, multipart_error(code));
         return;
@@ -122,7 +122,7 @@ void handle_form(connection_t* conn) {
     size_t content_length = req_content_len(conn);
 
     code = multipart_parse(body, content_length, boundary, &form);
-    if (code != MP_OK) {
+    if (code != MULTIPART_OK) {
         conn_set_status(conn, StatusBadRequest);
         conn_write_string(conn, multipart_error(code));
         multipart_cleanup(&form);

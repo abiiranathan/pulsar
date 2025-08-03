@@ -57,11 +57,11 @@ int main() {
             "--boundary123--\r\n";
 
         MultipartForm form;
-        MpCode code = multipart_init(&form, 1024);
-        ASSERT(code == MP_OK && "Form initialization failed");
+        MultipartCode code = multipart_init(&form, 1024);
+        ASSERT(code == MULTIPART_OK && "Form initialization failed");
 
         code = multipart_parse(test_form, strlen(test_form), "--boundary123", &form);
-        ASSERT(code == MP_OK && "Form parsing failed");
+        ASSERT(code == MULTIPART_OK && "Form parsing failed");
 
         // Verify fields
         const char* username = multipart_field_value(&form, "username");
@@ -97,11 +97,11 @@ int main() {
             "--boundary123--\r\n";
 
         MultipartForm form;
-        MpCode code = multipart_init(&form, 1024);
-        ASSERT(code == MP_OK && "Form initialization failed");
+        MultipartCode code = multipart_init(&form, 1024);
+        ASSERT(code == MULTIPART_OK && "Form initialization failed");
 
         code = multipart_parse(test_form, strlen(test_form), "--boundary123", &form);
-        ASSERT(code == MP_OK && "Form parsing failed");
+        ASSERT(code == MULTIPART_OK && "Form parsing failed");
 
         // Verify fields
         const char* description = multipart_field_value(&form, "description");

@@ -40,7 +40,15 @@ Access query parameters by name or get all parameters.
 
 ```c 
 const char* query_get(connection_t* conn, const char* name);
-headers_t* query_params(connection_t* conn);
+
+headers_t* params= query_params(conn);
+if (params) {
+    // Check for query params.
+    header_entry* entry = NULL;
+    headers_foreach(params, entry) {
+        printf("%s = %s\n", entry->name, entry->value);
+    }
+}
 ```
 
 ### Path Parameters
@@ -101,7 +109,7 @@ void pulsar_delete_context_value(connection_t* conn, const char* key);
 ## Example Usage
 
 ```c
-#include "pulsar.h"
+#include <pulsar/pulsar.h>
 
 bool hello_handler(connection_t* conn) {
     conn_set_status(conn, StatusOK);
@@ -130,4 +138,85 @@ int main() {
     // Start server
     return pulsar_run(NULL, 8080);
 }
+```
+
+## Working with forms
+Pulsar server includes APIs for processing multipart/form-data.
+
+Typical public API and usage:
+
+```c
+#include <pulsar/pulsar.h>
+#include <pulsar/forms.h>
+
+// Maximum memory to be allocated for form processing.
+#define MEMORY 4096
+
+void handle_post_form(connection_t *conn){
+    // Initialize the form.
+    char boundary[256];
+    MultipartForm form={0};
+
+    // You must allocate enough memory upfront, enough to process all the form
+    // fields and files. (Memory does not include file contents)
+    MultipartCode code = multipart_init(&form, MEMORY);
+
+    // Handle error.
+    if(code != MULTIPART_OK){
+        conn_set_status(conn, StatusBadRequest);
+
+        // Use multipart_error to extract error message from MultipartCode.
+        conn_write_string(conn, multipart_error(code));
+        multipart_cleanup(&form);
+        return;
+    }
+
+
+    // Extract the form boundary from the request body.
+    const char* content_type = req_header_get(conn, "Content-Type");
+    bool parse_result = parse_boundary(content_type, boundary, sizeof(boundary));
+    assert(parse_result && "Failed to parse form boundary from header");
+
+    // Parse the form.
+    const char* body      = req_body(conn);
+    size_t content_length = req_content_len(conn);
+
+    code = multipart_parse(body, content_length, boundary, &form);
+    assert(code == MULTIPART_OK && "Form parsing failed");
+
+    // Accessing form values.
+    const char* username = multipart_field_value(&form, "username") ;
+
+    // Access single file by field name.
+    FileHeader* file = multipart_file(&form, "file");
+    if (file) {
+        if (multipart_save_file(file, body, "destination_path_here")) {
+            conn_write_string(conn, "File uploaded successfully\n");
+            multipart_cleanup(&form);
+            return;
+        }
+    }else{
+        // handle file not uploaded.
+    }
+
+    // Get multiple files sharing the same label (in multi-upload)
+    size_t out_indices[4];
+    size_t num_files;
+    num_files = multipart_files(&form, "files[]", out_indices, 4);
+    assert(num_files > 0);
+
+    for (size_t i = 0; i < num_files; i++) {
+        // Metadata about the file relative to the body(ie file size and offsets)
+        FileHeader* file_header = form.files[i];
+
+        // Efficient write using offsets in the req body to avoid duplicate allocation.
+        if (!multipart_save_file(file_header, body, "destination_path")) {
+            // handle error saving file.
+        }
+    }
+
+    // Clean up the memory used by the form.
+    multipart_cleanup(&form);
+}
+
 ```

@@ -20,8 +20,13 @@
 #include <malloc.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
-#elif defined(__APPLE__) || defined(__FreeBSD__)
+#elif defined(__FreeBSD__)
 #include <sys/cpuset.h>
+#include <sys/event.h>
+#include <sys/param.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #include <sys/event.h>
 #include <sys/param.h>
 #endif
@@ -56,7 +61,7 @@ typedef struct kevent event_t;
 #define EVENT_EDGE_TRIGGERED EV_CLEAR
 #endif
 
-typedef enum : uint8_t {
+typedef enum {
     HTTP_CONTENT_TYPE_SET = (1 << 0),  // 0x01 (1)
     HTTP_HEADERS_WRITTEN  = (1 << 1),  // 0x02 (2)
     HTTP_RANGE_REQUEST    = (1 << 2),  // 0x04 (4)
@@ -295,10 +300,10 @@ INLINE bool event_is_error(const event_t* event) {
 /* ================================================================
  * Global Variables and Constants (unchanged)
  * ================================================================ */
-static int server_fd                                        = -1;  // Server socket file descriptor
-static volatile sig_atomic_t server_running                 = 1;   // Server running flag
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {};  // Global middleware array
-static size_t global_mw_count                               = 0;   // Global middleware count
+static int server_fd                                        = -1;   // Server socket file descriptor
+static volatile sig_atomic_t server_running                 = 1;    // Server running flag
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global middleware array
+static size_t global_mw_count                               = 0;    // Global middleware count
 
 static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
 
@@ -1263,7 +1268,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes) {
     }
     size_t headers_len = end_of_headers - conn->read_buf + 4;
 
-    char http_protocol[16] = {};
+    char http_protocol[16] = {0};
     if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, conn->request->path, http_protocol) != 3) {
         send_error_response(conn, StatusBadRequest);
         return;
@@ -1715,7 +1720,6 @@ typedef struct {
     KeepAliveState* keep_alive_state;
 } WorkerData;
 
-// Returns 0 on success, -1 on failure
 int pin_current_thread_to_core(int core_id) {
     // Get and validate core count
     long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1726,66 +1730,38 @@ int pin_current_thread_to_core(int core_id) {
         return -1;
     }
 
-    // Check if core is online (Linux only)
-#ifdef __linux__
-    char path[256];
-    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/online", core_id);
-    FILE* f = fopen(path, "r");
-    if (f) {
-        int online;
-        if (fscanf(f, "%d", &online) == 1 && online != 1) {
-            fclose(f);
-            fprintf(stderr, "CPU core %d is offline\n", core_id);
-            return -1;
-        }
-        fclose(f);
-    }
-#endif
-
-    // Set CPU affinity
+#if defined(__linux__) || defined(__FreeBSD__)
+/* Common implementation for Linux and FreeBSD */
 #if defined(__linux__)
     cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-
-    pthread_t thread = pthread_self();
-    if (pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset) != 0) {
-        if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) != 0) {
-            perror("Failed to set CPU affinity");
-            return -1;
-        }
-    }
-
-#elif defined(__FreeBSD__)
+#else
     cpuset_t cpuset;
+#endif
+
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
 
-    if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset_t), &cpuset) != 0) {
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) != 0) {
         perror("Failed to set CPU affinity");
         return -1;
     }
 
+#elif defined(__APPLE__)
+    /* macOS-specific implementation using exact API signature */
+    thread_port_t thread                 = pthread_mach_thread_np(pthread_self());
+    thread_affinity_policy_data_t policy = {core_id};
+    kern_return_t ret = thread_policy_set(thread, THREAD_AFFINITY_POLICY, (thread_policy_t)&policy,
+                                          THREAD_AFFINITY_POLICY_COUNT);
+
+    if (ret != KERN_SUCCESS) {
+        mach_error("thread_policy_set failed:", ret);
+        return -1;
+    }
 #else
-    fprintf(stderr, "CPU affinity not supported on this platform\n");
+#pragma message("CPU affinity not supported on this platform")
     return -1;
 #endif
 
-    // Attempt real-time scheduling (best effort)
-    struct sched_param param;
-    int policies[] = {SCHED_FIFO, SCHED_RR};
-
-    for (size_t i = 0; i < sizeof(policies) / sizeof(policies[0]); i++) {
-        int max_prio = sched_get_priority_max(policies[i]);
-        if (max_prio > 0) {
-            param.sched_priority = max_prio;
-            if (pthread_setschedparam(pthread_self(), policies[i], &param) == 0) {
-                break;  // Success with real-time scheduling
-            }
-        }
-    }
-
-    // Real-time scheduling failure is non-fatal
     return 0;
 }
 
@@ -1803,7 +1779,7 @@ void* worker_thread(void* arg) {
         return NULL;
     }
 
-    event_t events[MAX_EVENTS] = {};
+    event_t events[MAX_EVENTS] = {0};
     long last_timeout_check    = 0;
 
     while (server_running) {
@@ -1863,9 +1839,9 @@ int pulsar_run(const char* addr, int port) {
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
-    pthread_t workers[NUM_WORKERS]                = {};
-    WorkerData worker_data[NUM_WORKERS]           = {};
-    KeepAliveState keep_alive_states[NUM_WORKERS] = {};
+    pthread_t workers[NUM_WORKERS]                = {0};
+    WorkerData worker_data[NUM_WORKERS]           = {0};
+    KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
 
     install_signal_handler();
     sort_routes();

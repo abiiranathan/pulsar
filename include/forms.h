@@ -70,13 +70,13 @@ typedef struct MultipartForm {
  * @brief Return codes for form parsing operations
  */
 typedef enum {
-    MP_OK,                   ///< Operation succeeded
+    MULTIPART_OK,            ///< Operation succeeded
     MEMORY_ALLOC_ERROR,      ///< Memory allocation failed
     INVALID_FORM_BOUNDARY,   ///< Malformed boundary marker
     MAX_FILE_SIZE_EXCEEDED,  ///< File exceeds size limit
     EMPTY_FILE_CONTENT,      ///< File has no content
     ARENA_ALLOC_ERROR,       ///< Arena allocation failed
-} MpCode;
+} MultipartCode;
 
 /* Public API **************************************************************/
 
@@ -88,7 +88,7 @@ typedef enum {
  *
  * @note This must be called before any other functions on a MultipartForm
  */
-MpCode multipart_init(MultipartForm* form, size_t memory);
+MultipartCode multipart_init(MultipartForm* form, size_t memory);
 
 /**
  * @brief Parse multipart form data
@@ -100,7 +100,7 @@ MpCode multipart_init(MultipartForm* form, size_t memory);
  *
  * @note The boundary should match the Content-Type header value
  */
-MpCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form);
+MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form);
 
 /**
  * @brief Free all resources associated with a form
@@ -149,7 +149,7 @@ bool multipart_save_file(const FileHeader* file, const char* body, const char* p
  * @param error Error code
  * @return Constant string describing error
  */
-const char* multipart_error(MpCode error);
+const char* multipart_error(MultipartCode error);
 
 /* Utility Functions *******************************************************/
 

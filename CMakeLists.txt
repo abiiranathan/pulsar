@@ -55,6 +55,7 @@ add_compile_definitions(
 set(BASE_C_FLAGS
     -Wall -Werror -Wextra -pedantic -fPIC
     -Wno-unused-function -Wno-unused-result -Wno-gnu-zero-variadic-macro-arguments
+    -std=c2x
 )
 
 if(ENABLE_NATIVE_OPTIMIZATION AND PLATFORM_LINUX)

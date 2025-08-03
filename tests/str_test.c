@@ -82,7 +82,7 @@ static void test_string_views(void) {
 static void test_string_buffer_default(void) {
     printf("\n=== String Buffer Tests (Default Allocator) ===\n");
 
-    str_buf buf = {};
+    str_buf buf = {0};
     str_result_t result;
 
     // Initialize buffer
@@ -155,7 +155,7 @@ static void test_string_buffer_default(void) {
 static void test_string_buffer_arena(void) {
     printf("\n=== String Buffer Tests (Arena Allocator) ===\n");
 
-    str_buf buf1 = {}, buf2 = {};
+    str_buf buf1 = {0}, buf2 = {0};
     allocator_t* allocator = arena_allocator_create(1024);
     assert(allocator != NULL && "Arena allocator creation should succeed");
 

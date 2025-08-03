@@ -53,7 +53,7 @@ INLINE bool grow_fields_array(MultipartForm* form) {
     return true;
 }
 
-MpCode multipart_init(MultipartForm* form, size_t memory) {
+MultipartCode multipart_init(MultipartForm* form, size_t memory) {
     if (!form) {
         return MEMORY_ALLOC_ERROR;
     }
@@ -84,7 +84,7 @@ MpCode multipart_init(MultipartForm* form, size_t memory) {
     form->files_capacity  = INITIAL_FILE_CAPACITY;
     form->fields_capacity = INITIAL_FIELD_CAPACITY;
 
-    return MP_OK;
+    return MULTIPART_OK;
 }
 
 // Insert file header into form
@@ -107,7 +107,7 @@ INLINE bool form_insert_header(MultipartForm* form, FileHeader* header) {
  *
  * @returns: MpCode enum value indicating success or failure.
  */
-MpCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form) {
+MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form) {
     if (!data || !boundary || !form || !form->arena) {
         return MEMORY_ALLOC_ERROR;
     }
@@ -119,8 +119,8 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
     const char* key_start   = NULL;
     const char* value_start = NULL;
 
-    State state = STATE_BOUNDARY;
-    MpCode code = MP_OK;
+    State state        = STATE_BOUNDARY;
+    MultipartCode code = MULTIPART_OK;
 
     // Current file header being built
     FileHeader current_header = {0};
@@ -364,7 +364,7 @@ MpCode multipart_parse(const char* data, size_t size, const char* boundary, Mult
     }
 
 cleanup:
-    if (code != MP_OK) {
+    if (code != MULTIPART_OK) {
         multipart_cleanup(form);
     }
     return code;
@@ -473,7 +473,7 @@ bool multipart_save_file(const FileHeader* file, const char* body, const char* p
     return true;
 }
 
-const char* multipart_error(MpCode error) {
+const char* multipart_error(MultipartCode error) {
     switch (error) {
         case MEMORY_ALLOC_ERROR:
             return "Memory allocation failed";
@@ -485,7 +485,7 @@ const char* multipart_error(MpCode error) {
             return "Empty file content";
         case ARENA_ALLOC_ERROR:
             return "Arena allocation failed";
-        case MP_OK:  // fall through
+        case MULTIPART_OK:  // fall through
         default:
             return "Success";
     }

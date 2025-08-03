@@ -6,7 +6,7 @@
 extern void static_file_handler(struct connection_t* conn);
 
 // Global routes
-static route_t global_routes[MAX_ROUTES] = {};
+static route_t global_routes[MAX_ROUTES] = {0};
 static size_t global_route_count         = 0;
 
 // Count the number of path parameters in pattern.
