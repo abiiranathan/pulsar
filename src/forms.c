@@ -374,7 +374,7 @@ bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     if (!content_type || !boundary) return false;
 
     const char* prefix  = "--";
-    size_t prefix_len   = 2;  // strlen(prefix)
+    size_t prefix_len   = 2;
     size_t total_length = strlen(content_type);
 
     if (strncasecmp(content_type, "multipart/form-data", 19) != 0) {
@@ -438,40 +438,19 @@ FileHeader* multipart_file(const MultipartForm* form, const char* field_name) {
     return NULL;
 }
 
-size_t* multipart_get_files(const MultipartForm* form, const char* field_name, size_t* count) {
-    if (!form || !field_name || !count) {
-        if (count) *count = 0;
-        return NULL;
+size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices,
+                       size_t max_indices) {
+    if (!form || !field_name || !out_indices) {
+        return 0;
     }
 
-    size_t num_files = 0;
-    for (size_t i = 0; i < form->num_files; i++) {
+    size_t found = 0;
+    for (size_t i = 0; i < form->num_files && found < max_indices; i++) {
         if (form->files[i]->field_name && strcmp(form->files[i]->field_name, field_name) == 0) {
-            num_files++;
+            out_indices[found++] = i;
         }
     }
-
-    if (num_files == 0) {
-        *count = 0;
-        return NULL;
-    }
-
-    size_t* indices = (size_t*)malloc(num_files * sizeof(size_t));
-    if (!indices) {
-        *count = 0;
-        return NULL;
-    }
-
-    size_t j = 0;
-    for (size_t i = 0; i < form->num_files; i++) {
-        if (form->files[i]->field_name && strcmp(form->files[i]->field_name, field_name) == 0) {
-            indices[j] = i;
-            j++;
-        }
-    }
-
-    *count = num_files;
-    return indices;
+    return found;
 }
 
 bool multipart_save_file(const FileHeader* file, const char* body, const char* path) {

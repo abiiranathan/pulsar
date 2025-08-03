@@ -117,12 +117,23 @@ void multipart_cleanup(MultipartForm* form);
 const char* multipart_field_value(const MultipartForm* form, const char* name);
 
 /**
- * @brief Get file metadata by field name
+ * @brief Get file metadata of the first entry that matches the field name
  * @param form Parsed form structure
  * @param field_name Name of file upload field
  * @return FileHeader pointer or NULL if not found
  */
 FileHeader* multipart_file(const MultipartForm* form, const char* field_name);
+
+/**
+ * @brief Populates indices in multipart files for files matching field_name.
+ * @param form Parsed form structure
+ * @param field_name Name of file upload field
+ * @param out_indices Output array for the matched indices.
+ * @param max_indices Array size of out_indices.
+ * @return size_t Number of matches in out_indices array.
+ */
+size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices,
+                       size_t max_indices);
 
 /**
  * @brief Save file contents to disk

@@ -63,8 +63,8 @@ endif()
 
 # Build-type-specific flags
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g3 -DDEBUG")
-set(CMAKE_C_FLAGS_RELEASE "-O3 -g ${NATIVE_FLAGS} -flto")
-set(CMAKE_C_FLAGS_PROFILE "-O3 -g ${NATIVE_FLAGS} -flto -fprofile-generate")
+set(CMAKE_C_FLAGS_RELEASE "-O3 ${NATIVE_FLAGS} -flto")
+set(CMAKE_C_FLAGS_PROFILE "-O3 ${NATIVE_FLAGS} -flto -fprofile-generate")
 
 # Apply base flags to all configs
 add_compile_options(${BASE_C_FLAGS})
@@ -77,10 +77,11 @@ endif()
 
 # Source and header files
 set(BASE_SOURCES
-    src/routing.c
+    src/forms.c
+    src/hashmap.c
     src/locals.c
     src/pulsar.c
-    src/forms.c
+    src/routing.c
     src/str.c
 )
 
@@ -171,23 +172,6 @@ add_custom_target(profile
     COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
     COMMENT "Building with profiling enabled"
 )
-
-# Verification target
-add_custom_target(verify
-    COMMENT "Verifying built libraries"
-)
-
-if(PLATFORM_MACOS)
-    add_custom_command(TARGET verify POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E echo "Verifying universal binary..."
-        COMMAND lipo -archs ${CMAKE_BINARY_DIR}/lib/libpulsar.${LIB_EXTENSION}
-    )
-else()
-    add_custom_command(TARGET verify POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E echo "Verifying shared library..."
-        COMMAND file ${CMAKE_BINARY_DIR}/lib/libpulsar.${LIB_EXTENSION}
-    )
-endif()
 
 # Install headers and libraries
 include(GNUInstallDirs)
