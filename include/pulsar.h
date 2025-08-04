@@ -1,6 +1,8 @@
 #ifndef PULSAR_H
 #define PULSAR_H
 
+#include <signal.h>
+#include <sys/uio.h>
 #include <time.h>
 #include "constants.h"
 #include "content_types.h"
@@ -8,6 +10,8 @@
 #include "routing.h"
 #include "status_code.h"
 #include "utils.h"
+
+extern volatile sig_atomic_t server_running;
 
 #ifdef __cplusplus
 extern "C" {
@@ -123,8 +127,8 @@ int conn_notfound(connection_t* conn);
 int conn_write(connection_t* conn, const void* data, size_t len);
 
 /**
- * @brief Writes formatted string to response body
- *
+ * @brief Writes formatted string to response body. If the data is below 1024 bytes
+ * uses a stack buffer, otherwise dynamically allocates.
  * @param conn The connection object
  * @param fmt printf-style format string
  * @param ... Format arguments
@@ -152,6 +156,102 @@ void conn_abort(connection_t* conn);
 void conn_send(connection_t* conn, http_status status, const void* data, size_t length);
 
 /**
+ * @brief Sends a JSON response
+ * @param conn The connection object
+ * @param status HTTP status code
+ * @param json Null-terminated JSON string
+ */
+void conn_send_json(connection_t* conn, http_status status, const char* json);
+
+/**
+ * @brief Sends an HTML response
+ * @param conn The connection object
+ * @param status HTTP status code
+ * @param html Null-terminated HTML string
+ */
+void conn_send_html(connection_t* conn, http_status status, const char* html);
+
+/**
+ * @brief Sends a plain text response
+ * @param conn The connection object
+ * @param status HTTP status code
+ * @param text Null-terminated text string
+ */
+void conn_send_text(connection_t* conn, http_status status, const char* text);
+
+/**
+ * @brief Sends a redirect response
+ * @param conn The connection object
+ * @param location URL to redirect to
+ * @param permanent Use 301 (permanent) instead of 302 (temporary)
+ */
+void conn_send_redirect(connection_t* conn, const char* location, bool permanent);
+
+/**
+ * @brief Sends an XML response
+ * @param conn The connection object
+ * @param status HTTP status code
+ * @param xml Null-terminated XML string
+ */
+void conn_send_xml(connection_t* conn, http_status status, const char* xml);
+
+/**
+ * @brief Sends a JavaScript response
+ * @param conn The connection object
+ * @param status HTTP status code
+ * @param javascript Null-terminated JS string
+ */
+void conn_send_javascript(connection_t* conn, http_status status, const char* javascript);
+
+/**
+ * @brief Sends a CSS response
+ * @param conn The connection object
+ * @param status HTTP status code
+ * @param css Null-terminated CSS string
+ */
+void conn_send_css(connection_t* conn, http_status status, const char* css);
+
+// Start chunked transfer. Stop by calling conn_end_chunked_transfer.
+void conn_start_chunked_transfer(connection_t* conn, int max_age_seconds);
+
+// Write a chunk into response after calling 'conn_start_chunked_transfer'.
+// Returns the number of bytes written into the socket. (including chunk headers)
+ssize_t conn_write_chunk(connection_t* conn, const void* data, size_t size);
+
+// End SSE or chunked transfer.
+void conn_end_chunked_transfer(connection_t* conn);
+
+typedef struct {
+    const char* data;
+    size_t data_len;
+    const char* event;
+    size_t event_len;
+    const char* id;
+    size_t id_len;
+} sse_event_t;
+
+#define SSE_EVENT_INIT(data_, event_, id_)                                                                   \
+    (sse_event_t){.data      = (data_),                                                                      \
+                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,                                          \
+                  .event     = (event_),                                                                     \
+                  .event_len = (event_ != NULL) ? strlen(event_) : 0,                                        \
+                  .id        = (id_),                                                                        \
+                  .id_len    = (id_ != NULL) ? strlen(id_) : 0}
+
+// Start SSE event.
+void conn_start_sse(connection_t* conn);
+
+/**
+ * @brief Sends an event stream response (SSE)
+ * @param conn The connection object
+ * @param evt Pointer to sse_event_t struct.
+ */
+void conn_send_event(connection_t* conn, const sse_event_t* evt);
+
+// End SSE event.
+void conn_end_sse(connection_t* conn);
+
+/**
  * @brief Sets the Content-Type header
  *
  * @param conn The connection object
@@ -167,6 +267,25 @@ void conn_set_content_type(connection_t* conn, const char* content_type);
  * @param value Header value
  */
 void conn_writeheader(connection_t* conn, const char* name, const char* value);
+
+/**
+ * @brief Adds raw pre-formatted header(s) to the response.
+ * Each header must be terminated with \r\n.
+ * This is the most perfomant variant of the 3 header writing functions.
+ * @param conn The connection object
+ * @param header Pre-formatted header.
+ * @param value Length of the header excluding the null-terminator.
+ */
+void conn_writeheader_raw(connection_t* conn, const char* header, size_t length);
+
+/**
+ * @brief Write multiple pre-formatted headers at once into response.
+ *
+ * @param conn The connection object.
+ * @param headers The vector of headers.
+ * @param count The number of headers.
+ */
+void conn_writeheaders_vec(connection_t* conn, const struct iovec* headers, size_t count);
 
 /**
  * @brief Sets the HTTP response status and returns the status text.

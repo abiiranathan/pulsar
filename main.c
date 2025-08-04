@@ -5,39 +5,14 @@
 #define SENDFILE 0
 
 void hello_world_handler(connection_t* conn) {
+    static const char headers[] =
+        "Set-Cookie: sessionId=12345; Path=/; HttpOnly\r\n"
+        "Set-Cookie: theme=dark; Path=/; Secure\r\n"
+        "Content-Type: text/plain\r\n";
+
     conn_set_status(conn, StatusOK);
-
-    // Set-Cookie is a special header that can be set multiple times.
-    conn_writeheader(conn, "Set-Cookie", "sessionId=12345; Path=/; HttpOnly");
-    conn_writeheader(conn, "Set-Cookie", "theme=dark; Path=/; Secure");
-
-#if SENDFILE
-    conn_servefile(conn, __FILE__);
-#else
-    conn_set_content_type(conn, "text/plain");
-    const char* response = "Hello, World! This is Pulsar HTTP server.\n";
-    conn_write(conn, response, strlen(response));
-
-    // // Write a value larger than STACK_BUFFER_SIZE to test migration to heap and reallocation
-    // // Generate a large string to test heap migration
-    // const size_t large_size = (STACK_BUFFER_SIZE * 4) + 1;  // Ensure it exceeds stack buffer
-    // char* large_data        = malloc(large_size);
-    // if (large_data) {
-    //     // Fill with some test pattern
-    //     memset(large_data, 'A', large_size - 1);
-    //     large_data[large_size - 1] = '\0';
-
-    //     conn_write(conn, "\n--- Large data test ---\n", 25);
-    //     conn_write(conn, large_data, large_size - 1);  // Don't include null terminator
-    //     conn_write(conn, large_data, large_size - 1);  // Don't include null terminator
-    //     conn_write(conn, "\n--- End test ---\n", 18);
-
-    //     free(large_data);
-    // } else {
-    //     const char* error_msg = "\nFailed to allocate test data\n";
-    //     conn_write(conn, error_msg, strlen(error_msg));
-    // }
-#endif
+    conn_writeheader_raw(conn, headers, sizeof(headers) - 1);  // -1 to exclude null terminator
+    conn_write(conn, "Hello World", 11);
 }
 
 void json_handler(connection_t* conn) {
@@ -68,6 +43,171 @@ void echo_handler(connection_t* conn) {
         conn_write(conn, "\nBody: ", 7);
         conn_write(conn, body, content_length);
     }
+}
+
+void sse_handler(connection_t* conn) {
+    conn_start_sse(conn);
+    size_t total = 10000;
+    while (total > 0 && server_running) {
+        char msg[64];
+        char msg_id[24];
+
+        snprintf(msg, sizeof(msg), "Message: %lu", total);
+        snprintf(msg_id, sizeof(msg_id), "%lu", total);
+
+        sse_event_t evt = SSE_EVENT_INIT(msg, "message", msg_id);
+        conn_send_event(conn, &evt);
+        total--;
+        usleep(1000);
+    }
+    conn_end_sse(conn);
+}
+
+void chunked_handler(connection_t* conn) {
+    conn_start_chunked_transfer(conn, 0);
+
+    // Test case 1: Large single chunk (2KB)
+    {
+        char large_data[2048];
+        memset(large_data, 'A', sizeof(large_data) - 1);
+        large_data[sizeof(large_data) - 1] = '\0';
+
+        conn_write_chunk(conn, large_data, strlen(large_data));
+        usleep(100000);  // 100ms delay
+    }
+
+    // Test case 2: Multi-line text chunk (4KB)
+    {
+        char multi_line[4096];
+        char* pos        = multi_line;
+        size_t remaining = sizeof(multi_line) - 1;
+
+        for (int i = 0; i < 20 && remaining > 100; i++) {
+            int written =
+                snprintf(pos, remaining,
+                         "Line %d: This is a very long line of text that exceeds normal sizes. "
+                         "It contains repeated information to make it longer and test large chunk handling. "
+                         "Data data data data data data data data data data data data.\n",
+                         i);
+            if (written >= (int)remaining) break;
+            pos += written;
+            remaining -= written;
+        }
+
+        size_t data_len = pos - multi_line;
+        conn_write_chunk(conn, multi_line, data_len);
+        usleep(100000);
+    }
+
+    // Test case 3: JSON payload (3KB)
+    {
+        char json_data[3072];
+        int len = snprintf(json_data, sizeof(json_data),
+                           "{\n"
+                           "  \"type\": \"large_response\",\n"
+                           "  \"timestamp\": %ld,\n"
+                           "  \"data\": {\n"
+                           "    \"users\": [\n",
+                           time(NULL));
+
+        // Add many user objects
+        for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
+            len += snprintf(json_data + len, sizeof(json_data) - len,
+                            "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
+                            "\"active\": %s}%s\n",
+                            i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
+        }
+
+        len +=
+            snprintf(json_data + len, sizeof(json_data) - len,
+                     "    ],\n"
+                     "    \"metadata\": {\n"
+                     "      \"count\": 40,\n"
+                     "      \"generated_by\": \"chunked_handler\",\n"
+                     "      \"description\": \"Large JSON payload for testing chunked transfer encoding\"\n"
+                     "    }\n"
+                     "  }\n"
+                     "}");
+
+        conn_write_chunk(conn, json_data, len);
+        usleep(100000);
+    }
+
+    // Test case 4: Very large binary-safe data (8KB)
+    {
+        char huge_data[8192];
+
+        // Fill with varied data including some null bytes to test binary safety
+        for (size_t i = 0; i < sizeof(huge_data); i++) {
+            huge_data[i] = (char)(i % 256);
+        }
+
+        conn_write_chunk(conn, huge_data, sizeof(huge_data));
+        usleep(100000);
+    }
+
+    // Test case 5: Stream source file in large chunks
+    {
+        FILE* fp = fopen(__FILE__, "r");
+        if (fp) {
+            char file_chunk[4096];
+            size_t bytes_read;
+
+            while ((bytes_read = fread(file_chunk, 1, sizeof(file_chunk), fp)) > 0) {
+                conn_write_chunk(conn, file_chunk, bytes_read);
+                usleep(50000);  // 50ms between file chunks
+            }
+
+            fclose(fp);
+        }
+    }
+
+    // Test case 6: Rapid succession of medium chunks (1.5KB each)
+    for (int i = 0; i < 5; i++) {
+        char medium_chunk[1536];
+
+        int len = snprintf(medium_chunk, sizeof(medium_chunk), "CHUNK %d: ", i);
+
+        // Fill rest with pattern
+        for (int j = len; j < (int)sizeof(medium_chunk) - 1; j++) {
+            medium_chunk[j] = 'A' + ((j - len) % 26);
+        }
+        medium_chunk[sizeof(medium_chunk) - 1] = '\0';
+
+        conn_write_chunk(conn, medium_chunk, strlen(medium_chunk));
+        usleep(25000);  // 25ms delay
+    }
+
+    // Test case 7: Single massive chunk (16KB)
+    {
+        static char massive_chunk[16384];
+
+        char* pos        = massive_chunk;
+        size_t remaining = sizeof(massive_chunk) - 1;
+
+        // Create structured content
+        int written = snprintf(pos, remaining, "=== MASSIVE CHUNK TEST ===\n");
+        pos += written;
+        remaining -= written;
+
+        for (int i = 0; i < 200 && remaining > 80; i++) {
+            written = snprintf(pos, remaining,
+                               "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n", i,
+                               time(NULL) + i);
+            if (written >= (int)remaining) break;
+            pos += written;
+            remaining -= written;
+        }
+
+        size_t total_len = pos - massive_chunk;
+        conn_write_chunk(conn, massive_chunk, total_len);
+        usleep(200000);  // 200ms
+    }
+
+    // Final small chunk to signal completion
+    const char* completion = "\n=== LARGE CHUNK TESTING COMPLETED ===\n";
+    conn_write_chunk(conn, completion, strlen(completion));
+    conn_end_chunked_transfer(conn);
 }
 
 void pathparams_query_params_handler(connection_t* conn) {
@@ -148,20 +288,12 @@ void serve_movie(connection_t* conn) {
         "controls width='720' height='480'></video></body></html>";
 
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, CONTENT_TYPE_HTML);
+    conn_set_content_type(conn, HTML_TYPE);
     conn_write_string(conn, html);
 }
 
-// Example syncronous logger.
-// Note this is not ideal in production as it can seriously impair server performance.
-#include <string.h>
-#include <time.h>
-#include <unistd.h>
-
-// Thread-local buffer to avoid contention
 #define LOG_BUFFER_SIZE 1024
 #define LOGGING_ON      0
-
 static __thread char log_buffer[LOG_BUFFER_SIZE];
 
 void pulsar_callback(connection_t* conn, uint64_t total_ns) {
@@ -245,6 +377,8 @@ int main() {
     use_route_middleware(hello, mw, 2);
 
     route_register("/json", HTTP_GET, json_handler);
+    route_register("/sse", HTTP_GET, sse_handler);
+    route_register("/chunked", HTTP_GET, chunked_handler);
     route_register("/echo", HTTP_GET, echo_handler);
     route_register("/echo", HTTP_POST, echo_handler);
     route_register("/params/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);

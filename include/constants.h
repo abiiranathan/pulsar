@@ -14,13 +14,13 @@
 
 // Enable logging callback.
 #ifndef ENABLE_LOGGING
-#define ENABLE_LOGGING 0
+#define ENABLE_LOGGING 1
 #endif
 
 // If "truthy", server headers are written to the response.
 // This includes "Server" and "Date" headers.
 #ifndef WRITE_SERVER_HEADERS
-#define WRITE_SERVER_HEADERS 0
+#define WRITE_SERVER_HEADERS 1
 #endif
 
 // Number of workers. Should be ideally == ncpus.
@@ -35,7 +35,7 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 2048
+#define MAX_EVENTS 1024
 #endif
 
 // Buffer size for incoming request excluding body.
@@ -93,11 +93,6 @@
 #define HEADERS_CAPACITY 32
 #endif
 
-// Timeout in seconds for graceful shutdown on SIGINT/SIGTERM before forceful shutdown.
-#ifndef SHUTDOWN_TIMEOUT_SECONDS
-#define SHUTDOWN_TIMEOUT_SECONDS 5
-#endif
-
 // Maximum number of connection context variables set by the user.
 #ifndef LOCALS_CAPACITY
 #define LOCALS_CAPACITY 32
@@ -139,8 +134,5 @@ static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 se
 static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
 static_assert(MAX_FILE_SIZE > 0, "MAX_FILE_SIZE must be > 0");
 static_assert(MAX_FILE_SIZE <= MAX_BODY_SIZE, "MAX_FILE_SIZE must be <= MAX_BODY_SIZE");
-
-// Ensure shutdown timeout is reasonable
-static_assert(SHUTDOWN_TIMEOUT_SECONDS > 0, "SHUTDOWN_TIMEOUT_SECONDS must be > 0");
 
 #endif /* CONSTANTS_H */

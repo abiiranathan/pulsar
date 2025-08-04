@@ -3,80 +3,77 @@
 
 #include <stddef.h>
 
-// Content-Type header
-#define CONTENT_TYPE_HEADER "Content-Type"
-
 // Text types
-#define CONTENT_TYPE_HTML       "text/html"
-#define CONTENT_TYPE_PLAIN      "text/plain"
-#define CONTENT_TYPE_CSV        "text/csv"
-#define CONTENT_TYPE_CSS        "text/css"
-#define CONTENT_TYPE_XML        "application/xml"
-#define CONTENT_TYPE_JAVASCRIPT "application/javascript"
-#define CONTENT_TYPE_MARKDOWN   "text/markdown"
-#define CONTENT_TYPE_RTF        "application/rtf"
+#define HTML_TYPE       "text/html"
+#define PLAINTEXT_TYPE  "text/plain"
+#define CSV_TYPE        "text/csv"
+#define CSS_TYPE        "text/css"
+#define XML_TYPE        "application/xml"
+#define JAVASCRIPT_TYPE "application/javascript"
+#define MARKDOWN_TYPE   "text/markdown"
+#define RTF_TYPE        "application/rtf"
 
 // JSON and related
-#define CONTENT_TYPE_JSON        "application/json"
-#define CONTENT_TYPE_JSONLD      "application/ld+json"
-#define CONTENT_TYPE_WEBMANIFEST "application/manifest+json"
+#define JSON_TYPE        "application/json"
+#define JSONLD_TYPE      "application/ld+json"
+#define WEBMANIFEST_TYPE "application/manifest+json"
 
 // Document types
-#define CONTENT_TYPE_PDF     "application/pdf"
-#define CONTENT_TYPE_MSWORD  "application/msword"
-#define CONTENT_TYPE_MSEXCEL "application/vnd.ms-excel"
-#define CONTENT_TYPE_MSPPT   "application/vnd.ms-powerpoint"
-#define CONTENT_TYPE_DOCX    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-#define CONTENT_TYPE_XLSX    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-#define CONTENT_TYPE_PPTX    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-#define CONTENT_TYPE_ODT     "application/vnd.oasis.opendocument.text"
-#define CONTENT_TYPE_ODS     "application/vnd.oasis.opendocument.spreadsheet"
+#define PDF_TYPE     "application/pdf"
+#define MSWORD_TYPE  "application/msword"
+#define MSEXCEL_TYPE "application/vnd.ms-excel"
+#define MSPPT_TYPE   "application/vnd.ms-powerpoint"
+#define DOCX_TYPE    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+#define XLSX_TYPE    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+#define PPTX_TYPE    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+#define ODT_TYPE     "application/vnd.oasis.opendocument.text"
+#define ODS_TYPE     "application/vnd.oasis.opendocument.spreadsheet"
 
 // Image types
-#define CONTENT_TYPE_PNG  "image/png"
-#define CONTENT_TYPE_JPEG "image/jpeg"
-#define CONTENT_TYPE_GIF  "image/gif"
-#define CONTENT_TYPE_BMP  "image/bmp"
-#define CONTENT_TYPE_WEBP "image/webp"
-#define CONTENT_TYPE_TIFF "image/tiff"
-#define CONTENT_TYPE_SVG  "image/svg+xml"
-#define CONTENT_TYPE_ICO  "image/vnd.microsoft.icon"
+#define PNG_TYPE  "image/png"
+#define JPEG_TYPE "image/jpeg"
+#define GIF_TYPE  "image/gif"
+#define BMP_TYPE  "image/bmp"
+#define WEBP_TYPE "image/webp"
+#define TIFF_TYPE "image/tiff"
+#define SVG_TYPE  "image/svg+xml"
+#define ICO_TYPE  "image/vnd.microsoft.icon"
 
 // Font types
-#define CONTENT_TYPE_TTF   "font/ttf"
-#define CONTENT_TYPE_OTF   "font/otf"
-#define CONTENT_TYPE_WOFF  "font/woff"
-#define CONTENT_TYPE_WOFF2 "font/woff2"
+#define TTF_TYPE   "font/ttf"
+#define OTF_TYPE   "font/otf"
+#define WOFF_TYPE  "font/woff"
+#define WOFF2_TYPE "font/woff2"
 
 // Audio types
-#define CONTENT_TYPE_MP3   "audio/mpeg"
-#define CONTENT_TYPE_OGG   "audio/ogg"
-#define CONTENT_TYPE_WAV   "audio/wav"
-#define CONTENT_TYPE_AAC   "audio/aac"
-#define CONTENT_TYPE_FLAC  "audio/flac"
-#define CONTENT_TYPE_WEBMA "audio/webm"
+#define MP3_TYPE   "audio/mpeg"
+#define OGG_TYPE   "audio/ogg"
+#define WAV_TYPE   "audio/wav"
+#define AAC_TYPE   "audio/aac"
+#define FLAC_TYPE  "audio/flac"
+#define WEBMA_TYPE "audio/webm"
 
 // Video types
-#define CONTENT_TYPE_MP4  "video/mp4"
-#define CONTENT_TYPE_WEBM "video/webm"
-#define CONTENT_TYPE_OGV  "video/ogg"
-#define CONTENT_TYPE_AVI  "video/x-msvideo"
-#define CONTENT_TYPE_MOV  "video/quicktime"
-#define CONTENT_TYPE_MPEG "video/mpeg"
+#define MP4_TYPE  "video/mp4"
+#define WEBM_TYPE "video/webm"
+#define OGV_TYPE  "video/ogg"
+#define AVI_TYPE  "video/x-msvideo"
+#define MOV_TYPE  "video/quicktime"
+#define MPEG_TYPE "video/mpeg"
 
 // Archive types
-#define CONTENT_TYPE_ZIP   "application/zip"
-#define CONTENT_TYPE_TAR   "application/x-tar"
-#define CONTENT_TYPE_GZIP  "application/gzip"
-#define CONTENT_TYPE_BZIP2 "application/x-bzip2"
-#define CONTENT_TYPE_7Z    "application/x-7z-compressed"
-#define CONTENT_TYPE_RAR   "application/vnd.rar"
+#define ZIP_TYPE    "application/zip"
+#define TAR_TYPE    "application/x-tar"
+#define GZIP_TYPE   "application/gzip"
+#define BZIP2_TYPE  "application/x-bzip2"
+#define SEVENZ_TYPE "application/x-7z-compressed"
+#define RAR_TYPE    "application/vnd.rar"
 
 // Binary stream
-#define CONTENT_TYPE_OCTET "application/octet-stream"
+#define OCTET_STREAM_TYPE "application/octet-stream"
 
 // Form data
-#define CONTENT_TYPE_FORM_URLENCODED "application/x-www-form-urlencoded"
-#define CONTENT_TYPE_FORM_MULTIPART  "multipart/form-data"
+#define FORM_URLENCODED_TYPE "application/x-www-form-urlencoded"
+#define FORM_MULTIPART_TYPE  "multipart/form-data"
 
 #endif /* CONTENT_TYPES_H */
