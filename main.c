@@ -1,8 +1,5 @@
-#include "include/content_types.h"
 #include "include/forms.h"
 #include "include/pulsar.h"
-
-#define SENDFILE 0
 
 void hello_world_handler(connection_t* conn) {
     static const char headers[] =
