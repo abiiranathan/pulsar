@@ -74,7 +74,8 @@ BASE_SRC := $(SRC_DIR)/routing.c \
 			$(SRC_DIR)/locals.c \
 			$(SRC_DIR)/pulsar.c  \
 			$(SRC_DIR)/forms.c   \
-			$(SRC_DIR)/str.c
+			$(SRC_DIR)/str.c     \
+			$(SRC_DIR)/hashmap.c
 
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 
