@@ -75,7 +75,8 @@ INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epo
     while (current) {
         connection_t* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
-            printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
+            // printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
+            UNUSED(worker_id);
             close_connection(epoll_fd, current, state);
         }
         current = next;
@@ -173,19 +174,17 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->keep_alive    = true;
     conn->in_keep_alive = false;
     conn->abort         = false;
+    conn->arena         = arena;
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
     conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
     conn->request       = create_request(arena);
-    conn->locals        = arena_alloc(arena, sizeof(Locals));
-    if (conn->locals) {
-        LocalsInit(conn->locals);
-    }
-    conn->arena = arena;
+    conn->locals        = malloc(sizeof(Locals));
+    if (conn->locals) LocalsInit(conn->locals);
+
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
-
     conn->next = NULL;
     conn->prev = NULL;
     return (conn->request && conn->response && conn->read_buf && conn->locals);
@@ -202,9 +201,8 @@ INLINE bool reset_connection(connection_t* conn) {
         free(conn->response->body.heap);
     }
 
-    // Reset locals before resetting arena.
-    LocalsReset(conn->locals);
-
+    // Reset locals
+    if (conn->locals) LocalsReset(conn->locals);
     arena_reset(conn->arena);
 
 #if ENABLE_LOGGING
@@ -238,6 +236,8 @@ INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* k
     free_request(conn->request);
     free_response(conn->response);
     LocalsReset(conn->locals);
+    free(conn->locals);
+
     if (conn->arena) arena_destroy(conn->arena);
     free(conn);
 }
@@ -857,7 +857,7 @@ INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
 INLINE void write_server_headers(connection_t* conn) {
     char date_buf[64];
     int written;
-    conn_writeheader_raw(conn, "Server: Pulsar/1.0'\r\n", 21);
+    conn_writeheader_raw(conn, "Server: Pulsar/1.0\r\n", 20);
     written = strftime(date_buf, sizeof(date_buf), "Date: %a, %d %b %Y %H:%M:%S GMT\r\n",
                        gmtime(&conn->last_activity));
     conn_writeheader_raw(conn, date_buf, written);
@@ -1425,13 +1425,9 @@ INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveStat
         if (conn->keep_alive) {
             conn->last_activity = time(NULL);
             AddKeepAliveConnection(conn, state);
-
+            conn->closing = true;
             if (reset_connection(conn)) {
-                if (event_mod_read(queue_fd, conn->client_fd, conn) < 0) {
-                    conn->closing = true;
-                }
-            } else {
-                conn->closing = true;
+                conn->closing = (event_mod_read(queue_fd, conn->client_fd, conn) < 0);
             }
         }
 #if ENABLE_LOGGING

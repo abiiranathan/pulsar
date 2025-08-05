@@ -9,7 +9,7 @@
 
 // Per-connection arena memory.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY 16 * 1024
+#define ARENA_CAPACITY 8 * 1024
 #endif
 
 // Enable logging callback.
@@ -95,7 +95,7 @@
 
 // Maximum number of connection context variables set by the user.
 #ifndef LOCALS_CAPACITY
-#define LOCALS_CAPACITY 32
+#define LOCALS_CAPACITY 16
 #endif
 
 // Maximum capacity of the locals key.

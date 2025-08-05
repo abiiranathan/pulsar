@@ -77,6 +77,8 @@ void LocalsRemove(Locals* locals, const char* key) {
 }
 
 void LocalsReset(Locals* locals) {
+    if (!locals) return;
+
     // Free all values.
     for (size_t i = 0; i < locals->size; ++i) {
         if (locals->entries[i].free_func) {
