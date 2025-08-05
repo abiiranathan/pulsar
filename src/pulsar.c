@@ -723,19 +723,19 @@ void conn_send(connection_t* conn, http_status status, const void* data, size_t 
 }
 
 void conn_send_json(connection_t* conn, http_status status, const char* json) {
-    conn_writeheader_raw(conn, "Content-Type: application/json", 30);
+    conn_writeheader_raw(conn, "Content-Type: application/json\r\n", 32);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, json, strlen(json));
 }
 
 void conn_send_html(connection_t* conn, http_status status, const char* html) {
-    conn_writeheader_raw(conn, "Content-Type: text/html", 23);
+    conn_writeheader_raw(conn, "Content-Type: text/html\r\n", 25);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, html, strlen(html));
 }
 
 void conn_send_text(connection_t* conn, http_status status, const char* text) {
-    conn_writeheader_raw(conn, "Content-Type: text/plain", 24);
+    conn_writeheader_raw(conn, "Content-Type: text/plain\r\n", 26);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, text, strlen(text));
 }
@@ -768,19 +768,19 @@ void conn_send_redirect(connection_t* conn, const char* location, bool permanent
 }
 
 void conn_send_xml(connection_t* conn, http_status status, const char* xml) {
-    conn_writeheader_raw(conn, "Content-Type: application/xml", 29);
+    conn_writeheader_raw(conn, "Content-Type: application/xml\r\n", 31);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, xml, strlen(xml));
 }
 
 void conn_send_javascript(connection_t* conn, http_status status, const char* javascript) {
-    conn_writeheader_raw(conn, "Content-Type: application/javascript", 36);
+    conn_writeheader_raw(conn, "Content-Type: application/javascript\r\n", 38);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, javascript, strlen(javascript));
 }
 
 void conn_send_css(connection_t* conn, http_status status, const char* css) {
-    conn_writeheader_raw(conn, "Content-Type: text/css", 22);
+    conn_writeheader_raw(conn, "Content-Type: text/css\r\n", 24);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, css, strlen(css));
 }
