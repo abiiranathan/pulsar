@@ -201,6 +201,10 @@ INLINE bool reset_connection(connection_t* conn) {
     if (conn->response->heap_allocated) {
         free(conn->response->body.heap);
     }
+
+    // Reset locals before resetting arena.
+    LocalsReset(conn->locals);
+
     arena_reset(conn->arena);
 
 #if ENABLE_LOGGING
@@ -209,7 +213,6 @@ INLINE bool reset_connection(connection_t* conn) {
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
-    LocalsReset(conn->locals);
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
