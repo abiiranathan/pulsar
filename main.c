@@ -382,7 +382,7 @@ int main() {
     route_register("/form", HTTP_POST, handle_form);
     route_register("/movie", HTTP_GET, serve_movie);
 
-    route_static("/static", "./");
+    route_static("/static/", "./");
 
     return pulsar_run("localhost", 8080);
 }

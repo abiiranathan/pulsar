@@ -1221,18 +1221,30 @@ void static_file_handler(connection_t* conn) {
         return;
     }
 
+    // if a pattern ends with a slash, we need to remove it from the path.
+    size_t pattern_len = strlen(route->pattern);
+
     // Build the request static path
-    const char* static_path = path + strlen(route->pattern);
-    size_t static_path_len  = strlen(static_path);
+    const char* static_path = path + pattern_len;  // skip the pattern part
+    if (*static_path == '/') {
+        static_path++;  // Skip leading slash if present
+    }
+    size_t static_len = strlen(static_path);
 
     // Validate path lengths
-    if (dirlen >= PATH_MAX || static_path_len >= PATH_MAX || (dirlen + static_path_len + 2) >= PATH_MAX) {
+    if (dirlen >= PATH_MAX || static_len >= PATH_MAX || (dirlen + static_len + 2) >= PATH_MAX) {
         goto path_toolong;
     }
 
-    // Concatenate the dirname and the static path
     char filepath[PATH_MAX];
-    int n = snprintf(filepath, PATH_MAX, "%.*s%.*s", (int)dirlen, dirname, (int)static_path_len, static_path);
+
+    // Check if dirname ends with a slash
+    bool needs_slash = (dirlen > 0 && dirname[dirlen - 1] != '/');
+
+    // Build the final path with conditional slash
+    int n = snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname, needs_slash ? "/" : "",
+                     (int)static_len, static_path);
+
     if (n < 0 || n >= PATH_MAX) {
         goto path_toolong;
     }
