@@ -139,16 +139,37 @@ INLINE request_t* create_request(Arena* arena) {
     return req;
 }
 
+static inline void response_init(response_t* resp) {
+    if (!resp) return;
+
+    // Core response fields - most frequently accessed
+    resp->status_code    = 0;                  // HTTP status code
+    resp->heap_allocated = false;              // Start with stack allocation
+    resp->body_len       = 0;                  // No body content initially
+    resp->body_capacity  = WRITE_BUFFER_SIZE;  // Default to write buffer capacity
+
+    // Length tracking - initialize to 0
+    resp->headers_len = 0;
+    resp->status_len  = 0;
+    resp->flags       = 0;
+
+    // Sending progress state - all start at 0
+    resp->status_sent  = 0;
+    resp->headers_sent = 0;
+    resp->body_sent    = 0;
+
+    // File response state - initialize to invalid/unused state
+    resp->file_size   = 0;
+    resp->file_offset = 0;
+    resp->max_range   = 0;
+    resp->file_fd     = -1;  // Invalid file descriptor
+
+    // Note: We don't zero the buffers since they'll be written to before use
+}
+
 INLINE response_t* create_response(Arena* arena) {
     response_t* resp = arena_alloc(arena, sizeof(response_t));
-    if (!resp) return NULL;
-
-    memset(resp, 0, sizeof(response_t));
-
-    resp->heap_allocated = false;
-    resp->body.stack[0]  = '\0';
-    resp->body_capacity  = 0;
-    resp->file_fd        = -1;
+    if (resp) response_init(resp);
     return resp;
 }
 

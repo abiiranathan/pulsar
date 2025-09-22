@@ -27,9 +27,9 @@ typedef struct {
 INLINE headers_t* headers_new(Arena* arena) {
     headers_t* headers = arena_alloc(arena, sizeof(headers_t));
     if (unlikely(!headers)) return NULL;
-
-    memset(headers, 0, sizeof(headers_t));
     headers->arena = arena;
+    headers->count = 0;
+    // headers->entries not zeroed as an optimization.
     return headers;
 }
 
@@ -73,12 +73,6 @@ INLINE const char* headers_get(const headers_t* headers, const char* name) {
         }
     }
     return NULL;
-}
-
-// Clear all headers
-INLINE void headers_clear(headers_t* headers) {
-    headers->count = 0;
-    memset(headers->entries, 0, sizeof(headers->entries));
 }
 
 // Iterator

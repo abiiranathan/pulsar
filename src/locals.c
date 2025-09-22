@@ -4,7 +4,7 @@
 #include <string.h>
 
 void LocalsInit(Locals* locals) {
-    memset(locals->entries, 0, sizeof(locals->entries));
+    // memset(locals->entries, 0, sizeof(locals->entries));
     locals->size = 0;
 }
 
