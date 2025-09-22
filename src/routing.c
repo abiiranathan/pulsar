@@ -58,7 +58,8 @@ INLINE size_t count_path_params(const char* pattern, bool* valid) {
  * @param pathParams: The PathParams struct to store the matched parameters
  * @return true if the pattern and URL match, false otherwise
  */
-INLINE bool match_path_parameters(const char* pattern, const char* url_path, PathParams* path_params) {
+INLINE bool match_path_parameters(const char* pattern, const char* url_path,
+                                  PathParams* path_params) {
     const char* pat = pattern;
     const char* url = url_path;
     size_t nparams  = 0;
@@ -93,7 +94,7 @@ INLINE bool match_path_parameters(const char* pattern, const char* url_path, Pat
                 pat++;
             if (*pat != '}') return false;
 
-            size_t name_len = pat - name_start;
+            size_t name_len = (size_t)(pat - name_start);
 
             param->name = malloc(name_len + 1);
             if (param->name == NULL) {
@@ -109,7 +110,7 @@ INLINE bool match_path_parameters(const char* pattern, const char* url_path, Pat
             const char* val_start = url;
             while (*url && *url != '/' && *url != *pat)
                 url++;
-            size_t val_len = url - val_start;
+            size_t val_len = (size_t)(url - val_start);
 
             param->value = malloc(val_len + 1);
             if (param->value == NULL) {
@@ -153,10 +154,12 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 
     route_t* r     = &global_routes[global_route_count];
     r->pattern     = pattern;
+    r->pattern_len = strlen(pattern);
     r->method      = method;
     r->handler     = handler;
     r->flags       = NORMAL_ROUTE_FLAG;
     r->dirname     = NULL;
+    r->dirname_len = 0;
     r->path_params = NULL;
 
     bool pattern_valid;
@@ -185,9 +188,10 @@ route_t* route_static(const char* pattern, const char* dirname) {
     ASSERT(pattern && dirname && "pattern and dirname must be non-NULL");
     ASSERT(is_dir(dirname) && "dir must be an existing directory");
 
-    route_t* r = route_register(pattern, HTTP_GET, static_file_handler);
-    r->flags   = STATIC_ROUTE_FLAG;
-    r->dirname = dirname;
+    route_t* r     = route_register(pattern, HTTP_GET, static_file_handler);
+    r->flags       = STATIC_ROUTE_FLAG;
+    r->dirname     = dirname;
+    r->dirname_len = strlen(dirname);
     return r;
 }
 
@@ -201,10 +205,8 @@ static int compare_routes(const void* a, const void* b) {
     if (ra->method > rb->method) return 1;
 
     // Then sort by pattern length (longer patterns first)
-    size_t len_a = strlen(ra->pattern);
-    size_t len_b = strlen(rb->pattern);
-    if (len_a > len_b) return -1;
-    if (len_a < len_b) return 1;
+    if (ra->pattern_len > rb->pattern_len) return -1;
+    if (ra->pattern_len < rb->pattern_len) return 1;
 
     // Finally sort alphabetically
     return strcmp(ra->pattern, rb->pattern);
@@ -227,33 +229,32 @@ typedef struct {
 
 static RouteCacheEntry route_cache[ROUTE_CACHE_SIZE];
 
-#define HASH_ROUTE_KEY(method, url, result)                                                                  \
-    do {                                                                                                     \
-        (result)      = (method);                                                                            \
-        const char* p = (url);                                                                               \
-        while (*p) {                                                                                         \
-            (result) = (result) * 33 + *p++;                                                                 \
-        }                                                                                                    \
-    } while (0)
+static inline uint32_t hash_route_key(HttpMethod method, const char* url) {
+    uint32_t hash = (uint32_t)method;
+    const char* p = url;
+    while (*p) {
+        hash = hash * 33 + (uint32_t)(*p++);
+    }
+    return hash;
+}
 
 // Helper function to check if a route matches a URL
 INLINE bool route_matches(route_t* route, const char* url, size_t url_length) {
     if ((route->flags & NORMAL_ROUTE_FLAG) != 0) {
         return match_path_parameters(route->pattern, url, route->path_params);
     } else if ((route->flags & STATIC_ROUTE_FLAG) != 0) {
-        size_t pat_length = strlen(route->pattern);
-        return (pat_length <= url_length) && (memcmp(route->pattern, url, pat_length) == 0);
+        return (route->pattern_len <= url_length) &&
+               (memcmp(route->pattern, url, route->pattern_len) == 0);
     }
     return false;
 }
 
 route_t* route_match(const char* path, HttpMethod method) {
     // 0. Check cache first
-    uint32_t key;
-    HASH_ROUTE_KEY(method, path, key);
-    uint32_t cache_slot = (key & ROUTE_CACHE_MASK);
+    uint32_t keyhash    = hash_route_key(method, path);
+    uint32_t cache_slot = (keyhash & ROUTE_CACHE_MASK);
 
-    if (route_cache[cache_slot].key == key) {
+    if (route_cache[cache_slot].key == keyhash) {
         return route_cache[cache_slot].route;
     }
 
@@ -306,7 +307,7 @@ route_t* route_match(const char* path, HttpMethod method) {
     // Store in cache before returning
     if (matched_route) {
     caching:
-        route_cache[cache_slot].key   = key;
+        route_cache[cache_slot].key   = keyhash;
         route_cache[cache_slot].route = matched_route;
     }
     return matched_route;

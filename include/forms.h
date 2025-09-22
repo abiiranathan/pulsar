@@ -13,14 +13,13 @@
 extern "C" {
 #endif
 
+#include <solidc/arena.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-
-#include "arena.h"
 
 /**
  * @struct FileHeader
@@ -100,7 +99,8 @@ MultipartCode multipart_init(MultipartForm* form, size_t memory);
  *
  * @note The boundary should match the Content-Type header value
  */
-MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form);
+MultipartCode multipart_parse(const char* data, size_t size, const char* boundary,
+                              MultipartForm* form);
 
 /**
  * @brief Free all resources associated with a form

@@ -51,7 +51,7 @@
 // Default buffer size for response body above which allocation happens, allocating
 // WRITE_BUFFER_SIZE.
 #ifndef STACK_BUFFER_SIZE
-#define STACK_BUFFER_SIZE 1024
+#define STACK_BUFFER_SIZE 128
 #endif
 
 // Keep-Alive connection timeout in seconds.
@@ -105,7 +105,7 @@
 
 // Constants
 #define STATUS_LINE_SIZE 128
-#define HEADERS_BUF_SIZE 2048
+#define HEADERS_BUF_SIZE 1024
 #define CACHE_LINE_SIZE  64
 
 // Assertions for all constants

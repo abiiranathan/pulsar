@@ -30,7 +30,7 @@
 #include <sys/param.h>
 #endif
 
-#include "../include/arena.h"
+#include <solidc/arena.h>
 #include "../include/constants.h"
 #include "../include/headers.h"
 #include "../include/locals.h"
@@ -56,7 +56,7 @@ typedef enum {
 #define SET_CHUNKED_TRANSFER(flags) ((flags) |= HTTP_CHUNKED_TRANSFER)
 
 // HTTP Response structure
-typedef struct __attribute__((aligned(64))) response_t {
+typedef struct response_t {
     http_status status_code;             // HTTP status code.
     char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
     char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.

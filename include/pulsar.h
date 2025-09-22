@@ -81,7 +81,8 @@ void pulsar_set_locals_callback(LocalsCreateCallback callback);
 
 // Set a user-owned value pointer to the context with a callback function to free the value.
 // Returns true on success.
-bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func);
+bool pulsar_set_context_value(connection_t* conn, const char* key, void* value,
+                              ValueFreeFunc free_func);
 
 // Get a context value.
 void* pulsar_get_context_value(connection_t* conn, const char* key);
@@ -230,12 +231,12 @@ typedef struct {
     size_t id_len;
 } sse_event_t;
 
-#define SSE_EVENT_INIT(data_, event_, id_)                                                                   \
-    (sse_event_t){.data      = (data_),                                                                      \
-                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,                                          \
-                  .event     = (event_),                                                                     \
-                  .event_len = (event_ != NULL) ? strlen(event_) : 0,                                        \
-                  .id        = (id_),                                                                        \
+#define SSE_EVENT_INIT(data_, event_, id_)                                                         \
+    (sse_event_t){.data      = (data_),                                                            \
+                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,                                \
+                  .event     = (event_),                                                           \
+                  .event_len = (event_ != NULL) ? strlen(event_) : 0,                              \
+                  .id        = (id_),                                                              \
                   .id_len    = (id_ != NULL) ? strlen(id_) : 0}
 
 // Start SSE event.

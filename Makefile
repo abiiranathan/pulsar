@@ -73,9 +73,7 @@ HEADERS_DIR := include
 BASE_SRC := $(SRC_DIR)/routing.c \
 			$(SRC_DIR)/locals.c \
 			$(SRC_DIR)/pulsar.c  \
-			$(SRC_DIR)/forms.c   \
-			$(SRC_DIR)/str.c     \
-			$(SRC_DIR)/hashmap.c
+			$(SRC_DIR)/forms.c
 
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 
@@ -177,7 +175,6 @@ debug:
 	
 release:
 	@if [ -n "$$(find $(BUILD_DIR) -name '*.gcda' 2>/dev/null)" ]; then \
-        echo "Found .gcda files, removing release binary to trigger rebuild with PGO"; \
         rm -rf $(TARGET); \
 		$(MAKE) BUILD=release PGO=1 all
 	@else
@@ -187,4 +184,4 @@ release:
 profile: clean
 	$(MAKE) BUILD=profile all
 
-.PHONY: all test static shared lib install verify clean debug release
+.PHONY: all test static shared lib install verify clean debug release $(TARGET)

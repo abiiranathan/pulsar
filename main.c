@@ -8,7 +8,7 @@ void hello_world_handler(connection_t* conn) {
         "Content-Type: text/plain\r\n";
 
     conn_set_status(conn, StatusOK);
-    conn_writeheader_raw(conn, headers, sizeof(headers) - 1);  // -1 to exclude null terminator
+    conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
     conn_write(conn, "Hello World", 11);
 }
 
@@ -80,18 +80,18 @@ void chunked_handler(connection_t* conn) {
         size_t remaining = sizeof(multi_line) - 1;
 
         for (int i = 0; i < 20 && remaining > 100; i++) {
-            int written =
-                snprintf(pos, remaining,
-                         "Line %d: This is a very long line of text that exceeds normal sizes. "
-                         "It contains repeated information to make it longer and test large chunk handling. "
-                         "Data data data data data data data data data data data data.\n",
-                         i);
+            int written = snprintf(
+                pos, remaining,
+                "Line %d: This is a very long line of text that exceeds normal sizes. "
+                "It contains repeated information to make it longer and test large chunk handling. "
+                "Data data data data data data data data data data data data.\n",
+                i);
             if (written >= (int)remaining) break;
             pos += written;
-            remaining -= written;
+            remaining -= (size_t)written;
         }
 
-        size_t data_len = pos - multi_line;
+        size_t data_len = (size_t)(pos - multi_line);
         conn_write_chunk(conn, multi_line, data_len);
         usleep(100000);
     }
@@ -109,24 +109,25 @@ void chunked_handler(connection_t* conn) {
 
         // Add many user objects
         for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
-            len += snprintf(json_data + len, sizeof(json_data) - len,
-                            "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
-                            "\"active\": %s}%s\n",
-                            i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
+            len += snprintf(
+                json_data + len, sizeof(json_data) - (size_t)len,
+                "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
+                "\"active\": %s}%s\n",
+                i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
         }
 
-        len +=
-            snprintf(json_data + len, sizeof(json_data) - len,
-                     "    ],\n"
-                     "    \"metadata\": {\n"
-                     "      \"count\": 40,\n"
-                     "      \"generated_by\": \"chunked_handler\",\n"
-                     "      \"description\": \"Large JSON payload for testing chunked transfer encoding\"\n"
-                     "    }\n"
-                     "  }\n"
-                     "}");
+        len += snprintf(
+            json_data + len, sizeof(json_data) - (size_t)len,
+            "    ],\n"
+            "    \"metadata\": {\n"
+            "      \"count\": 40,\n"
+            "      \"generated_by\": \"chunked_handler\",\n"
+            "      \"description\": \"Large JSON payload for testing chunked transfer encoding\"\n"
+            "    }\n"
+            "  }\n"
+            "}");
 
-        conn_write_chunk(conn, json_data, len);
+        conn_write_chunk(conn, json_data, (size_t)len);
         usleep(100000);
     }
 
@@ -185,18 +186,19 @@ void chunked_handler(connection_t* conn) {
         // Create structured content
         int written = snprintf(pos, remaining, "=== MASSIVE CHUNK TEST ===\n");
         pos += written;
-        remaining -= written;
+        remaining -= (size_t)written;
 
         for (int i = 0; i < 200 && remaining > 80; i++) {
-            written = snprintf(pos, remaining,
-                               "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n", i,
-                               time(NULL) + i);
+            written =
+                snprintf(pos, remaining,
+                         "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n",
+                         i, time(NULL) + i);
             if (written >= (int)remaining) break;
             pos += written;
-            remaining -= written;
+            remaining -= (size_t)written;
         }
 
-        size_t total_len = pos - massive_chunk;
+        size_t total_len = (size_t)(pos - massive_chunk);
         conn_write_chunk(conn, massive_chunk, total_len);
         usleep(200000);  // 200ms
     }
@@ -331,25 +333,27 @@ void pulsar_callback(connection_t* conn, uint64_t total_ns) {
     const char* end = log_buffer + LOG_BUFFER_SIZE - 1;  // Leave room for null terminator
 
     // [Pulsar]
-    ptr += snprintf(ptr, end - ptr, "[Pulsar] ");
+    ptr += snprintf(ptr, (size_t)(end - ptr), "[Pulsar] ");
 
     // Method (2 chars, left-aligned)
-    ptr += snprintf(ptr, end - ptr, "%-2s ", method);
+    ptr += snprintf(ptr, (size_t)(end - ptr), "%-2s ", method);
 
     // Path (3 chars, left-aligned)
-    ptr += snprintf(ptr, end - ptr, "%-3s ", path);
+    ptr += snprintf(ptr, (size_t)(end - ptr), "%-3s ", path);
 
     // Status code (3 digits)
-    ptr += snprintf(ptr, end - ptr, "%3d ", status_code);
+    ptr += snprintf(ptr, (size_t)(end - ptr), "%3d ", status_code);
 
     // Latency (8 chars)
-    ptr += snprintf(ptr, end - ptr, "%8s ", latency_str);
+    ptr += snprintf(ptr, (size_t)(end - ptr), "%8s ", latency_str);
 
     // User-Agent
-    ptr += snprintf(ptr, end - ptr, "%s\n", ua);
+    ptr += snprintf(ptr, (size_t)(end - ptr), "%s\n", ua);
 
     // Single write to stdout
-    write(STDOUT_FILENO, log_buffer, ptr - log_buffer);
+    if (write(STDOUT_FILENO, log_buffer, (size_t)(ptr - log_buffer)) == -1) {
+        perror("write");
+    };
 }
 
 void mw1(connection_t* conn) {

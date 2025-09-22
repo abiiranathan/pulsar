@@ -2,11 +2,13 @@
 #include "../include/common.h"
 #include "../include/events.h"
 
-static int server_fd                                        = -1;    // Server socket file descriptor
-volatile sig_atomic_t server_running                        = 1;     // Server running flag
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};   // Global middleware array
-static size_t global_mw_count                               = 0;     // Global middleware count
-static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
+static int server_fd                                        = -1;   // Server socket file descriptor
+volatile sig_atomic_t server_running                        = 1;    // Server running flag
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global middleware array
+static size_t global_mw_count                               = 0;    // Global middleware count
+static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
+
+#define SAFETY_MARGIN 3  // reserves space for \r\n\0
 
 typedef struct __attribute__((aligned(64))) KeepAliveState {
     connection_t* head;
@@ -142,6 +144,7 @@ INLINE response_t* create_response(Arena* arena) {
     if (!resp) return NULL;
 
     memset(resp, 0, sizeof(response_t));
+
     resp->heap_allocated = false;
     resp->body.stack[0]  = '\0';
     resp->body_capacity  = 0;
@@ -256,7 +259,8 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method, size_t headers_len) {
+INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method,
+                                  size_t headers_len) {
     const char* restrict ptr = conn->read_buf;
     const char* const end    = ptr + headers_len;
     const bool is_safe       = SAFE_METHOD(method);
@@ -270,10 +274,10 @@ INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method
 
     while (ptr < end) {
         // Parse header name
-        const char* const colon = (const char*)memchr(ptr, ':', end - ptr);
+        const char* const colon = (const char*)memchr(ptr, ':', (size_t)(end - ptr));
         if (!colon) break;
 
-        const size_t name_len = colon - ptr;
+        const size_t name_len = (size_t)(colon - ptr);
 
         // Move to header value (combine pointer arithmetic)
         const char* value_start = colon + 1;
@@ -281,10 +285,10 @@ INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method
             value_start++;
 
         // Parse header value
-        const char* const eol = (const char*)memchr(value_start, '\r', end - value_start);
+        const char* const eol = (const char*)memchr(value_start, '\r', (size_t)(end - value_start));
         if (!eol || eol + 1 >= end || eol[1] != '\n') break;
 
-        const size_t value_len = eol - value_start;
+        const size_t value_len = (size_t)(eol - value_start);
 
         // Check for special headers with minimal branching
         if (name_len == 14 && !(flags & 1) && !is_safe) {
@@ -310,10 +314,10 @@ INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method
         }
 
         // Allocate and store header (only if we still need to store it)
-        char* const name = arena_strdup2(arena, ptr, name_len);
+        char* const name = arena_strdupn(arena, ptr, name_len);
         if (unlikely(!name)) return false;
 
-        char* const value = arena_strdup2(arena, value_start, value_len);
+        char* const value = arena_strdupn(arena, value_start, value_len);
         if (unlikely(!value)) return false;
 
         if (unlikely(!headers_set(headers, name, value))) {
@@ -392,7 +396,7 @@ INLINE bool parse_request_body(connection_t* conn, size_t headers_len, size_t re
             perror("read");
             return false;
         }
-        body_received += count;
+        body_received += (size_t)count;
     }
     return true;
 }
@@ -450,7 +454,8 @@ const char* conn_set_status(connection_t* restrict conn, http_status code) {
     response_t* res             = conn->response;
     res->status_code            = code;
 
-    int written = snprintf(res->status_buf, STATUS_LINE_SIZE, "HTTP/1.1 %hu %s\r\n", code, status->text);
+    int written =
+        snprintf(res->status_buf, STATUS_LINE_SIZE, "HTTP/1.1 %hu %s\r\n", code, status->text);
 
     // Make sure there is no overflow.
     assert(written > 0 && written < STATUS_LINE_SIZE);
@@ -463,7 +468,10 @@ const char* conn_set_status(connection_t* restrict conn, http_status code) {
 char* res_header_get(connection_t* conn, const char* name) {
     response_t* res = conn->response;
     char* buf       = res->headers_buf;
-    char* ptr       = strstr(buf, name);
+
+    // Terminate so we can use strstr.
+    buf[res->headers_len] = '\0';
+    char* ptr             = strstr(buf, name);
     if (!ptr) return NULL;  // Header not found
 
     // move past name, colon and space
@@ -473,7 +481,7 @@ char* res_header_get(connection_t* conn, const char* name) {
     char* value_end = strstr(ptr, "\r\n");
     if (!value_end) return NULL;  // Invalid header.
 
-    size_t value_len = value_end - ptr;
+    size_t value_len = (size_t)(value_end - ptr);
     char* header     = malloc(value_len + 1);
     if (!header) return NULL;
 
@@ -487,7 +495,10 @@ char* res_header_get(connection_t* conn, const char* name) {
 bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size) {
     response_t* res = conn->response;
     char* buf       = res->headers_buf;
-    char* ptr       = strstr(buf, name);
+
+    // Terminate so we can use strstr.
+    buf[res->headers_len] = '\0';
+    char* ptr             = strstr(buf, name);
     if (!ptr) return NULL;  // Header not found
 
     // move past name, colon and space
@@ -497,7 +508,7 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
     char* value_end = strstr(ptr, "\r\n");
     if (!value_end) return NULL;  // Invalid header.
 
-    size_t value_len = value_end - ptr;
+    size_t value_len = (size_t)(value_end - ptr);
 
     // Destination buffer is too small.
     if (dest_size <= value_len + 1) {
@@ -540,15 +551,14 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     *dest++ = '\n';
 
     resp->headers_len += required;
-    resp->headers_buf[resp->headers_len] = '\0';
+
+    // Not necessary to be NULL-terminated. Perf->SLOW instruction
+    // resp->headers_buf[resp->headers_len] = '\0';
 }
 
 void conn_writeheader_raw(connection_t* conn, const char* header, size_t length) {
     response_t* resp = conn->response;
-
-    // Reserve 2 bytes for final \r\n and 1 for null terminator
-    const size_t SAFETY_MARGIN = 3;
-    size_t remaining           = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
+    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
     if (length > remaining) {
         conn->closing = true;  // Not enough space
         return;
@@ -556,7 +566,9 @@ void conn_writeheader_raw(connection_t* conn, const char* header, size_t length)
 
     memcpy(resp->headers_buf + resp->headers_len, header, length);
     resp->headers_len += length;
-    resp->headers_buf[resp->headers_len] = '\0';
+
+    // Not necessary to be NULL-terminated. Perf->SLOW instruction
+    // resp->headers_buf[resp->headers_len] = '\0';
 }
 
 void conn_writeheaders_vec(connection_t* conn, const struct iovec* headers, size_t count) {
@@ -568,10 +580,7 @@ void conn_writeheaders_vec(connection_t* conn, const struct iovec* headers, size
         total_len += headers[i].iov_len;
     }
 
-    // Reserve space for final \r\n and null terminator
-    const size_t SAFETY_MARGIN = 3;
-    size_t remaining           = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
-
+    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
     if (total_len > remaining) {
         conn->closing = true;
         return;
@@ -683,7 +692,8 @@ int conn_write_string(connection_t* conn, const char* str) {
     return str ? conn_write(conn, str, strlen(str)) : 0;
 }
 
-__attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* restrict fmt, ...) {
+__attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* restrict fmt,
+                                                      ...) {
     va_list args;
     char stack_buf[1024];
     char* heap_buf = NULL;
@@ -697,21 +707,21 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
 
     // If stack buffer was sufficient
     if (len < (int)sizeof(stack_buf)) {
-        return conn_write(conn, stack_buf, len);
+        return conn_write(conn, stack_buf, (size_t)len);
     }
 
     // Need larger buffer - allocate exact size
-    heap_buf = malloc(len + 1);
+    heap_buf = malloc((size_t)len + 1);
     if (!heap_buf) {
         perror("malloc");
         return 0;
     }
 
     va_start(args, fmt);
-    vsnprintf(heap_buf, len + 1, fmt, args);
+    vsnprintf(heap_buf, (size_t)len + 1, fmt, args);
     va_end(args);
 
-    result = conn_write(conn, heap_buf, len);
+    result = conn_write(conn, heap_buf, (size_t)len);
     free(heap_buf);
     return result;
 }
@@ -747,11 +757,9 @@ void conn_send_redirect(connection_t* conn, const char* location, bool permanent
     // Set status code
     conn_set_status(conn, permanent ? StatusMovedPermanently : StatusFound);
 
-    response_t* resp           = conn->response;
-    const size_t SAFETY_MARGIN = 3;  // For final \r\n and null terminator
-    size_t location_len        = strlen(location);
-    size_t required            = 10 + location_len + 2;  // "Location: " + location + "\r\n"
-
+    response_t* resp    = conn->response;
+    size_t location_len = strlen(location);
+    size_t required     = 10 + location_len + 2;  // "Location: " + location + "\r\n"
     if (resp->headers_len + required >= HEADERS_BUF_SIZE - SAFETY_MARGIN) {
         conn->closing = true;
         return;
@@ -767,7 +775,9 @@ void conn_send_redirect(connection_t* conn, const char* location, bool permanent
     *dest++ = '\n';
 
     resp->headers_len += required;
-    resp->headers_buf[resp->headers_len] = '\0';
+
+    // Not necessary to be NULL-terminated. Perf->SLOW instruction
+    // resp->headers_buf[resp->headers_len] = '\0';
 }
 
 void conn_send_xml(connection_t* conn, http_status status, const char* xml) {
@@ -841,7 +851,7 @@ INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
         for (; i < iovcnt && remaining > 0; ++i) {
             if ((size_t)remaining < iov[i].iov_len) {
                 iov[i].iov_base = (char*)iov[i].iov_base + remaining;
-                iov[i].iov_len -= remaining;
+                iov[i].iov_len -= (size_t)remaining;
                 break;
             }
             remaining -= iov[i].iov_len;
@@ -860,11 +870,11 @@ INLINE void write_server_headers(connection_t* conn) {
     conn_writeheader_raw(conn, "Server: Pulsar/1.0\r\n", 20);
     written = strftime(date_buf, sizeof(date_buf), "Date: %a, %d %b %Y %H:%M:%S GMT\r\n",
                        gmtime(&conn->last_activity));
-    conn_writeheader_raw(conn, date_buf, written);
+    conn_writeheader_raw(conn, date_buf, (size_t)written);
 }
 
 ssize_t conn_write_chunk(connection_t* conn, const void* data, size_t size) {
-    struct iovec iov[6];  // increased to 6 to accommodate status line
+    struct iovec iov[6];
     int iovcnt = 0;
 
     char chunk_header[32];
@@ -879,7 +889,9 @@ ssize_t conn_write_chunk(connection_t* conn, const void* data, size_t size) {
         assert(conn->response->headers_len < HEADERS_BUF_SIZE - 3);
         memcpy(conn->response->headers_buf + conn->response->headers_len, "\r\n", 2);
         conn->response->headers_len += 2;
-        conn->response->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
+
+        // Not required to be NULL-terminated.
+        // conn->response->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
 
         // Add status line first
         iov[iovcnt].iov_base = conn->response->status_buf;
@@ -935,14 +947,14 @@ void conn_send_event(connection_t* conn, const sse_event_t* evt) {
     size_t batch_pos = 0;
 
 // Helper macro to flush buffer when needed
-#define FLUSH_IF_NEEDED(needed_space)                                                                        \
-    do {                                                                                                     \
-        if (batch_pos + (needed_space) > BATCH_SIZE) {                                                       \
-            if (batch_pos > 0) {                                                                             \
-                conn_write_chunk(conn, batch_buf, batch_pos);                                                \
-                batch_pos = 0;                                                                               \
-            }                                                                                                \
-        }                                                                                                    \
+#define FLUSH_IF_NEEDED(needed_space)                                                              \
+    do {                                                                                           \
+        if (batch_pos + (needed_space) > BATCH_SIZE) {                                             \
+            if (batch_pos > 0) {                                                                   \
+                conn_write_chunk(conn, batch_buf, batch_pos);                                      \
+                batch_pos = 0;                                                                     \
+            }                                                                                      \
+        }                                                                                          \
     } while (0)
 
     // Send headers first if needed
@@ -950,8 +962,8 @@ void conn_send_event(connection_t* conn, const sse_event_t* evt) {
         struct iovec iov[2];
         int iovcnt = 0;
 
-        iov[iovcnt++] =
-            (struct iovec){.iov_base = conn->response->status_buf, .iov_len = conn->response->status_len};
+        iov[iovcnt++] = (struct iovec){.iov_base = conn->response->status_buf,
+                                       .iov_len  = conn->response->status_len};
         iov[iovcnt++] = (struct iovec){
             .iov_base = conn->response->headers_buf,
             .iov_len  = conn->response->headers_len,
@@ -965,8 +977,8 @@ void conn_send_event(connection_t* conn, const sse_event_t* evt) {
         size_t needed = evt->event_len + 8;  // "event: " + "\n"
         FLUSH_IF_NEEDED(needed);
 
-        batch_pos += snprintf(batch_buf + batch_pos, BATCH_SIZE - batch_pos, "event: %.*s\n",
-                              (int)evt->event_len, evt->event);
+        batch_pos += (size_t)snprintf(batch_buf + batch_pos, BATCH_SIZE - batch_pos,
+                                      "event: %.*s\n", (int)evt->event_len, evt->event);
     }
 
     // Build data field(s) - handle multiline data efficiently
@@ -987,8 +999,8 @@ void conn_send_event(connection_t* conn, const sse_event_t* evt) {
             line_len = max_line;
         }
 
-        batch_pos +=
-            snprintf(batch_buf + batch_pos, BATCH_SIZE - batch_pos, "data: %.*s\n", (int)line_len, data_ptr);
+        batch_pos += (size_t)snprintf(batch_buf + batch_pos, BATCH_SIZE - batch_pos, "data: %.*s\n",
+                                      (int)line_len, data_ptr);
 
         data_ptr += line_len;
         data_remaining -= line_len;
@@ -1005,8 +1017,8 @@ void conn_send_event(connection_t* conn, const sse_event_t* evt) {
         size_t needed = evt->id_len + 5;  // "id: " + "\n"
         FLUSH_IF_NEEDED(needed);
 
-        batch_pos +=
-            snprintf(batch_buf + batch_pos, BATCH_SIZE - batch_pos, "id: %.*s\n", (int)evt->id_len, evt->id);
+        batch_pos += (size_t)snprintf(batch_buf + batch_pos, BATCH_SIZE - batch_pos, "id: %.*s\n",
+                                      (int)evt->id_len, evt->id);
     }
 
     // Add event terminator
@@ -1032,7 +1044,8 @@ void conn_end_sse(connection_t* conn) {
 }
 
 // Parses the Range header and extracts start and end values
-INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end, bool* has_end_range) {
+INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end,
+                        bool* has_end_range) {
     if (strstr(range_header, "bytes=") != NULL) {
         if (sscanf(range_header, "bytes=%ld-%ld", start, end) == 2) {
             *has_end_range = true;
@@ -1058,8 +1071,9 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
         // Http range requests can be negative :) Wieird but true
         // I had to read the RFC to understand this, who would have thought?
         // https://datatracker.ietf.org/doc/html/rfc7233
-        start_byte = file_size + start_byte;   // subtract from the file size
-        end_byte   = start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
+        start_byte = file_size + start_byte;  // subtract from the file size
+        end_byte =
+            start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
     } else if (end_byte < 0) {
         // Even the end range can be negative. Deal with it!
         end_byte = file_size + end_byte;
@@ -1083,17 +1097,15 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
 // Write headers for the Content-Range and Accept-Ranges.
 // Also sets the status code for partial content.
 INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, off64_t file_size) {
-    response_t* resp           = conn->response;
-    const size_t SAFETY_MARGIN = 3;
-    size_t remaining           = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
-
-    // Format for range headers.
     static const char header_fmt[] =
         "Accept-Ranges: bytes\r\n"
         "Content-Length: %ld\r\n"
         "Content-Range: bytes %ld-%ld/%ld\r\n";
 
-    // Enough for all range headers
+    response_t* resp = conn->response;
+    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
+
+    // enough for above range headers
     if (remaining > 164) {
         char* dest = resp->headers_buf + resp->headers_len;
         int len    = snprintf(dest, remaining, header_fmt, end - start + 1, start, end, file_size);
@@ -1199,7 +1211,7 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     write_server_headers(conn);
 #endif
 
-    assert(resp->headers_len < HEADERS_BUF_SIZE - 3);
+    assert(resp->headers_len < HEADERS_BUF_SIZE - SAFETY_MARGIN);
 
     // Terminate headers.
     memcpy(resp->headers_buf + resp->headers_len, "\r\n", 2);
@@ -1209,11 +1221,12 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 
 void static_file_handler(connection_t* conn) {
     route_t* route = conn->request->route;
-    ASSERT((route->flags & STATIC_ROUTE_FLAG) != 0 && route);
+    ASSERT(route && (route->flags & STATIC_ROUTE_FLAG) != 0);
 
-    const char* dirname = route->dirname;
-    size_t dirlen       = strlen(dirname);
     const char* path    = conn->request->path;
+    const char* dirname = route->dirname;
+    size_t dirlen       = route->dirname_len;
+    size_t pattern_len  = route->pattern_len;
 
     // Prevent directory traversal attacks
     if (is_malicious_path(path)) {
@@ -1221,37 +1234,37 @@ void static_file_handler(connection_t* conn) {
         return;
     }
 
-    // if a pattern ends with a slash, we need to remove it from the path.
-    size_t pattern_len = strlen(route->pattern);
-
     // Build the request static path
-    const char* static_path = path + pattern_len;  // skip the pattern part
-    if (*static_path == '/') {
-        static_path++;  // Skip leading slash if present
+    const char* static_ptr = path + pattern_len;  // skip the pattern part
+    size_t static_len      = pattern_len;         // init static path length
+
+    // Skip leading slash if present
+    if (*static_ptr == '/') {
+        static_ptr++;
+        static_len++;
     }
-    size_t static_len = strlen(static_path);
 
     // Validate path lengths
     if (dirlen >= PATH_MAX || static_len >= PATH_MAX || (dirlen + static_len + 2) >= PATH_MAX) {
         goto path_toolong;
     }
 
-    char filepath[PATH_MAX];
+    char filepath[PATH_MAX] = {};
 
     // Check if dirname ends with a slash
     bool needs_slash = (dirlen > 0 && dirname[dirlen - 1] != '/');
 
     // Build the final path with conditional slash
-    int n = snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname, needs_slash ? "/" : "",
-                     (int)static_len, static_path);
+    int pathLen = snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname,
+                           needs_slash ? "/" : "", (int)static_len, static_ptr);
 
-    if (n < 0 || n >= PATH_MAX) {
+    if (pathLen < 0 || pathLen >= PATH_MAX) {
         goto path_toolong;
     }
 
     const char* src = filepath;
     if (strstr(filepath, "%")) {
-        url_percent_decode(src, filepath, PATH_MAX);
+        url_percent_decode(src, filepath, (size_t)pathLen, PATH_MAX);
     }
 
     // Serve file if it exists
@@ -1265,8 +1278,8 @@ void static_file_handler(connection_t* conn) {
     // Check for index.html in directory
     if (is_dir(filepath)) {
         char index_file[PATH_MAX];
-        n = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
-        if (n < 0 || n >= PATH_MAX) {
+        pathLen = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
+        if (pathLen < 0 || pathLen >= PATH_MAX) {
             goto path_toolong;
         }
 
@@ -1304,17 +1317,17 @@ const char* get_path_param(connection_t* conn, const char* name) {
 }
 
 INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
-#define EXECUTE_MIDDLEWARE(mw, count)                                                                        \
-    do {                                                                                                     \
-        size_t index = 0;                                                                                    \
-        if (count > 0) {                                                                                     \
-            while (index < count) {                                                                          \
-                mw[index++](conn);                                                                           \
-                if (conn->abort) {                                                                           \
-                    return;                                                                                  \
-                }                                                                                            \
-            }                                                                                                \
-        }                                                                                                    \
+#define EXECUTE_MIDDLEWARE(mw, count)                                                              \
+    do {                                                                                           \
+        size_t index = 0;                                                                          \
+        if (count > 0) {                                                                           \
+            while (index < count) {                                                                \
+                mw[index++](conn);                                                                 \
+                if (conn->abort) {                                                                 \
+                    return;                                                                        \
+                }                                                                                  \
+            }                                                                                      \
+        }                                                                                          \
     } while (0)
 
     EXECUTE_MIDDLEWARE(global_middleware, global_mw_count);
@@ -1344,7 +1357,8 @@ void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
-bool pulsar_set_context_value(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func) {
+bool pulsar_set_context_value(connection_t* conn, const char* key, void* value,
+                              ValueFreeFunc free_func) {
     return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
@@ -1362,8 +1376,9 @@ INLINE void request_complete(connection_t* conn) {
         struct timespec end;
         clock_gettime(CLOCK_MONOTONIC, &end);
 
-        uint64_t start_ns   = (uint64_t)conn->start.tv_sec * 1000000000ULL + conn->start.tv_nsec;
-        uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + end.tv_nsec;
+        uint64_t start_ns =
+            (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
+        uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + (size_t)end.tv_nsec;
         uint64_t latency_ns = end_ns - start_ns;
         LOGGER_CALLBACK(conn, latency_ns);
     }
@@ -1375,19 +1390,28 @@ INLINE void request_complete(connection_t* conn) {
 #define RESOLVE(S)  FORMAT(S)
 #define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveState* state, int queue_fd) {
+INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveState* state,
+                            int queue_fd) {
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
     if (!end_of_headers) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
-    size_t headers_len = end_of_headers - conn->read_buf + 4;
+
+    size_t headers_len = (size_t)(end_of_headers - conn->read_buf) + 4;
+
+    char url[MAX_PATH_LEN + 1];
+    url[0] = '\0';
 
     char http_protocol[16] = {0};
-    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, conn->request->path, http_protocol) != 3) {
+    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, url, http_protocol) != 3) {
         send_error_response(conn, StatusBadRequest);
         return;
     }
+
+    // Percent-decode the URL into connection request path.
+    // src, dest, src_len, dst_len.
+    url_percent_decode(url, conn->request->path, strlen(url), MAX_PATH_LEN);
 
     // Validate HTTP version. We only support http 1.1
     if (strcmp(http_protocol, "HTTP/1.1") != 0) {
@@ -1604,7 +1628,7 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
         return;
     }
 
-    Arena* arena = arena_create(ARENA_CAPACITY);
+    Arena* arena = arena_create(ARENA_CAPACITY, false);
     if (!arena) {
         fprintf(stderr, "arena_create failed\n");
         close(client_fd);
@@ -1647,7 +1671,7 @@ INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state)
     }
     conn->read_buf[bytes_read] = '\0';
 
-    process_request(conn, bytes_read, state, queue_fd);
+    process_request(conn, (size_t)bytes_read, state, queue_fd);
 
     // Switch to writing response.
     if (event_mod_write(queue_fd, conn->client_fd, conn) < 0) {
@@ -1688,7 +1712,7 @@ INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state
                 // Branchless update of sent counts
                 size_t status_part = MIN((size_t)sent, iov[0].iov_len);
                 res->status_sent += status_part;
-                res->headers_sent += sent - status_part;
+                res->headers_sent += (size_t)sent - status_part;
 
                 if (res->status_sent == res->status_len && res->headers_sent == res->headers_len) {
                     SET_HEADERS_WRITTEN(res->flags);
@@ -1701,13 +1725,14 @@ INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state
             if (remaining_file <= 0) {
                 complete = true;
             } else {
-                off_t chunk_size =
-                    HAS_RANGE_REQUEST(res->flags) ? (off_t)MIN(1 << 20, remaining_file) : remaining_file;
+                off_t chunk_size = HAS_RANGE_REQUEST(res->flags)
+                                       ? (off_t)MIN(1 << 20, (size_t)remaining_file)
+                                       : remaining_file;
 
 #if defined(__linux__)
                 // Use zero-copy sendfile if available
                 off_t offset = res->file_offset;
-                sent         = sendfile(client_fd, res->file_fd, &offset, chunk_size);
+                sent         = sendfile(client_fd, res->file_fd, &offset, (size_t)chunk_size);
                 if (sent > 0) {
                     res->file_offset = offset;
                 }
@@ -1755,8 +1780,9 @@ INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state
             iov[1].iov_base = res->headers_buf + res->headers_sent;
             iov[1].iov_len  = res->headers_len - res->headers_sent;
 
-            iov[2].iov_base = (res->heap_allocated ? res->body.heap : res->body.stack) + res->body_sent;
-            iov[2].iov_len  = res->body_len - res->body_sent;
+            iov[2].iov_base =
+                (res->heap_allocated ? res->body.heap : res->body.stack) + res->body_sent;
+            iov[2].iov_len = res->body_len - res->body_sent;
 
             sent = writev(client_fd, iov, 3);
             if (unlikely(sent < 0)) goto handle_error;
@@ -1768,7 +1794,7 @@ INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state
             }
 
             // Update sent counts.
-            size_t remaining = sent;
+            size_t remaining = (size_t)sent;
 
             // Update status_sent
             if (remaining > 0) {
@@ -1790,8 +1816,8 @@ INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state
                 res->body_sent += seg;
             }
 
-            complete = (res->status_sent == res->status_len) && (res->headers_sent == res->headers_len) &&
-                       (res->body_sent == res->body_len);
+            complete = (res->status_sent == res->status_len) &&
+                       (res->headers_sent == res->headers_len) && (res->body_sent == res->body_len);
         }
 
         conn->last_activity = time(NULL);
@@ -1996,7 +2022,7 @@ int pulsar_run(const char* addr, int port) {
 
         worker_data[i].queue_fd         = queue_fd;
         worker_data[i].worker_id        = i;
-        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
+        worker_data[i].designated_core  = i % ((size_t)(num_cores - reserved_cores));
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {

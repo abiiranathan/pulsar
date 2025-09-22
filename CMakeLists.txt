@@ -45,6 +45,9 @@ if(APPLE AND ENABLE_UNIVERSAL_BINARY AND NOT DEFINED CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "" FORCE)
 endif()
 
+# Find solidc dependency
+find_package(solidc REQUIRED)
+
 # Compiler definitions
 add_compile_definitions(
     DA_IMPLEMENTATION
@@ -79,11 +82,9 @@ endif()
 # Source and header files
 set(BASE_SOURCES
     src/forms.c
-    src/hashmap.c
     src/locals.c
     src/pulsar.c
     src/routing.c
-    src/str.c
 )
 
 file(GLOB HEADERS "include/*.h")
@@ -103,6 +104,7 @@ if(BUILD_STATIC_LIBS)
         OUTPUT_NAME pulsar
         ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     )
+    target_link_libraries(pulsar_static PUBLIC solidc::solidc)
 endif()
 
 # Shared library
@@ -114,7 +116,7 @@ if(BUILD_SHARED_LIBS)
         SOVERSION ${PROJECT_VERSION_MAJOR}
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     )
-    target_link_libraries(pulsar_shared PRIVATE pthread)
+    target_link_libraries(pulsar_shared PUBLIC pthread solidc::solidc)
 
     if(ENABLE_PGO AND CMAKE_BUILD_TYPE STREQUAL "Release")
         target_link_libraries(pulsar_shared PRIVATE gcov)
@@ -123,7 +125,7 @@ endif()
 
 # Main executable
 add_executable(server main.c)
-target_link_libraries(server PRIVATE pulsar_objects pthread)
+target_link_libraries(server PRIVATE pulsar_objects pthread solidc::solidc)
 set_target_properties(server PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
@@ -134,7 +136,7 @@ if(BUILD_TESTS)
     foreach(test_source ${TEST_SOURCES})
         get_filename_component(test_name ${test_source} NAME_WE)
         add_executable(test_${test_name} ${test_source})
-        target_link_libraries(test_${test_name} PRIVATE pulsar_objects pthread)
+        target_link_libraries(test_${test_name} PRIVATE pulsar_objects pthread solidc::solidc)
         set_target_properties(test_${test_name} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
         )

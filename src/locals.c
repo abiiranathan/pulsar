@@ -12,12 +12,9 @@ bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc 
     // Check if key already exists and replace if found
     for (size_t i = 0; i < locals->size; ++i) {
         if (strcmp(locals->entries[i].key, key) == 0) {
-            // Free the existing value if it has a free function
             if (locals->entries[i].free_func) {
                 locals->entries[i].free_func((void*)locals->entries[i].value);
             }
-
-            // Replace with new value
             locals->entries[i].value     = value;
             locals->entries[i].free_func = free_func;
             return true;
@@ -27,8 +24,8 @@ bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc 
     // Key doesn't exist, validate key length before adding
     const size_t keylen = strlen(key);
     if (keylen >= LOCALS_KEY_CAPACITY) {
-        fprintf(stderr, "Key length must not exceed: %d, %s is %lu bytes\n", LOCALS_KEY_CAPACITY - 1, key,
-                keylen);
+        fprintf(stderr, "Key length must not exceed: %d, %s is %lu bytes\n",
+                LOCALS_KEY_CAPACITY - 1, key, keylen);
         return false;
     }
 

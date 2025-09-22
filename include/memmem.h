@@ -15,8 +15,10 @@ __attribute__((always_inline)) static inline uint16_t le_load_u16(const unsigned
     return (uint16_t)p[0] | (uint16_t)p[1] << 8;
 }
 
-__attribute__((always_inline)) static inline void* memmem_scalar(const void* haystack, size_t haystack_len,
-                                                                 const void* needle, size_t needle_len) {
+__attribute__((always_inline)) static inline void* memmem_scalar(const void* haystack,
+                                                                 size_t haystack_len,
+                                                                 const void* needle,
+                                                                 size_t needle_len) {
     if (needle_len == 0) return (void*)haystack;
     if (haystack_len < needle_len) return NULL;
 
@@ -70,7 +72,8 @@ __attribute__((always_inline)) static inline void* memmem_scalar(const void* hay
 #include <immintrin.h>
 
 /* AVX2 optimized version for longer needles */
-static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* needle, size_t needle_len) {
+static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* needle,
+                         size_t needle_len) {
     if (needle_len == 0) return (void*)haystack;
     if (haystack_len < needle_len) return NULL;
 
@@ -86,7 +89,7 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
     const unsigned char first = n[0];
 
     /* Create vector of first character */
-    const __m256i first_vec = _mm256_set1_epi8(first);
+    const __m256i first_vec = _mm256_set1_epi8((char)first);
 
     size_t pos = 0;
 
@@ -105,7 +108,7 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
 
             /* Compare first character */
             __m256i cmp0  = _mm256_cmpeq_epi8(block0, first_vec);
-            uint32_t mask = _mm256_movemask_epi8(cmp0);
+            uint32_t mask = (uint32_t)_mm256_movemask_epi8(cmp0);
 
             /* If matches found, verify next three bytes */
             if (mask) {
@@ -117,11 +120,12 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
                 _mm256_storeu_si256((__m256i*)temp3, block3);
 
                 while (mask) {
-                    int offset           = __builtin_ctz(mask);
+                    size_t offset        = (size_t)__builtin_ctz(mask);
                     size_t candidate_pos = pos + offset;
 
                     /* Verify bytes 2,3,4 using pre-loaded blocks */
-                    if (temp1[offset] == second && temp2[offset] == third && temp3[offset] == fourth) {
+                    if (temp1[offset] == second && temp2[offset] == third &&
+                        temp3[offset] == fourth) {
                         /* Full match for 4-byte needle */
                         if (needle_len == 4) {
                             return (void*)(h + candidate_pos);
