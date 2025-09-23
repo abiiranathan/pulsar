@@ -250,22 +250,27 @@ void sort_routes(void) {
     }
 }
 
-// Helper function to check if a route matches a URL
 INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_length) {
-    if ((route->flags & STATIC_ROUTE_FLAG) != 0) {
-        // Fast static route check - just prefix match
+    // Normal (non-static routes)
+    if (__builtin_expect(route->flags & NORMAL_ROUTE_FLAG, 1)) {
+
+        // Exact match normal route
+        if (route->path_params == NULL) {
+            return (route->pattern_len == url_length) &&
+                   (memcmp(route->pattern, url, url_length) == 0);
+        }
+        // Parameterized routes
+        return match_path_parameters(route->pattern, url, route->path_params);
+    }
+
+    // Static route (less common)
+    if (route->flags & STATIC_ROUTE_FLAG) {
         return (route->pattern_len <= url_length) &&
                (memcmp(route->pattern, url, route->pattern_len) == 0);
     }
 
-    // For normal routes, check if it has parameters
-    if (!route->path_params) {
-        // Exact string match - fastest path
-        return (route->pattern_len == url_length) && (memcmp(route->pattern, url, url_length) == 0);
-    }
-
-    // Parameterized route - use existing function
-    return match_path_parameters(route->pattern, url, route->path_params);
+    // Invalid route (neither normal nor static)
+    return false;
 }
 
 route_t* route_match(const char* path, HttpMethod method) {
@@ -274,7 +279,7 @@ route_t* route_match(const char* path, HttpMethod method) {
     size_t end_idx    = method_end_idx[method];
     size_t url_length = strlen(path);
 
-    // Linear search within method range (cache-friendly, branch predictor friendly)
+    // Linear search within method range.
     for (size_t i = start_idx; i < end_idx; i++) {
         route_t* current = &global_routes[i];
         if (route_matches_fast(current, path, url_length)) {

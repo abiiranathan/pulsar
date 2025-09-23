@@ -1,6 +1,7 @@
 #include "../include/pulsar.h"
-#include "../include/common.h"
 #include "../include/events.h"
+
+#define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
 
 static int server_fd                                        = -1;   // Server socket file descriptor
 volatile sig_atomic_t server_running                        = 1;    // Server running flag
@@ -8,9 +9,7 @@ static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global mi
 static size_t global_mw_count                               = 0;    // Global middleware count
 static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
 
-#define SAFETY_MARGIN 3  // reserves space for \r\n\0
-
-typedef struct __attribute__((aligned(64))) KeepAliveState {
+typedef struct KeepAliveState {
     connection_t* head;
     connection_t* tail;
     size_t count;
@@ -201,9 +200,10 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->arena         = arena;
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
-    conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
-    conn->request       = create_request(arena);
-    conn->locals        = malloc(sizeof(Locals));
+    conn->read_buf[0]   = '\0';
+    memset(conn->read_buf, 0, sizeof(conn->read_buf));
+    conn->request = create_request(arena);
+    conn->locals  = malloc(sizeof(Locals));
     if (conn->locals) LocalsInit(conn->locals);
 
 #if ENABLE_LOGGING
@@ -211,7 +211,7 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
 #endif
     conn->next = NULL;
     conn->prev = NULL;
-    return (conn->request && conn->response && conn->read_buf && conn->locals);
+    return (conn->request && conn->response && conn->locals);
 }
 
 INLINE bool reset_connection(connection_t* conn) {
@@ -234,14 +234,14 @@ INLINE bool reset_connection(connection_t* conn) {
 #endif
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
-    conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
+    memset(conn->read_buf, 0, sizeof(conn->read_buf));
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
         conn->next = NULL;
         conn->prev = NULL;
     }
-    return (conn->request && conn->response && conn->read_buf);
+    return (conn->request && conn->response);
 }
 
 /* ================================================================
