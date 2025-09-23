@@ -66,7 +66,7 @@ MultipartCode multipart_init(MultipartForm* form, size_t memory) {
     memset(form, 0, sizeof(MultipartForm));
 
     // Create arena
-    form->arena = arena_create(memory, false);
+    form->arena = arena_create(memory);
     if (!form->arena) {
         return MEMORY_ALLOC_ERROR;
     }

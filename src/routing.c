@@ -1,6 +1,6 @@
 #include "../include/routing.h"
+#include "../include/common.h"
 #include "../include/method.h"
-#include "../include/utils.h"
 
 // Static file handler is provided by pulsar.c.
 extern void static_file_handler(struct connection_t* conn);
@@ -8,6 +8,12 @@ extern void static_file_handler(struct connection_t* conn);
 // Global routes
 static route_t global_routes[MAX_ROUTES] = {0};
 static size_t global_route_count         = 0;
+
+#define HTTP_METHOD_COUNT 7
+
+// Pre-computed method offsets for O(1) method lookup
+static size_t method_start_idx[HTTP_METHOD_COUNT] = {0};
+static size_t method_end_idx[HTTP_METHOD_COUNT]   = {0};
 
 // Count the number of path parameters in pattern.
 // If there is an invalid (unterminated) parameter, valid is updated to false.
@@ -195,7 +201,7 @@ route_t* route_static(const char* pattern, const char* dirname) {
     return r;
 }
 
-// Comparison function for sorting(qsort) of routes array by method then pattern.
+// Comparison function for sorting routes by method, then by specificity
 static int compare_routes(const void* a, const void* b) {
     const route_t* ra = (const route_t*)a;
     const route_t* rb = (const route_t*)b;
@@ -204,113 +210,90 @@ static int compare_routes(const void* a, const void* b) {
     if (ra->method < rb->method) return -1;
     if (ra->method > rb->method) return 1;
 
-    // Then sort by pattern length (longer patterns first)
+    // Sort by specificity: exact matches before parameterized routes
+    bool ra_has_params = (ra->path_params != NULL);
+    bool rb_has_params = (rb->path_params != NULL);
+
+    if (!ra_has_params && rb_has_params) return -1;  // Exact routes first
+    if (ra_has_params && !rb_has_params) return 1;
+
+    // For routes of same type, longer patterns first (more specific)
     if (ra->pattern_len > rb->pattern_len) return -1;
     if (ra->pattern_len < rb->pattern_len) return 1;
 
-    // Finally sort alphabetically
+    // Finally sort alphabetically for deterministic ordering
     return strcmp(ra->pattern, rb->pattern);
 }
 
 static int global_sort_state = 0;
 
-// Sort defined routes so we can use binary search.
+// Sort routes and build method lookup tables
 void sort_routes(void) {
     if (global_sort_state == 0 && global_route_count > 0) {
         qsort(global_routes, global_route_count, sizeof(route_t), compare_routes);
+
+        // Build method lookup tables for O(1) method range finding
+        HttpMethod current_method        = global_routes[0].method;
+        method_start_idx[current_method] = 0;
+
+        for (size_t i = 1; i < global_route_count; i++) {
+            HttpMethod method = global_routes[i].method;
+            if (method != current_method) {
+                method_end_idx[current_method] = i;
+                method_start_idx[method]       = i;
+                current_method                 = method;
+            }
+        }
+        method_end_idx[current_method] = global_route_count;
+
         global_sort_state = 1;
     }
 }
 
-typedef struct {
-    uint32_t key;    // Hash of method and url.
-    route_t* route;  // Matched route.
-} RouteCacheEntry;
-
-static RouteCacheEntry route_cache[ROUTE_CACHE_SIZE];
-
-static inline uint32_t hash_route_key(HttpMethod method, const char* url) {
-    uint32_t hash = (uint32_t)method;
-    const char* p = url;
-    while (*p) {
-        hash = hash * 33 + (uint32_t)(*p++);
-    }
-    return hash;
-}
-
 // Helper function to check if a route matches a URL
-INLINE bool route_matches(route_t* route, const char* url, size_t url_length) {
-    if ((route->flags & NORMAL_ROUTE_FLAG) != 0) {
-        return match_path_parameters(route->pattern, url, route->path_params);
-    } else if ((route->flags & STATIC_ROUTE_FLAG) != 0) {
+INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_length) {
+    if ((route->flags & STATIC_ROUTE_FLAG) != 0) {
+        // Fast static route check - just prefix match
         return (route->pattern_len <= url_length) &&
                (memcmp(route->pattern, url, route->pattern_len) == 0);
     }
-    return false;
+
+    // For normal routes, check if it has parameters
+    if (!route->path_params) {
+        // Exact string match - fastest path
+        return (route->pattern_len == url_length) && (memcmp(route->pattern, url, url_length) == 0);
+    }
+
+    // Parameterized route - use existing function
+    return match_path_parameters(route->pattern, url, route->path_params);
 }
 
 route_t* route_match(const char* path, HttpMethod method) {
-    // 0. Check cache first
-    uint32_t keyhash    = hash_route_key(method, path);
-    uint32_t cache_slot = (keyhash & ROUTE_CACHE_MASK);
+    // Get method range using pre-computed lookup table
+    size_t start_idx  = method_start_idx[method];
+    size_t end_idx    = method_end_idx[method];
+    size_t url_length = strlen(path);
 
-    if (route_cache[cache_slot].key == keyhash) {
-        return route_cache[cache_slot].route;
-    }
-
-    // 1. First try exact method match using binary search
-    size_t low         = 0;
-    size_t high        = global_route_count;
-    size_t first_match = global_route_count;
-
-    while (low < high) {
-        size_t mid            = low + (high - low) / 2;
-        HttpMethod mid_method = global_routes[mid].method;
-        if (mid_method >= method) {
-            high = mid;
-            if (mid_method == method) {
-                first_match = mid;
-            }
-        } else {
-            low = mid + 1;
-        }
-    }
-
-    size_t url_length      = strlen(path);
-    route_t* matched_route = NULL;
-
-    // Search through routes of the matching method
-    for (size_t i = first_match; i < global_route_count && global_routes[i].method == method; i++) {
+    // Linear search within method range (cache-friendly, branch predictor friendly)
+    for (size_t i = start_idx; i < end_idx; i++) {
         route_t* current = &global_routes[i];
-        if (route_matches(current, path, url_length)) {
-            matched_route = current;
-            goto caching;
+        if (route_matches_fast(current, path, url_length)) {
+            return current;
         }
     }
 
-    // 2. Special case fallbacks
+    // Handle special method fallbacks
     if (method == HTTP_HEAD) {
-        // HEAD falls back to GET, but we'll still process it as HEAD later
-        matched_route = route_match(path, HTTP_GET);
-        goto caching;
+        return route_match(path, HTTP_GET);
     } else if (method == HTTP_OPTIONS) {
         // OPTIONS matches if ANY route exists for this path
         for (size_t i = 0; i < global_route_count; i++) {
-            route_t* current = &global_routes[i];
-            if (route_matches(current, path, url_length)) {
-                matched_route = current;
-                goto caching;
+            if (route_matches_fast(&global_routes[i], path, url_length)) {
+                return &global_routes[i];
             }
         }
     }
-
-    // Store in cache before returning
-    if (matched_route) {
-    caching:
-        route_cache[cache_slot].key   = keyhash;
-        route_cache[cache_slot].route = matched_route;
-    }
-    return matched_route;
+    return NULL;
 }
 
 INLINE void free_path_params(PathParams* path_params) {

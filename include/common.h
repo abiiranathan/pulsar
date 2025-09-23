@@ -31,6 +31,8 @@
 #endif
 
 #include <solidc/arena.h>
+#include <solidc/filepath.h>
+#include <solidc/str_to_num.h>
 #include "../include/constants.h"
 #include "../include/headers.h"
 #include "../include/locals.h"

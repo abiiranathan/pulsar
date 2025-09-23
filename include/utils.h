@@ -19,56 +19,6 @@ extern "C" {
 // Uses AVX intrinsics for better performance on x86/x86_64.
 #include "memmem.h"
 
-INLINE unsigned long parse_ulong(const char* value, bool* valid) {
-    assert(valid && "NULL pointer for bool *valid");
-
-    *valid        = false;
-    char* endptr  = NULL;
-    errno         = 0;
-    uintmax_t num = strtoumax(value, &endptr, 10);
-
-    // Overflow or underflow.
-    if ((num > ULONG_MAX) || (errno == ERANGE && (num == 0 || num == UINTMAX_MAX))) {
-        return 0;
-    }
-
-    // Invalid value.
-    if (*endptr != '\0' || endptr == value) {
-        return 0;
-    }
-
-    *valid = true;
-    return num;
-}
-
-/**
- * Check if path is a directory
- * Returns true if path exists AND is a directory, false otherwise
- */
-INLINE bool is_dir(const char* path) {
-    if (!path || !*path) {  // Handle NULL or empty string
-        errno = EINVAL;
-        return false;
-    }
-
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        return false;  // stat failed (errno is set)
-    }
-    return S_ISDIR(st.st_mode);
-}
-
-/**
- * Check if a path exists (file or directory)
- * Returns true if path exists, false otherwise (and sets errno)
- */
-INLINE bool path_exists(const char* path) {
-    if (!path || !*path) {
-        return false;
-    }
-    return access(path, F_OK) == 0;
-}
-
 INLINE bool is_malicious_path(const char* path) {
     // List of dangerous patterns
     static const char* patterns[] = {"../", "/./", "//", "/~", "%2e%2e", NULL};
@@ -98,8 +48,7 @@ static const uint8_t hex_valid_table[256] = {
     ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
 };
 
-INLINE void url_percent_decode(const char* restrict src, char* restrict dst, size_t src_len,
-                               size_t dst_size) {
+INLINE void url_percent_decode(const char* src, char* dst, size_t src_len, size_t dst_size) {
     const char* dst_end = dst + dst_size - 1;  // reserve space for '\0';
     const char* src_end = src + src_len;       // avoids NULL termination assumption
 

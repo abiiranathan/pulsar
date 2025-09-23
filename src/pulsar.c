@@ -315,17 +315,21 @@ INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method
         if (name_len == 14 && !(flags & 1) && !is_safe) {
             // Check Content-Length (most common case first)
             if (strncasecmp(ptr, "Content-Length", 14) == 0) {
-                bool content_len_valid;
-                char temp_buf[32];  // Enough for max uint64_t
-                if (value_len < sizeof(temp_buf)) {
-                    memcpy(temp_buf, value_start, value_len);
-                    temp_buf[value_len] = '\0';
-                    req->content_length = parse_ulong(temp_buf, &content_len_valid);
-                    if (!content_len_valid) {
-                        return false;  // Simplified error handling
-                    }
+                char buf[32];  // Enough for max uint64_t
+                if (value_len < sizeof(buf)) {
+                    memcpy(buf, value_start, value_len);
+                    buf[value_len] = '\0';
+
+                    // Parse string to ulong
+                    StoError code;
+                    if ((code = str_to_ulong(buf, &req->content_length)) != STO_SUCCESS) {
+                        fprintf(stderr, "Invalid content length: %s\n", sto_error_string(code));
+                        return false;
+                    };
+
                     flags |= 1;  // Set content_length_set
                 }
+                return false;
             }
         } else if (name_len == 10 && !(flags & 2)) {
             if (strncasecmp(ptr, "Connection", 10) == 0) {
@@ -1241,86 +1245,108 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 }
 
 void static_file_handler(connection_t* conn) {
-    route_t* route = conn->request->route;
-    ASSERT(route && (route->flags & STATIC_ROUTE_FLAG) != 0);
-
+    route_t* route      = conn->request->route;
     const char* path    = conn->request->path;
     const char* dirname = route->dirname;
     size_t dirlen       = route->dirname_len;
     size_t pattern_len  = route->pattern_len;
 
-    // Prevent directory traversal attacks
-    if (is_malicious_path(path)) {
-        conn_notfound(conn);
-        return;
-    }
+    // Early validation - single exit point for malicious paths
+    bool is_malicious = is_malicious_path(path);
 
-    // Build the request static path
-    const char* static_ptr = path + pattern_len;  // skip the pattern part
-    size_t static_len      = pattern_len;         // init static path length
+    // Calculate static path pointer and length
+    const char* static_ptr = path + pattern_len;
+    size_t static_len      = strlen(static_ptr);
 
-    // Skip leading slash if present
-    if (*static_ptr == '/') {
-        static_ptr++;
-        static_len++;
-    }
+    // Skip leading slash
+    static_ptr += (*static_ptr == '/');
+    static_len -= (*static_ptr == '/');
 
-    // Validate path lengths
-    if (dirlen >= PATH_MAX || static_len >= PATH_MAX || (dirlen + static_len + 2) >= PATH_MAX) {
-        goto path_toolong;
-    }
+    // Validate all path lengths at once
+    bool path_too_long =
+        (dirlen >= PATH_MAX) | (static_len >= PATH_MAX) | ((dirlen + static_len + 2) >= PATH_MAX);
 
-    char filepath[PATH_MAX] = {};
+    // Determine response type based on validation
+    enum { RESP_MALICIOUS = 1, RESP_TOO_LONG = 2, RESP_PROCESS = 3 } response_type = RESP_PROCESS;
 
-    // Check if dirname ends with a slash
-    bool needs_slash = (dirlen > 0 && dirname[dirlen - 1] != '/');
+    response_type = is_malicious ? RESP_MALICIOUS : response_type;
+    response_type = path_too_long ? RESP_TOO_LONG : response_type;
 
-    // Build the final path with conditional slash
-    int pathLen = snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname,
-                           needs_slash ? "/" : "", (int)static_len, static_ptr);
+    // Pre-allocate buffers to improve cache locality
+    char filepath[PATH_MAX]   = {0};
+    char index_file[PATH_MAX] = {0};
 
-    if (pathLen < 0 || pathLen >= PATH_MAX) {
-        goto path_toolong;
-    }
+    // Process file path construction and serving
+    bool file_served = false;
+    bool file_found  = false;
 
-    const char* src = filepath;
-    if (strstr(filepath, "%")) {
-        url_percent_decode(src, filepath, (size_t)pathLen, PATH_MAX);
-    }
+    if (response_type == RESP_PROCESS) {
+        // Build file path
+        bool is_different_prefix = strncmp(static_ptr, route->pattern, pattern_len) != 0;
+        bool needs_slash         = (dirlen > 0) & (dirname[dirlen - 1] != '/');
 
-    // Serve file if it exists
-    if (path_exists(filepath)) {
-        const char* web_ct = get_mimetype(filepath);
-        conn_set_content_type(conn, web_ct);
-        conn_servefile(conn, filepath);
-        return;
-    }
+        int pathLen =
+            snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname,
+                     (is_different_prefix & needs_slash) ? "/" : "", (int)static_len, static_ptr);
 
-    // Check for index.html in directory
-    if (is_dir(filepath)) {
-        char index_file[PATH_MAX];
-        pathLen = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
-        if (pathLen < 0 || pathLen >= PATH_MAX) {
-            goto path_toolong;
+        bool valid_path = (pathLen >= 0) & (pathLen < PATH_MAX);
+
+        if (valid_path) {
+            // URL decode if needed
+            bool needs_decode = (strstr(filepath, "%") != NULL || strstr(filepath, "+") != NULL);
+            if (needs_decode) {
+                url_percent_decode(filepath, filepath, (size_t)pathLen, PATH_MAX);
+            }
+
+            // Check if direct file exists
+            file_found = is_file(filepath);
+
+            if (!file_found) {
+                // Try index.html
+                int index_len = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
+                bool valid_index = (index_len >= 0) & (index_len < PATH_MAX);
+                file_found       = valid_index & is_file(index_file);
+            }
         }
+    }
 
-        if (path_exists(index_file)) {
-            conn_set_content_type(conn, "text/html");
-            conn_servefile(conn, filepath);
-        } else {
+    // Single branching point for all responses
+    switch (response_type) {
+        case RESP_MALICIOUS:
             conn_notfound(conn);
-        }
-        return;
+            break;
+
+        case RESP_TOO_LONG:
+            conn_set_status(conn, StatusRequestURITooLong);
+            conn_set_content_type(conn, "text/html");
+            conn_write_string(conn, "<h1>Path too long</h1>");
+            break;
+
+        case RESP_PROCESS:
+            if (file_found) {
+                // Determine which file to serve and content type
+                const char* serve_file   = filepath;
+                const char* content_type = get_mimetype(filepath);
+
+                // Use index.html if original file wasn't found
+                if (!is_file(filepath)) {
+                    serve_file   = index_file;
+                    content_type = "text/html";
+                }
+
+                conn_set_content_type(conn, content_type);
+                file_served = conn_servefile(conn, serve_file);
+
+                if (!file_served) {
+                    conn_set_status(conn, StatusInternalServerError);
+                    conn_set_content_type(conn, "text/html");
+                    conn_write_string(conn, "<h1>Error serving file</h1>");
+                }
+            } else {
+                conn_notfound(conn);
+            }
+            break;
     }
-
-    // Nothing found
-    conn_notfound(conn);
-    return;
-
-path_toolong:
-    conn_set_status(conn, StatusRequestURITooLong);
-    conn_set_content_type(conn, "text/html");
-    conn_write_string(conn, "<h1>Path too long</h1>");
 }
 
 const char* get_path_param(connection_t* conn, const char* name) {
@@ -1649,7 +1675,7 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
         return;
     }
 
-    Arena* arena = arena_create(ARENA_CAPACITY, false);
+    Arena* arena = arena_create(ARENA_CAPACITY);
     if (!arena) {
         fprintf(stderr, "arena_create failed\n");
         close(client_fd);
