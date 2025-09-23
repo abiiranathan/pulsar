@@ -9,6 +9,6 @@ Description: @PROJECT_DESCRIPTION@
 Version: @PROJECT_VERSION@
 URL: https://github.com/yourusername/pulsar
 Requires:
-Libs: -L${libdir} -lpulsar
+Libs: -L${libdir} -lpulsar -lsolidc
 Libs.private: -pthread
 Cflags: -I${includedir}/pulsar
