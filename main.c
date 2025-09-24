@@ -43,170 +43,172 @@ void echo_handler(connection_t* conn) {
 }
 
 void sse_handler(connection_t* conn) {
-    conn_start_sse(conn);
-    size_t total = 10000;
-    while (total > 0 && server_running) {
-        char msg[64];
-        char msg_id[24];
+    WITH_SSE_CONNECTION(conn, {
+        size_t total = 1000;
 
-        snprintf(msg, sizeof(msg), "Message: %lu", total);
-        snprintf(msg_id, sizeof(msg_id), "%lu", total);
+        // This will block the whole worker thread :) Be ware!!
+        while (total > 0 && server_running && conn_is_open(conn)) {
+            char msg[64];
+            char msg_id[24];
 
-        sse_event_t evt = SSE_EVENT_INIT(msg, "message", msg_id);
-        conn_send_event(conn, &evt);
-        total--;
-        usleep(1000);
-    }
-    conn_end_sse(conn);
+            snprintf(msg, sizeof(msg), "Message: %lu", total);
+            snprintf(msg_id, sizeof(msg_id), "%lu", total);
+
+            sse_event_t evt = SSE_EVENT_INIT(msg, "message", msg_id);
+            conn_send_event(conn, &evt);
+            total--;
+            usleep(1000);
+        }
+    });
 }
 
 void chunked_handler(connection_t* conn) {
-    conn_start_chunked_transfer(conn, 0);
+    WITH_CHUNKED_TRANSFER(conn, {
+        // Test case 1: Large single chunk (2KB)
+        {
+            char large_data[2048];
+            memset(large_data, 'A', sizeof(large_data) - 1);
+            large_data[sizeof(large_data) - 1] = '\0';
 
-    // Test case 1: Large single chunk (2KB)
-    {
-        char large_data[2048];
-        memset(large_data, 'A', sizeof(large_data) - 1);
-        large_data[sizeof(large_data) - 1] = '\0';
-
-        conn_write_chunk(conn, large_data, strlen(large_data));
-        usleep(100000);  // 100ms delay
-    }
-
-    // Test case 2: Multi-line text chunk (4KB)
-    {
-        char multi_line[4096];
-        char* pos        = multi_line;
-        size_t remaining = sizeof(multi_line) - 1;
-
-        for (int i = 0; i < 20 && remaining > 100; i++) {
-            int written = snprintf(
-                pos, remaining,
-                "Line %d: This is a very long line of text that exceeds normal sizes. "
-                "It contains repeated information to make it longer and test large chunk handling. "
-                "Data data data data data data data data data data data data.\n",
-                i);
-            if (written >= (int)remaining) break;
-            pos += written;
-            remaining -= (size_t)written;
+            conn_write_chunk(conn, large_data, strlen(large_data));
+            usleep(100000);  // 100ms delay
         }
 
-        size_t data_len = (size_t)(pos - multi_line);
-        conn_write_chunk(conn, multi_line, data_len);
-        usleep(100000);
-    }
+        // Test case 2: Multi-line text chunk (4KB)
+        {
+            char multi_line[4096];
+            char* pos        = multi_line;
+            size_t remaining = sizeof(multi_line) - 1;
 
-    // Test case 3: JSON payload (3KB)
-    {
-        char json_data[3072];
-        int len = snprintf(json_data, sizeof(json_data),
-                           "{\n"
-                           "  \"type\": \"large_response\",\n"
-                           "  \"timestamp\": %ld,\n"
-                           "  \"data\": {\n"
-                           "    \"users\": [\n",
-                           time(NULL));
-
-        // Add many user objects
-        for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
-            len += snprintf(
-                json_data + len, sizeof(json_data) - (size_t)len,
-                "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
-                "\"active\": %s}%s\n",
-                i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
-        }
-
-        len += snprintf(
-            json_data + len, sizeof(json_data) - (size_t)len,
-            "    ],\n"
-            "    \"metadata\": {\n"
-            "      \"count\": 40,\n"
-            "      \"generated_by\": \"chunked_handler\",\n"
-            "      \"description\": \"Large JSON payload for testing chunked transfer encoding\"\n"
-            "    }\n"
-            "  }\n"
-            "}");
-
-        conn_write_chunk(conn, json_data, (size_t)len);
-        usleep(100000);
-    }
-
-    // Test case 4: Very large binary-safe data (8KB)
-    {
-        char huge_data[8192];
-
-        // Fill with varied data including some null bytes to test binary safety
-        for (size_t i = 0; i < sizeof(huge_data); i++) {
-            huge_data[i] = (char)(i % 256);
-        }
-
-        conn_write_chunk(conn, huge_data, sizeof(huge_data));
-        usleep(100000);
-    }
-
-    // Test case 5: Stream source file in large chunks
-    {
-        FILE* fp = fopen(__FILE__, "r");
-        if (fp) {
-            char file_chunk[4096];
-            size_t bytes_read;
-
-            while ((bytes_read = fread(file_chunk, 1, sizeof(file_chunk), fp)) > 0) {
-                conn_write_chunk(conn, file_chunk, bytes_read);
-                usleep(50000);  // 50ms between file chunks
+            for (int i = 0; i < 20 && remaining > 100; i++) {
+                int written =
+                    snprintf(pos, remaining,
+                             "Line %d: This is a very long line of text that exceeds normal sizes. "
+                             "It contains repeated information to make it longer and test large "
+                             "chunk handling. "
+                             "Data data data data data data data data data data data data.\n",
+                             i);
+                if (written >= (int)remaining) break;
+                pos += written;
+                remaining -= (size_t)written;
             }
 
-            fclose(fp);
+            size_t data_len = (size_t)(pos - multi_line);
+            conn_write_chunk(conn, multi_line, data_len);
+            usleep(100000);
         }
-    }
 
-    // Test case 6: Rapid succession of medium chunks (1.5KB each)
-    for (int i = 0; i < 5; i++) {
-        char medium_chunk[1536];
+        // Test case 3: JSON payload (3KB)
+        {
+            char json_data[3072];
+            int len = snprintf(json_data, sizeof(json_data),
+                               "{\n"
+                               "  \"type\": \"large_response\",\n"
+                               "  \"timestamp\": %ld,\n"
+                               "  \"data\": {\n"
+                               "    \"users\": [\n",
+                               time(NULL));
 
-        int len = snprintf(medium_chunk, sizeof(medium_chunk), "CHUNK %d: ", i);
+            // Add many user objects
+            for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
+                len += snprintf(
+                    json_data + len, sizeof(json_data) - (size_t)len,
+                    "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
+                    "\"active\": %s}%s\n",
+                    i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
+            }
 
-        // Fill rest with pattern
-        for (int j = len; j < (int)sizeof(medium_chunk) - 1; j++) {
-            medium_chunk[j] = 'A' + ((j - len) % 26);
+            len += snprintf(json_data + len, sizeof(json_data) - (size_t)len,
+                            "    ],\n"
+                            "    \"metadata\": {\n"
+                            "      \"count\": 40,\n"
+                            "      \"generated_by\": \"chunked_handler\",\n"
+                            "      \"description\": \"Large JSON payload for testing chunked "
+                            "transfer encoding\"\n"
+                            "    }\n"
+                            "  }\n"
+                            "}");
+
+            conn_write_chunk(conn, json_data, (size_t)len);
+            usleep(100000);
         }
-        medium_chunk[sizeof(medium_chunk) - 1] = '\0';
 
-        conn_write_chunk(conn, medium_chunk, strlen(medium_chunk));
-        usleep(25000);  // 25ms delay
-    }
+        // Test case 4: Very large binary-safe data (8KB)
+        {
+            char huge_data[8192];
 
-    // Test case 7: Single massive chunk (16KB)
-    {
-        static char massive_chunk[16384];
+            // Fill with varied data including some null bytes to test binary safety
+            for (size_t i = 0; i < sizeof(huge_data); i++) {
+                huge_data[i] = (char)(i % 256);
+            }
 
-        char* pos        = massive_chunk;
-        size_t remaining = sizeof(massive_chunk) - 1;
+            conn_write_chunk(conn, huge_data, sizeof(huge_data));
+            usleep(100000);
+        }
 
-        // Create structured content
-        int written = snprintf(pos, remaining, "=== MASSIVE CHUNK TEST ===\n");
-        pos += written;
-        remaining -= (size_t)written;
+        // Test case 5: Stream source file in large chunks
+        {
+            FILE* fp = fopen(__FILE__, "r");
+            if (fp) {
+                char file_chunk[4096];
+                size_t bytes_read;
 
-        for (int i = 0; i < 200 && remaining > 80; i++) {
-            written =
-                snprintf(pos, remaining,
-                         "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n",
-                         i, time(NULL) + i);
-            if (written >= (int)remaining) break;
+                while ((bytes_read = fread(file_chunk, 1, sizeof(file_chunk), fp)) > 0) {
+                    conn_write_chunk(conn, file_chunk, bytes_read);
+                    usleep(50000);  // 50ms between file chunks
+                }
+
+                fclose(fp);
+            }
+        }
+
+        // Test case 6: Rapid succession of medium chunks (1.5KB each)
+        for (int i = 0; i < 5; i++) {
+            char medium_chunk[1536];
+
+            int len = snprintf(medium_chunk, sizeof(medium_chunk), "CHUNK %d: ", i);
+
+            // Fill rest with pattern
+            for (int j = len; j < (int)sizeof(medium_chunk) - 1; j++) {
+                medium_chunk[j] = 'A' + ((j - len) % 26);
+            }
+            medium_chunk[sizeof(medium_chunk) - 1] = '\0';
+
+            conn_write_chunk(conn, medium_chunk, strlen(medium_chunk));
+            usleep(25000);  // 25ms delay
+        }
+
+        // Test case 7: Single massive chunk (16KB)
+        {
+            static char massive_chunk[16384];
+
+            char* pos        = massive_chunk;
+            size_t remaining = sizeof(massive_chunk) - 1;
+
+            // Create structured content
+            int written = snprintf(pos, remaining, "=== MASSIVE CHUNK TEST ===\n");
             pos += written;
             remaining -= (size_t)written;
+
+            for (int i = 0; i < 200 && remaining > 80; i++) {
+                written = snprintf(
+                    pos, remaining,
+                    "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n", i,
+                    time(NULL) + i);
+                if (written >= (int)remaining) break;
+                pos += written;
+                remaining -= (size_t)written;
+            }
+
+            size_t total_len = (size_t)(pos - massive_chunk);
+            conn_write_chunk(conn, massive_chunk, total_len);
+            usleep(200000);  // 200ms
         }
 
-        size_t total_len = (size_t)(pos - massive_chunk);
-        conn_write_chunk(conn, massive_chunk, total_len);
-        usleep(200000);  // 200ms
-    }
-
-    // Final small chunk to signal completion
-    const char* completion = "\n=== LARGE CHUNK TESTING COMPLETED ===\n";
-    conn_write_chunk(conn, completion, strlen(completion));
-    conn_end_chunked_transfer(conn);
+        // Final small chunk to signal completion
+        const char* completion = "\n=== LARGE CHUNK TESTING COMPLETED ===\n";
+        conn_write_chunk(conn, completion, strlen(completion));
+    });
 }
 
 void pathparams_query_params_handler(connection_t* conn) {
@@ -283,7 +285,8 @@ void handle_form(connection_t* conn) {
 
 void serve_movie(connection_t* conn) {
     const char* html =
-        "<html><body style='max-width: 1000px; margin: 20px;'><video src='/static/FlightRisk.mp4' "
+        "<html><body style='max-width: 1000px; margin: 20px;'><video "
+        "src='/static/FlightRisk.mp4' "
         "controls width='720' height='480'></video></body></html>";
 
     conn_set_status(conn, StatusOK);

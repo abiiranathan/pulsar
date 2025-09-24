@@ -49,6 +49,28 @@ Transfer/sec:     79.79MB
 - Git
 - Optional: Ninja for faster builds
 
+# Increase file descriptor limits for high performance
+```bash
+
+# Check current limits first
+ulimit -n
+
+# Temporary increase (session only)
+ulimit -n 65536
+
+# Permanent changes (requires sudo)
+sudo bash -c 'echo "* soft nofile 65536" >> /etc/security/limits.conf'
+sudo bash -c 'echo "* hard nofile 65536" >> /etc/security/limits.conf'
+
+# TCP settings
+sudo bash -c 'echo "net.core.somaxconn = 65536" >> /etc/sysctl.conf'
+sudo bash -c 'echo "net.ipv4.tcp_tw_reuse = 1" >> /etc/sysctl.conf'
+sudo sysctl -p
+```
+
+# For immediate effect
+```ulimit -n 65536```
+
 ### Building with CMake
 
 ```bash

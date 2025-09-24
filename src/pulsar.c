@@ -1068,6 +1068,11 @@ void conn_end_sse(connection_t* conn) {
     conn_write_chunk(conn, NULL, 0);  // Send final chunk
 }
 
+// Returns true if connection is still open.
+bool conn_is_open(connection_t* conn) {
+    return conn && (conn->client_fd != -1 && !conn->closing);
+}
+
 // Parses the Range header and extracts start and end values
 INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end,
                         bool* has_end_range) {
@@ -1437,23 +1442,23 @@ INLINE void request_complete(connection_t* conn) {
 #define RESOLVE(S)  FORMAT(S)
 #define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveState* state,
-                            int queue_fd) {
+__attribute_warn_unused_result__ INLINE http_status process_request(connection_t* conn,
+                                                                    size_t read_bytes,
+                                                                    KeepAliveState* state,
+                                                                    int queue_fd) {
+    // replace with memmem for safety(but slower)
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
     if (!end_of_headers) {
-        send_error_response(conn, StatusBadRequest);
-        return;
+        return StatusBadRequest;
     }
 
     size_t headers_len = (size_t)(end_of_headers - conn->read_buf) + 4;
-
     char url[MAX_PATH_LEN + 1];
     url[0] = '\0';
 
     char http_protocol[16] = {0};
     if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, url, http_protocol) != 3) {
-        send_error_response(conn, StatusBadRequest);
-        return;
+        return StatusBadRequest;
     }
 
     // Percent-decode the URL into connection request path.
@@ -1462,33 +1467,28 @@ INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveStat
 
     // Validate HTTP version. We only support http 1.1
     if (strcmp(http_protocol, "HTTP/1.1") != 0) {
-        send_error_response(conn, StatusHTTPVersionNotSupported);
-        return;
+        return StatusHTTPVersionNotSupported;
     }
 
     conn->request->method_type = http_method_from_string(conn->request->method);
     if (!METHOD_VALID(conn->request->method_type)) {
-        send_error_response(conn, StatusMethodNotAllowed);
-        return;
+        return StatusMethodNotAllowed;
     }
 
     if (!parse_query_params(conn)) {
-        send_error_response(conn, StatusInternalServerError);
-        return;
+        return StatusInternalServerError;
     }
 
     // We need to parse the headers even for 404.
     if (!parse_request_headers(conn, conn->request->method_type, headers_len)) {
-        send_error_response(conn, StatusInternalServerError);
-        return;
+        return StatusInternalServerError;
     };
 
     route_t* route = route_match(conn->request->path, conn->request->method_type);
     if (route) {
         conn->request->route = route;
         if (!parse_request_body(conn, headers_len, read_bytes)) {
-            send_error_response(conn, StatusInternalServerError);
-            return;
+            return StatusInternalServerError;
         }
     }
 
@@ -1500,7 +1500,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveStat
             route->handler(conn);
         }
     } else {
-        conn_notfound(conn);
+        return StatusNotFound;
     }
 
     // Chunked transfer is handled by the handler directly outside event loop.
@@ -1521,6 +1521,7 @@ INLINE void process_request(connection_t* conn, size_t read_bytes, KeepAliveStat
         conn->last_activity = time(NULL);
         // Switch to writing response.
     }
+    return StatusOK;
 }
 
 /* ================================================================
@@ -1627,37 +1628,86 @@ INLINE int conn_accept(int worker_id) {
     set_nonblocking(client_fd);
 #endif
 
+    // Set socket timeouts - CRITICAL for preventing hanging connections
+    struct timeval read_timeout  = {.tv_sec  = 30,  // 30 second read timeout
+                                    .tv_usec = 0};
+    struct timeval write_timeout = {.tv_sec  = 30,  // 30 second write timeout
+                                    .tv_usec = 0};
+
+    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof(read_timeout)) < 0) {
+        perror("setsockopt SO_RCVTIMEO");
+    }
+
+    if (setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &write_timeout, sizeof(write_timeout)) < 0) {
+        perror("setsockopt SO_SNDTIMEO");
+    }
+
     // Set high-performance options
     int yes = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) < 0) {
+        perror("setsockopt TCP_NODELAY");
+    }
 
-    // Linux-specific optimizations
+    // Set TCP keepalive to detect dead connections
+    if (setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) < 0) {
+        perror("setsockopt SO_KEEPALIVE");
+    }
+
 #ifdef __linux__
+    // Configure keepalive parameters
+    int keepalive_idle     = 120;  // Start probes after 2 minutes of inactivity
+    int keepalive_interval = 15;   // Send probe every 15 seconds
+    int keepalive_count    = 3;    // Close after 3 failed probes
+
+    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_idle, sizeof(keepalive_idle));
+    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_interval,
+               sizeof(keepalive_interval));
+    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepalive_count, sizeof(keepalive_count));
+
+    // Additional Linux-specific optimizations
     // Enable TCP Fast Open (if configured)
     setsockopt(client_fd, SOL_TCP, TCP_FASTOPEN, &yes, sizeof(yes));
 
     // Enable TCP Quick ACK
     setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
 
+    // Set user timeout (total time for unacknowledged data)
+    unsigned int user_timeout = 60000;  // 60 seconds in milliseconds
+    setsockopt(client_fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(user_timeout));
+
     // Set maximum segment size
     int mss = 1460;  // Standard Ethernet MTU - headers
     setsockopt(client_fd, IPPROTO_TCP, TCP_MAXSEG, &mss, sizeof(mss));
 
-    int bufsize = 1024 * 1024;  // 1MB buffer
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-
-    int defer_accept = 1;
-    setsockopt(server_fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer_accept, sizeof(defer_accept));
+    // Optimize buffer sizes for high throughput
+    int rcv_bufsize = 256 * 1024;  // 256KB receive buffer (reduced from 1MB)
+    int snd_bufsize = 256 * 1024;  // 256KB send buffer (reduced from 1MB)
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcv_bufsize, sizeof(rcv_bufsize));
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &snd_bufsize, sizeof(snd_bufsize));
 #endif
 
-    // BSD/Darwin optimizations
+// BSD/Darwin optimizations
 #if defined(__APPLE__) || defined(__FreeBSD__)
     // Disable SIGPIPE generation
     setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
 
     // Enable TCP_NOPUSH (similar to TCP_CORK)
     setsockopt(client_fd, IPPROTO_TCP, TCP_NOPUSH, &yes, sizeof(yes));
+
+    // BSD keepalive settings
+#ifdef TCP_KEEPIDLE
+    int keepalive_idle = 120;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_idle, sizeof(keepalive_idle));
+#endif
+#ifdef TCP_KEEPINTVL
+    int keepalive_interval = 15;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_interval,
+               sizeof(keepalive_interval));
+#endif
+#ifdef TCP_KEEPCNT
+    int keepalive_count = 3;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepalive_count, sizeof(keepalive_count));
+#endif
 #endif
 
     return client_fd;
@@ -1706,19 +1756,22 @@ INLINE size_t MAX(size_t x, size_t y) {
 }
 
 INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state) {
+    // Read the headers into connection buffer.
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
-    if (bytes_read == -1) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            conn->closing = true;  // read: connection reset by peer.
-        }
-        return;
-    } else if (bytes_read == 0) {
-        conn->closing = true;  // Unexpected close.
+    if (bytes_read <= 0) {
+        // connection reset by peer
+        // or EWOULDBLOCK (Should not happen since socket is ready to read)
+        conn->closing = true;
         return;
     }
     conn->read_buf[bytes_read] = '\0';
 
-    process_request(conn, (size_t)bytes_read, state, queue_fd);
+    // Process the request and parse the headers / query params.
+    http_status status;
+    if ((status = process_request(conn, (size_t)bytes_read, state, queue_fd)) != StatusOK) {
+        send_error_response(conn, status);
+        return;
+    };
 
     // Switch to writing response.
     if (event_mod_write(queue_fd, conn->client_fd, conn) < 0) {

@@ -55,6 +55,9 @@ typedef Locals* (*LocalsCreateCallback)();
  */
 int pulsar_run(const char* addr, int port);
 
+// Returns true if connection is still open.
+bool conn_is_open(connection_t* conn);
+
 /**
  * @brief Registers global middleware functions
  *
@@ -221,6 +224,20 @@ ssize_t conn_write_chunk(connection_t* conn, const void* data, size_t size);
 
 // End SSE or chunked transfer.
 void conn_end_chunked_transfer(connection_t* conn);
+
+#define WITH_SSE_CONNECTION(conn, block)                                                           \
+    do {                                                                                           \
+        conn_start_sse(conn);                                                                      \
+        block;                                                                                     \
+        if (conn_is_open(conn)) conn_end_sse(conn);                                                \
+    } while (0)
+
+#define WITH_CHUNKED_TRANSFER(conn, block)                                                         \
+    do {                                                                                           \
+        conn_start_chunked_transfer(conn, 0);                                                      \
+        block;                                                                                     \
+        if (conn_is_open(conn)) conn_end_chunked_transfer(conn);                                   \
+    } while (0)
 
 typedef struct {
     const char* data;
