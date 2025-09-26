@@ -20,6 +20,7 @@ typedef enum {
 } HttpMethod;
 
 #define METHOD_VALID(method) ((method) > HTTP_INVALID && (method) <= HTTP_OPTIONS)
+
 #define SAFE_METHOD(method)                                                                        \
     (((method) == HTTP_GET || (method) == HTTP_OPTIONS || (method) == HTTP_HEAD))
 

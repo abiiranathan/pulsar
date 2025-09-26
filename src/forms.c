@@ -72,13 +72,12 @@ MultipartCode multipart_init(MultipartForm* form, size_t memory) {
     }
 
     // Allocate initial arrays from arena
-    form->files =
-        (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
+    form->files = arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
     if (!form->files) {
         return ARENA_ALLOC_ERROR;
     }
 
-    form->fields = (FormField*)arena_alloc(form->arena, INITIAL_FIELD_CAPACITY * sizeof(FormField));
+    form->fields = arena_alloc(form->arena, INITIAL_FIELD_CAPACITY * sizeof(FormField));
     if (!form->fields) {
         return ARENA_ALLOC_ERROR;
     }
@@ -94,6 +93,7 @@ INLINE bool form_insert_header(MultipartForm* form, FileHeader* header) {
     if (form->num_files >= form->files_capacity) {
         if (!grow_files_array(form)) return false;
     }
+
     form->files[form->num_files] = header;
     form->num_files++;
     return true;
@@ -379,9 +379,9 @@ cleanup:
 bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     if (!content_type || !boundary) return false;
 
-    const char* prefix  = "--";
-    size_t prefix_len   = 2;
-    size_t total_length = strlen(content_type);
+    static const char prefix[] = "--";
+    static size_t prefix_len   = sizeof(prefix) - 1;
+    size_t total_length        = strlen(content_type);
 
     if (strncasecmp(content_type, "multipart/form-data", 19) != 0) {
         return false;

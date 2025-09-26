@@ -66,14 +66,14 @@ typedef struct buffer_response {
     size_t body_len;       // Actual length of body
     size_t body_capacity;  // Capacity of body buffer.
     int heap_allocated;    // If heap allocation is used.
-} buffer_response;
+} BufferResponse;
 
 typedef struct file_response {
     uint32_t file_size;    // Size of file to send (if applicable)
     uint32_t file_offset;  // Offset in file for sendfile
     uint32_t max_range;    // Maximum range of requested bytes in range request.
     int file_fd;           // File descriptor for file to send (if applicable)
-} file_response;
+} FileResponse;
 
 // The type of response we are sending.
 typedef enum response_type : uint8_t {
@@ -98,9 +98,9 @@ typedef struct response_t {
     uint8_t flags;                       // 4 bytes for all flags.
     ResponseType type;                   // Type of response for state.
     union {
-        buffer_response buffer;  // Normal stack/heap buffer resp
-        file_response file;      // File response
-    } state;                     // Buffer response or file response
+        BufferResponse buffer;  // Normal stack/heap buffer resp
+        FileResponse file;      // File response
+    } state;                    // Buffer response or file response
 } response_t;
 
 // HTTP Request structure

@@ -1,4 +1,5 @@
 #include "../include/pulsar.h"
+#include <solidc/macros.h>
 #include "../include/events.h"
 
 #define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
@@ -179,7 +180,7 @@ INLINE void free_response(response_t* resp) {
 
     switch (resp->type) {
         case ResponseTypeBuffer:
-            buffer_response* b = &resp->state.buffer;
+            BufferResponse* b = &resp->state.buffer;
             if (b->heap_allocated && b->body.heap) {
                 free(b->body.heap);
             }
@@ -634,7 +635,7 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
 int conn_write(connection_t* conn, const void* data, size_t len) {
     response_t* res = conn->response;
     assert(res->type == ResponseTypeBuffer && "Must be in buffer response mode");
-    buffer_response* b = &res->state.buffer;
+    BufferResponse* b = &res->state.buffer;
 
     size_t body_len = b->body_len;
     size_t required = body_len + len;
@@ -1183,7 +1184,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 
     // Switch response type to file mode and initialize.
     conn->response->type = ResponseTypeFile;
-    file_response* fr    = &conn->response->state.file;
+    FileResponse* fr     = &conn->response->state.file;
     fr->file_fd          = fd;
     fr->file_size        = stat_buf.st_size;
     fr->file_offset      = 0;
@@ -1232,12 +1233,12 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     if (!HAS_RANGE_REQUEST(resp->flags) && method != HTTP_OPTIONS) {
         switch (resp->type) {
             case ResponseTypeBuffer:
-                buffer_response* br = &resp->state.buffer;
-                contentLength       = br->body_len;
+                BufferResponse* br = &resp->state.buffer;
+                contentLength      = br->body_len;
                 break;
             case ResponseTypeFile:
-                file_response* fr = &resp->state.file;
-                contentLength     = fr->file_size;
+                FileResponse* fr = &resp->state.file;
+                contentLength    = fr->file_size;
                 break;
         }
 
@@ -1755,14 +1756,6 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
     }
 }
 
-INLINE size_t MIN(size_t x, size_t y) {
-    return x < y ? x : y;
-}
-
-INLINE size_t MAX(size_t x, size_t y) {
-    return x > y ? x : y;
-}
-
 INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state) {
     // Read the headers into connection buffer.
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
@@ -1960,10 +1953,10 @@ INLINE ssize_t send_chunk(int client_fd, int file_fd, off_t* offset, off_t chunk
  * @param state Keep-alive state manager.
  */
 INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
-    response_t* res   = conn->response;
-    file_response* fr = &res->state.file;
-    ssize_t sent      = -1;
-    bool is_range     = HAS_RANGE_REQUEST(res->flags);
+    response_t* res  = conn->response;
+    FileResponse* fr = &res->state.file;
+    ssize_t sent     = -1;
+    bool is_range    = HAS_RANGE_REQUEST(res->flags);
 
     // Write headers if not already done
     if (!HAS_HEADERS_WRITTEN(res->flags)) {
@@ -2017,8 +2010,8 @@ INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAliveState* 
  * @param state Keep-alive state manager.
  */
 INLINE void handle_buffer_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
-    response_t* res     = conn->response;
-    buffer_response* br = &res->state.buffer;
+    response_t* res    = conn->response;
+    BufferResponse* br = &res->state.buffer;
 
     while (1) {
         // Set up vectored I/O for remaining data

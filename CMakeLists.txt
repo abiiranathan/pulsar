@@ -149,23 +149,14 @@ endif()
 
 # Valgrind check
 find_program(VALGRIND_EXECUTABLE valgrind)
+
 if(VALGRIND_EXECUTABLE)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/glibc.supp")
-        add_custom_target(check
-            COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
-                    --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/glibc.supp 
-                    ${CMAKE_BINARY_DIR}/bin/server
-            DEPENDS server
-            COMMENT "Running valgrind memory check with suppressions"
-        )
-    else()
-        add_custom_target(check
-            COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
-                    ${CMAKE_BINARY_DIR}/bin/server
-            DEPENDS server
-            COMMENT "Running valgrind memory check (no suppressions)"
-        )
-    endif()
+    add_custom_target(check
+        COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=all 
+                ${CMAKE_BINARY_DIR}/bin/server
+        DEPENDS server
+        COMMENT "Running valgrind memory check (no suppressions)"
+    )
 endif()
 
 # Profile target
@@ -247,23 +238,6 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pulsar.pc"
 if(PLATFORM_LINUX)
     install(CODE "execute_process(COMMAND ldconfig)")
 endif()
-
-# Packaging
-set(CPACK_PACKAGE_NAME "pulsar")
-set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Pulsar web server library")
-set(CPACK_PACKAGE_VENDOR "Your Organization")
-set(CPACK_PACKAGE_CONTACT "your-email@example.com")
-
-if(PLATFORM_LINUX)
-    set(CPACK_GENERATOR "DEB;RPM;TGZ")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6 (>= 2.17)")
-    set(CPACK_RPM_PACKAGE_REQUIRES "glibc >= 2.17")
-elseif(PLATFORM_MACOS)
-    set(CPACK_GENERATOR "TGZ;ZIP")
-endif()
-
-include(CPack)
 
 # Print configuration summary
 message(STATUS "=== Pulsar Build Configuration ===")
