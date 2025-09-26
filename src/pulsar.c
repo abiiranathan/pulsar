@@ -140,30 +140,22 @@ INLINE request_t* create_request(Arena* arena) {
 
 static inline void response_init(response_t* resp) {
     if (!resp) return;
+    resp->status_code                 = 0;  // HTTP status code
+    resp->type                        = ResponseTypeBuffer;
+    resp->state.buffer.heap_allocated = false;
+    resp->state.buffer.heap_allocated = false;              // Start with stack allocation
+    resp->state.buffer.body_len       = 0;                  // No body content initially
+    resp->state.buffer.body_capacity  = WRITE_BUFFER_SIZE;  // Default to write buffer capacity
 
-    // Core response fields - most frequently accessed
-    resp->status_code    = 0;                  // HTTP status code
-    resp->heap_allocated = false;              // Start with stack allocation
-    resp->body_len       = 0;                  // No body content initially
-    resp->body_capacity  = WRITE_BUFFER_SIZE;  // Default to write buffer capacity
-
-    // Length tracking - initialize to 0
+    // Length tracking
     resp->headers_len = 0;
     resp->status_len  = 0;
     resp->flags       = 0;
 
-    // Sending progress state - all start at 0
-    resp->status_sent  = 0;
-    resp->headers_sent = 0;
-    resp->body_sent    = 0;
-
-    // File response state - initialize to invalid/unused state
-    resp->file_size   = 0;
-    resp->file_offset = 0;
-    resp->max_range   = 0;
-    resp->file_fd     = -1;  // Invalid file descriptor
-
-    // Note: We don't zero the buffers since they'll be written to before use
+    // Epoll retry state
+    resp->retry.status_sent  = 0;
+    resp->retry.headers_sent = 0;
+    resp->retry.body_sent    = 0;
 }
 
 INLINE response_t* create_response(Arena* arena) {
@@ -185,9 +177,14 @@ INLINE void free_request(request_t* req) {
 INLINE void free_response(response_t* resp) {
     if (!resp) return;
 
-    if (resp->heap_allocated && resp->body.heap) {
-        free(resp->body.heap);
-        resp->body.heap = NULL;
+    switch (resp->type) {
+        case ResponseTypeBuffer:
+            buffer_response* b = &resp->state.buffer;
+            if (b->heap_allocated && b->body.heap) {
+                free(b->body.heap);
+            }
+        case ResponseTypeFile:
+            break;
     }
 }
 
@@ -201,9 +198,8 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
     conn->read_buf[0]   = '\0';
-    memset(conn->read_buf, 0, sizeof(conn->read_buf));
-    conn->request = create_request(arena);
-    conn->locals  = malloc(sizeof(Locals));
+    conn->request       = create_request(arena);
+    conn->locals        = malloc(sizeof(Locals));
     if (conn->locals) LocalsInit(conn->locals);
 
 #if ENABLE_LOGGING
@@ -221,8 +217,13 @@ INLINE bool reset_connection(connection_t* conn) {
     free(conn->request->body);  // Free request body.
 
     // Reset response buffer before resetting arena.
-    if (conn->response->heap_allocated) {
-        free(conn->response->body.heap);
+    switch (conn->response->type) {
+        case ResponseTypeBuffer:
+            if (conn->response->state.buffer.heap_allocated) {
+                free(conn->response->state.buffer.body.heap);
+            }
+        default:
+            // fall through
     }
 
     // Reset locals
@@ -232,9 +233,9 @@ INLINE bool reset_connection(connection_t* conn) {
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
-    conn->request  = create_request(conn->arena);
-    conn->response = create_response(conn->arena);
-    memset(conn->read_buf, 0, sizeof(conn->read_buf));
+    conn->request     = create_request(conn->arena);
+    conn->response    = create_response(conn->arena);
+    conn->read_buf[0] = '\0';
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
@@ -632,14 +633,17 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
 
 int conn_write(connection_t* conn, const void* data, size_t len) {
     response_t* res = conn->response;
-    size_t body_len = res->body_len;
+    assert(res->type == ResponseTypeBuffer && "Must be in buffer response mode");
+    buffer_response* b = &res->state.buffer;
+
+    size_t body_len = b->body_len;
     size_t required = body_len + len;
 
     // Fast path: stack buffer without allocation
-    if (likely(!res->heap_allocated)) {
+    if (likely(!b->heap_allocated)) {
         if (required <= STACK_BUFFER_SIZE) {
-            memcpy(res->body.stack + body_len, data, len);
-            res->body_len += len;
+            memcpy(b->body.stack + body_len, data, len);
+            b->body_len += len;
             return (int)len;
         } else {
             // Need to migrate to heap - COPY FIRST before changing union state
@@ -670,19 +674,19 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
             }
 
             // Copy existing stack data to heap BEFORE changing union state
-            memcpy(heap_buffer, res->body.stack, body_len);
+            memcpy(heap_buffer, b->body.stack, body_len);
 
             // Now safe to switch to heap mode
-            res->heap_allocated = true;
-            res->body_capacity  = heap_capacity;
-            res->body.heap      = heap_buffer;
+            b->heap_allocated = true;
+            b->body_capacity  = heap_capacity;
+            b->body.heap      = heap_buffer;
         }
     }
 
     // Heap path: ensure sufficient capacity
-    if (required > res->body_capacity) {
+    if (required > b->body_capacity) {
 
-        size_t new_capacity = res->body_capacity;
+        size_t new_capacity = b->body_capacity;
         while (new_capacity < required) {
             // Check for overflow before doubling
             if (new_capacity > SIZE_MAX / 2) {
@@ -692,17 +696,17 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
             new_capacity *= 2;
         }
 
-        uint8_t* new_buffer = realloc(res->body.heap, new_capacity);
+        uint8_t* new_buffer = realloc(b->body.heap, new_capacity);
         if (!new_buffer) {
             perror("realloc failed");
             return -1;
         }
-        res->body.heap     = new_buffer;
-        res->body_capacity = new_capacity;
+        b->body.heap     = new_buffer;
+        b->body_capacity = new_capacity;
     }
 
-    memcpy(res->body.heap + body_len, data, len);
-    res->body_len += len;
+    memcpy(b->body.heap + body_len, data, len);
+    b->body_len += len;
     return (int)len;
 }
 
@@ -1124,7 +1128,7 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
     return true;
 }
 
-// Write headers for the Content-Range and Accept-Ranges.
+// Write headers for the Content-Range, Accept-Ranges and content-length.
 // Also sets the status code for partial content.
 INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, off64_t file_size) {
     static const char header_fmt[] =
@@ -1132,13 +1136,15 @@ INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, o
         "Content-Length: %ld\r\n"
         "Content-Range: bytes %ld-%ld/%ld\r\n";
 
-    response_t* resp = conn->response;
-    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
+    response_t* resp      = conn->response;
+    size_t remaining      = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
+    size_t content_length = conn->request->method_type == HTTP_OPTIONS ? 0 : (size_t)file_size;
 
     // enough for above range headers
     if (remaining > 164) {
         char* dest = resp->headers_buf + resp->headers_len;
-        int len    = snprintf(dest, remaining, header_fmt, end - start + 1, start, end, file_size);
+        int len =
+            snprintf(dest, remaining, header_fmt, end - start + 1, start, end, content_length);
         if (len > 0 && (size_t)len < remaining) {
             resp->headers_len += len;
             return;
@@ -1175,9 +1181,12 @@ bool conn_servefile(connection_t* conn, const char* filename) {
         conn_set_content_type(conn, mimetype);
     }
 
-    conn->response->file_fd     = fd;
-    conn->response->file_size   = stat_buf.st_size;
-    conn->response->file_offset = 0;
+    // Switch response type to file mode and initialize.
+    conn->response->type = ResponseTypeFile;
+    file_response* fr    = &conn->response->state.file;
+    fr->file_fd          = fd;
+    fr->file_size        = stat_buf.st_size;
+    fr->file_offset      = 0;
 
     const char* range_header = headers_get(conn->request->headers, "Range");
     if (!range_header) {
@@ -1202,9 +1211,9 @@ bool conn_servefile(connection_t* conn, const char* filename) {
         send_range_headers(conn, start_offset, end_offset, stat_buf.st_size);
 
         // Update file offset and size.
-        conn->response->file_offset = start_offset;
-        conn->response->file_size   = stat_buf.st_size;
-        conn->response->max_range   = end_offset - start_offset + 1;
+        fr->file_offset = start_offset;
+        fr->file_size   = stat_buf.st_size;
+        fr->max_range   = end_offset - start_offset + 1;
         SET_RANGE_REQUEST(conn->response->flags);
     }
 
@@ -1213,28 +1222,27 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 
 // Build the complete HTTP response
 INLINE void finalize_response(connection_t* conn, HttpMethod method) {
+    char contentLen[32];
+    size_t contentLength = 0;
+
     response_t* resp = conn->response;
     if (resp->status_len == 0) conn_set_status(conn, StatusOK);
 
-    // If range request flag is not set, set content-length.
-    if (likely(!HAS_RANGE_REQUEST(resp->flags))) {
-        size_t content_length = resp->body_len;
-        char content_length_str[32];
-
-        // OPTIONS method does not have a body, so we set content length to 0.
-        // But HEAD needs to have the same headers as GET.
-        if (method != HTTP_OPTIONS) {
-            // If we are serving a file, use the file size.
-            if (resp->file_fd >= 0) {
-                content_length = resp->file_size;
-            }
-        } else {
-            content_length = 0;  // For OPTIONS method, we don't send a body
+    // Write content length
+    if (!HAS_RANGE_REQUEST(resp->flags) && method != HTTP_OPTIONS) {
+        switch (resp->type) {
+            case ResponseTypeBuffer:
+                buffer_response* br = &resp->state.buffer;
+                contentLength       = br->body_len;
+                break;
+            case ResponseTypeFile:
+                file_response* fr = &resp->state.file;
+                contentLength     = fr->file_size;
+                break;
         }
 
-        // Set Content-Length header
-        snprintf(content_length_str, sizeof(content_length_str), "%zu", content_length);
-        conn_writeheader(conn, "Content-Length", content_length_str);
+        snprintf(contentLen, sizeof(contentLen), "%zu", contentLength);
+        conn_writeheader(conn, "Content-Length", contentLen);
     }
 
 #if WRITE_SERVER_HEADERS
@@ -1423,10 +1431,10 @@ void pulsar_delete_context_value(connection_t* conn, const char* key) {
 }
 
 #if ENABLE_LOGGING
-INLINE void request_complete(connection_t* conn) {
+INLINE void post_request_logger(connection_t* conn) {
     if (LOGGER_CALLBACK) {
         struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC, &end);
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &end);
 
         uint64_t start_ns =
             (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
@@ -1504,7 +1512,7 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
     }
 
     // Chunked transfer is handled by the handler directly outside event loop.
-    if (unlikely(HAS_CHUNKED_TRANSFER(conn->response->flags))) {
+    if (HAS_CHUNKED_TRANSFER(conn->response->flags)) {
         if (conn->keep_alive) {
             conn->last_activity = time(NULL);
             AddKeepAliveConnection(conn, state);
@@ -1514,7 +1522,7 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
             }
         }
 #if ENABLE_LOGGING
-        request_complete(conn);
+        post_request_logger(conn);
 #endif
     } else {
         finalize_response(conn, conn->request->method_type);
@@ -1780,187 +1788,277 @@ INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state)
     }
 }
 
-INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
-    __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
+// ==================== Response Writers===============================
+/** Maximum chunk size for file transfers (1MB). */
+#define MAX_CHUNK_SIZE 4096
 
-    response_t* res         = conn->response;
-    int client_fd           = conn->client_fd;
-    const bool sending_file = res->file_fd > 0 && res->file_size > 0;
-
-    while (1) {
-        ssize_t sent  = 0;
-        bool complete = false;
-
-        if (sending_file) {
-            if (!HAS_HEADERS_WRITTEN(res->flags)) {
-                // Send headers.
-                struct iovec iov[2];
-                iov[0].iov_base = res->status_buf + res->status_sent;
-                iov[0].iov_len  = res->status_len - res->status_sent;
-                iov[1].iov_base = res->headers_buf + res->headers_sent;
-                iov[1].iov_len  = res->headers_len - res->headers_sent;
-
-                sent = writev(client_fd, iov, 2);
-                if (unlikely(sent < 0)) goto handle_error;
-
-                // Handle zero bytes sent (socket buffer full)
-                if (unlikely(sent == 0)) {
-                    // Socket buffer is full, wait for next write event
-                    return;
-                }
-
-                // Branchless update of sent counts
-                size_t status_part = MIN((size_t)sent, iov[0].iov_len);
-                res->status_sent += status_part;
-                res->headers_sent += (size_t)sent - status_part;
-
-                if (res->status_sent == res->status_len && res->headers_sent == res->headers_len) {
-                    SET_HEADERS_WRITTEN(res->flags);
-                }
-                continue;
-            }
-
-            // File data transfer
-            off_t remaining_file = res->file_size - res->file_offset;
-            if (remaining_file <= 0) {
-                complete = true;
-            } else {
-                off_t chunk_size = HAS_RANGE_REQUEST(res->flags)
-                                       ? (off_t)MIN(1 << 20, (size_t)remaining_file)
-                                       : remaining_file;
-
-#if defined(__linux__)
-                // Use zero-copy sendfile if available
-                off_t offset = res->file_offset;
-                sent         = sendfile(client_fd, res->file_fd, &offset, (size_t)chunk_size);
-                if (sent > 0) {
-                    res->file_offset = offset;
-                }
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-                // BSD-style sendfile
-                off_t len  = chunk_size;
-                int result = sendfile(res->file_fd, client_fd, res->file_offset, &len, NULL, 0);
-                if (result == 0 || (result == -1 && errno == EAGAIN)) {
-                    sent = len;
-                    res->file_offset += sent;
-                } else {
-                    sent = -1;
-                }
-#else
-                // Fallback for other systems - need to read from file first
-                static thread_local char file_buffer[1 << 20];  // 1MB buffer
-                chunk_size = MIN(chunk_size, sizeof(file_buffer));
-
-                ssize_t read_bytes = pread(res->file_fd, file_buffer, chunk_size, res->file_offset);
-                if (read_bytes <= 0) {
-                    sent  = -1;
-                    errno = EIO;
-                } else {
-                    sent = write(client_fd, file_buffer, read_bytes);
-                    if (sent > 0) {
-                        res->file_offset += sent;
-                    }
-                }
+/** Thread-local buffer for fallback file operations. */
+#if !defined(__linux__) && !defined(__APPLE__) && defined(__FreeBSD__)
+static thread_local char file_buffer[MAX_CHUNK_SIZE];
 #endif
-                if (unlikely(sent < 0)) goto handle_error;
 
-                // Handle zero bytes sent (socket buffer full)
-                if (sent == 0) {
-                    // Socket buffer is full, wait for next write event
-                    return;
-                }
-
-                complete = (res->file_offset >= res->file_size);
-            }
-        } else {
-            // Normal buffer mode with optimized iovec setup
-            struct iovec iov[3];
-            iov[0].iov_base = res->status_buf + res->status_sent;
-            iov[0].iov_len  = res->status_len - res->status_sent;
-            iov[1].iov_base = res->headers_buf + res->headers_sent;
-            iov[1].iov_len  = res->headers_len - res->headers_sent;
-
-            iov[2].iov_base =
-                (res->heap_allocated ? res->body.heap : res->body.stack) + res->body_sent;
-            iov[2].iov_len = res->body_len - res->body_sent;
-
-            sent = writev(client_fd, iov, 3);
-            if (unlikely(sent < 0)) goto handle_error;
-
-            // Handle zero bytes sent (socket buffer full)
-            if (sent == 0) {
-                // Socket buffer is full, wait for next write event
-                return;
-            }
-
-            // Update sent counts.
-            size_t remaining = (size_t)sent;
-
-            // Update status_sent
-            if (remaining > 0) {
-                size_t seg = MIN(remaining, iov[0].iov_len);
-                res->status_sent += seg;
-                remaining -= seg;
-            }
-
-            // Update headers_sent
-            if (remaining > 0) {
-                size_t seg = MIN(remaining, iov[1].iov_len);
-                res->headers_sent += seg;
-                remaining -= seg;
-            }
-
-            // Update body_sent
-            if (remaining > 0) {
-                size_t seg = MIN(remaining, iov[2].iov_len);
-                res->body_sent += seg;
-            }
-
-            complete = (res->status_sent == res->status_len) &&
-                       (res->headers_sent == res->headers_len) && (res->body_sent == res->body_len);
-        }
-
-        conn->last_activity = time(NULL);
-        if (complete) {
-#if ENABLE_LOGGING
-            request_complete(conn);
-#endif
-            if (sending_file) {
-                close(res->file_fd);
-                res->file_fd = -1;
-            }
-
-            if (conn->keep_alive) {
-                conn->last_activity = time(NULL);
-                AddKeepAliveConnection(conn, state);
-
-                if (reset_connection(conn)) {
-                    if (event_mod_read(queue_fd, conn->client_fd, conn) < 0) {
-                        conn->closing = true;
-                    }
-                } else {
-                    conn->closing = true;
-                }
-            } else {
-                conn->closing = true;
-            }
-            return;
-        }
-    }
-
-handle_error:
-    if (sending_file) {
-        close(res->file_fd);
-        res->file_fd = -1;
-    }
-
-    // Only mark for closing if it's a persistent error, not just EAGAIN/EWOULDBLOCK
+INLINE void handle_write_error(connection_t* conn, const char* operation) {
+    // Only mark for closing if it's a persistent error, not transient ones
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
         // Ignore EPIPE (broken pipe), which just means client disconnected
         if (errno != EPIPE) {
-            perror("write failed");
+            perror(operation);
         }
         conn->closing = true;
+    }
+}
+
+/**
+ * Completes request processing and handles connection state transitions.
+ * @param conn The connection that completed processing.
+ * @param queue_fd Event queue file descriptor.
+ * @param state Keep-alive state manager.
+ */
+INLINE void complete_request(connection_t* conn, int queue_fd, KeepAliveState* state) {
+
+#if ENABLE_LOGGING
+    post_request_logger(conn);
+#endif
+
+    if (!conn->keep_alive) {
+        conn->closing = true;
+        return;
+    }
+
+    // Keep the connection in keep-alive linked list
+    conn->last_activity = time(NULL);
+    AddKeepAliveConnection(conn, state);
+
+    // Reset connection state
+    if (!reset_connection(conn)) {
+        conn->closing = true;
+        return;
+    }
+
+    // Re-arm EPOLL to resume reading
+    if (event_mod_read(queue_fd, conn->client_fd, conn) == -1) {
+        conn->closing = true;
+        return;
+    }
+}
+
+/**
+ * Updates the retry counters after a partial write operation.
+ * @param res Response containing retry state.
+ * @param sent Total bytes sent.
+ * @param status_len Length of status line segment.
+ * @param headers_len Length of headers segment.
+ * @param body_len Length of body segment.
+ */
+INLINE void update_retry_counters(response_t* res, size_t sent, size_t status_len,
+                                  size_t headers_len, size_t body_len) {
+    size_t remaining = sent;
+
+    // Update status_sent
+    if (remaining > 0) {
+        size_t segment = MIN(remaining, status_len);
+        res->retry.status_sent += segment;
+        remaining -= segment;
+    }
+
+    // Update headers_sent
+    if (remaining > 0) {
+        size_t segment = MIN(remaining, headers_len);
+        res->retry.headers_sent += segment;
+        remaining -= segment;
+    }
+
+    // Update body_sent
+    if (remaining > 0) {
+        size_t segment = MIN(remaining, body_len);
+        res->retry.body_sent += segment;
+    }
+}
+
+/**
+ * Writes response headers (status line + headers) using vectored I/O.
+ * @param res Response containing header data.
+ * @param client_fd Client socket file descriptor.
+ * @return Number of bytes sent, or -1 on error.
+ */
+INLINE ssize_t write_file_response_headers(response_t* res, int client_fd) {
+    // Calculate remaining bytes for each segment
+    size_t status_remaining  = res->status_len - res->retry.status_sent;
+    size_t headers_remaining = res->headers_len - res->retry.headers_sent;
+
+    // If everything is already sent, mark headers as written
+    if (status_remaining == 0 && headers_remaining == 0) {
+        SET_HEADERS_WRITTEN(res->flags);
+        return 0;
+    }
+
+    struct iovec iov[2] = {
+        {.iov_base = res->status_buf + res->retry.status_sent, .iov_len = status_remaining},
+        {.iov_base = res->headers_buf + res->retry.headers_sent, .iov_len = headers_remaining}};
+
+    ssize_t sent = writev(client_fd, iov, 2);
+    if (sent <= 0) {
+        return sent;  // Error or no bytes sent
+    }
+
+    // Update retry counters for the amount actually sent
+    update_retry_counters(res, (size_t)sent, status_remaining, headers_remaining, 0);
+
+    // Check if all headers have been sent
+    if (res->retry.status_sent == res->status_len && res->retry.headers_sent == res->headers_len) {
+        SET_HEADERS_WRITTEN(res->flags);
+    }
+
+    return sent;
+}
+
+/**
+ * Platform-specific file transfer using the most efficient method available.
+ * @param client_fd Client socket file descriptor.
+ * @param file_fd Source file descriptor.
+ * @param offset Current file offset (updated on success).
+ * @param chunk_size Number of bytes to transfer.
+ * @return Number of bytes sent, or -1 on error.
+ */
+INLINE ssize_t send_chunk(int client_fd, int file_fd, off_t* offset, off_t chunk_size) {
+#if defined(__linux__)
+    // Linux: Use zero-copy sendfile
+    return sendfile(client_fd, file_fd, offset, (size_t)chunk_size);
+
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    // BSD: Use BSD-style sendfile
+    off_t len  = chunk_size;
+    int result = sendfile(file_fd, client_fd, *offset, &len, NULL, 0);
+    if (result == 0 || (result == -1 && errno == EAGAIN)) {
+        *offset += len;
+        return len;
+    }
+    return -1;
+
+#else
+    // Fallback: Read then write for other systems
+    chunk_size = MIN(chunk_size, (off_t)sizeof(file_buffer));
+
+    ssize_t read_bytes = pread(file_fd, file_buffer, (size_t)chunk_size, *offset);
+    if (read_bytes <= 0) {
+        errno = (read_bytes == 0) ? EIO : errno;
+        return -1;
+    }
+
+    ssize_t sent = write(client_fd, file_buffer, (size_t)read_bytes);
+    if (sent > 0) {
+        *offset += sent;
+    }
+    return sent;
+#endif
+}
+
+/**
+ * Handles file-based response writing with platform-optimized transfer.
+ * @param queue_fd Event queue file descriptor.
+ * @param conn Connection handling the response.
+ * @param state Keep-alive state manager.
+ */
+INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
+    response_t* res   = conn->response;
+    file_response* fr = &res->state.file;
+    ssize_t sent      = -1;
+    bool is_range     = HAS_RANGE_REQUEST(res->flags);
+
+    // Write headers if not already done
+    if (!HAS_HEADERS_WRITTEN(res->flags)) {
+        sent = write_file_response_headers(res, conn->client_fd);
+        if (sent < 0) {
+            handle_write_error(conn, "header write failed");
+            return;
+        }
+        if (sent == 0) {
+            return;  // Socket buffer full, wait for next write event
+        }
+    }
+
+    // Keep sending data until done.
+    while (1) {
+        // Calculate remaining file data
+        off_t remaining = fr->file_size - fr->file_offset;
+        if (remaining <= 0) {
+            close(fr->file_fd);
+            fr->file_fd = -1;
+            complete_request(conn, queue_fd, state);
+            return;
+        }
+
+        off_t chunk_size = is_range ? (off_t)MIN(MAX_CHUNK_SIZE, (size_t)remaining) : remaining;
+        off_t offset     = (off_t)fr->file_offset;
+        sent             = send_chunk(conn->client_fd, fr->file_fd, &offset, chunk_size);
+        if (sent < 0) {
+            close(fr->file_fd);
+            fr->file_fd = -1;
+            handle_write_error(conn, "file transfer failed");
+            return;
+        }
+
+        if (sent == 0) {
+            return;  // Socket buffer full, wait for next write event
+        }
+        fr->file_offset += offset;
+
+        // Check if transfer is complete
+        if (fr->file_offset >= fr->file_size) {
+            complete_request(conn, queue_fd, state);
+        }
+    }
+}
+
+/**
+ * Handles buffer-based response writing using vectored I/O.
+ * @param queue_fd Event queue file descriptor.
+ * @param conn Connection handling the response.
+ * @param state Keep-alive state manager.
+ */
+INLINE void handle_buffer_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
+    response_t* res     = conn->response;
+    buffer_response* br = &res->state.buffer;
+
+    while (1) {
+        // Set up vectored I/O for remaining data
+        struct iovec iov[3] = {// Status line remaining
+                               {.iov_base = res->status_buf + res->retry.status_sent,
+                                .iov_len  = res->status_len - res->retry.status_sent},
+                               // Headers remaining
+                               {.iov_base = res->headers_buf + res->retry.headers_sent,
+                                .iov_len  = res->headers_len - res->retry.headers_sent},
+                               // Body remaining
+                               {.iov_base = (br->heap_allocated ? br->body.heap : br->body.stack) +
+                                            res->retry.body_sent,
+                                .iov_len = br->body_len - res->retry.body_sent}};
+
+        ssize_t sent = writev(conn->client_fd, iov, 3);
+        if (sent < 0) {
+            handle_write_error(conn, "buffer write failed");
+            return;
+        }
+
+        if (sent == 0) {
+            return;  // Socket buffer full, wait for next write event
+        }
+
+        // Update retry counters based on what was actually sent
+        update_retry_counters(res, (size_t)sent, iov[0].iov_len, iov[1].iov_len, iov[2].iov_len);
+
+        // Check if all data has been sent
+        bool complete = (res->retry.status_sent == res->status_len) &&
+                        (res->retry.headers_sent == res->headers_len) &&
+                        (res->retry.body_sent == br->body_len);
+
+        conn->last_activity = time(NULL);
+
+        if (complete) {
+            complete_request(conn, queue_fd, state);
+            return;
+        }
+
+        // Continue the loop to send remaining data
     }
 }
 
@@ -2040,7 +2138,7 @@ void* worker_thread(void* arg) {
     while (server_running) {
         // Check for Keep-Alive timeouts every 5 seconds.
         struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
         if (now.tv_sec - last_timeout_check >= 5) {
             CheckKeepAliveTimeouts(ka_state, worker_id, queue_fd);
             last_timeout_check = now.tv_sec;
@@ -2072,7 +2170,14 @@ void* worker_thread(void* arg) {
                 if (event_is_read(event)) {
                     handle_read(queue_fd, conn, ka_state);
                 } else if (event_is_write(event)) {
-                    handle_write(queue_fd, conn, ka_state);
+                    switch (conn->response->type) {
+                        case ResponseTypeBuffer:
+                            handle_buffer_write(queue_fd, conn, ka_state);
+                            break;
+                        case ResponseTypeFile:
+                            handle_file_write(queue_fd, conn, ka_state);
+                            break;
+                    }
                 } else if (event_is_error(event)) {
                     conn->closing = true;
                 }

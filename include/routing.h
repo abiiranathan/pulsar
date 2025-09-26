@@ -43,14 +43,16 @@ typedef HttpHandler Middleware;  // Middleware function is same as the handler.
 typedef struct route_t {
     const char* pattern;      // dynamically allocated route pattern
     size_t pattern_len;       // Length of the pattern
-    const char* dirname;      // Directory name (for static routes)
-    size_t dirname_len;       // Length of the dirname
     HttpHandler handler;      // Handler function pointer
     PathParams* path_params;  // Path parameters
     uint8_t flags;            // Bit mask for route type. NormalRoute | StaticRoute
     HttpMethod method;        // Http method.
+    const char* dirname;      // Directory name (for static routes)
+    size_t dirname_len;       // Length of the dirname
+
+    char __padding[8];  // Padding to push next field to seperate cache line
+    size_t mw_count;    // Number of middleware
     Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
-    size_t mw_count;                              // Number of middleware
 } route_t;
 
 // Helper to sort routes after registration such that

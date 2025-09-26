@@ -57,34 +57,50 @@ typedef enum {
 #define SET_RANGE_REQUEST(flags)    ((flags) |= HTTP_RANGE_REQUEST)
 #define SET_CHUNKED_TRANSFER(flags) ((flags) |= HTTP_CHUNKED_TRANSFER)
 
+// Standard buffer response.
+typedef struct buffer_response {
+    union {
+        uint8_t stack[STACK_BUFFER_SIZE];  // stack buffer for smaller responses
+        uint8_t* heap;     // Dynamically allocated body buffer. (not null-terminated)
+    } body;                // Response body.
+    size_t body_len;       // Actual length of body
+    size_t body_capacity;  // Capacity of body buffer.
+    int heap_allocated;    // If heap allocation is used.
+} buffer_response;
+
+typedef struct file_response {
+    uint32_t file_size;    // Size of file to send (if applicable)
+    uint32_t file_offset;  // Offset in file for sendfile
+    uint32_t max_range;    // Maximum range of requested bytes in range request.
+    int file_fd;           // File descriptor for file to send (if applicable)
+} file_response;
+
+// The type of response we are sending.
+typedef enum response_type : uint8_t {
+    ResponseTypeBuffer,
+    ResponseTypeFile,
+} ResponseType;
+
+typedef struct retry_state {
+    size_t body_sent;       // Bytes of body sent
+    uint16_t headers_sent;  // Bytes of headers sent
+    uint8_t status_sent;    // Bytes of status line sent
+} retry_state;
+
 // HTTP Response structure
 typedef struct response_t {
     http_status status_code;             // HTTP status code.
     char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
     char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.
-    bool heap_allocated;                 // If heap allocation is used.
+    uint16_t headers_len;                // Actual length of headers
+    retry_state retry;                   // EPOLL-retry state
+    uint8_t status_len;                  // Actual length of status line
+    uint8_t flags;                       // 4 bytes for all flags.
+    ResponseType type;                   // Type of response for state.
     union {
-        uint8_t stack[STACK_BUFFER_SIZE];  // stack buffer for smaller responses
-        uint8_t* heap;  // Dynamically allocated body buffer. (not null-terminated)
-    } body;             // Response body.
-
-    // Pre-computed lengths of status line, headers, body.
-    size_t body_len;       // Actual length of body
-    size_t body_capacity;  // Capacity of body buffer.
-    uint16_t headers_len;  // Actual length of headers
-    uint8_t status_len;    // Actual length of status line
-    uint8_t flags;         // 4 bytes for all flags.
-
-    // Event retry state.
-    uint8_t status_sent;    // Bytes of status line sent
-    uint16_t headers_sent;  // Bytes of headers sent
-    size_t body_sent;       // Bytes of body sent
-
-    // File response state.
-    uint32_t file_size;    // Size of file to send (if applicable)
-    uint32_t file_offset;  // Offset in file for sendfile
-    uint32_t max_range;    // Maximum range of requested bytes in range request.
-    int file_fd;           // File descriptor for file to send (if applicable)
+        buffer_response buffer;  // Normal stack/heap buffer resp
+        file_response file;      // File response
+    } state;                     // Buffer response or file response
 } response_t;
 
 // HTTP Request structure
@@ -101,12 +117,11 @@ typedef struct request_t {
 
 // Connection state structure
 typedef struct connection_t {
-    int client_fd;                    // Client socket file descriptor
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
-    Locals* locals;                   // Per-request context variables set by the user.
-    response_t* response;             // HTTP response data (arena allocated)
-    struct request_t* request;        // HTTP request data (arena allocated)
-    Arena* arena;                     // Memory arena for allocations
+    int client_fd;              // Client socket file descriptor
+    Locals* locals;             // Per-request context variables set by the user.
+    response_t* response;       // HTTP response data (arena allocated)
+    struct request_t* request;  // HTTP request data (arena allocated)
+    Arena* arena;               // Memory arena for allocations
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
 #endif
@@ -115,10 +130,11 @@ typedef struct connection_t {
     // Linked List nodes.
     struct connection_t* next;
     struct connection_t* prev;
-    bool closing;        // Server closing because of an error.
-    bool keep_alive;     // Keep-alive flag
-    bool abort;          // Abort handler/middleware processing
-    bool in_keep_alive;  // Flag for a tracked connection
+    bool closing;                     // Server closing because of an error.
+    bool keep_alive;                  // Keep-alive flag
+    bool abort;                       // Abort handler/middleware processing
+    bool in_keep_alive;               // Flag for a tracked connection
+    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
 } connection_t;
 
 #endif /* COMMON_H */

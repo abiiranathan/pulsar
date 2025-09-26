@@ -8,7 +8,7 @@ extern "C" {
 #include <stdint.h>
 #include <string.h>
 
-typedef enum : int8_t {
+typedef enum {
     HTTP_INVALID = -1,
     HTTP_GET,
     HTTP_POST,
@@ -20,11 +20,13 @@ typedef enum : int8_t {
 } HttpMethod;
 
 #define METHOD_VALID(method) ((method) > HTTP_INVALID && (method) <= HTTP_OPTIONS)
-#define SAFE_METHOD(method)  (((method) == HTTP_GET || (method) == HTTP_OPTIONS || (method) == HTTP_HEAD))
+#define SAFE_METHOD(method)                                                                        \
+    (((method) == HTTP_GET || (method) == HTTP_OPTIONS || (method) == HTTP_HEAD))
 
 static char* methods[] = {
-    [HTTP_GET] = "GET",       [HTTP_POST] = "POST", [HTTP_PUT] = "PUT",         [HTTP_PATCH] = "PATCH",
-    [HTTP_DELETE] = "DELETE", [HTTP_HEAD] = "HEAD", [HTTP_OPTIONS] = "OPTIONS",
+    [HTTP_GET] = "GET",         [HTTP_POST] = "POST",     [HTTP_PUT] = "PUT",
+    [HTTP_PATCH] = "PATCH",     [HTTP_DELETE] = "DELETE", [HTTP_HEAD] = "HEAD",
+    [HTTP_OPTIONS] = "OPTIONS",
 };
 
 static inline const char* http_method_to_string(const HttpMethod method) {
