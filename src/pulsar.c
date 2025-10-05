@@ -1460,10 +1460,8 @@ INLINE void post_request_logger(connection_t* conn) {
 #define RESOLVE(S)  FORMAT(S)
 #define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-__attribute_warn_unused_result__ INLINE http_status process_request(connection_t* conn,
-                                                                    size_t read_bytes,
-                                                                    KeepAliveState* state,
-                                                                    int queue_fd) {
+INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAliveState* state,
+                                   int queue_fd) {
     // replace with memmem for safety(but slower)
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
     if (!end_of_headers) {
@@ -1779,7 +1777,6 @@ INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state)
     http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
     if (status != StatusOK) {
         send_error_response(conn, status);
-        return;
     };
 
     // Switch to writing response.
