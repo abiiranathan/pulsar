@@ -43,9 +43,6 @@ typedef struct request_t request_t;
 // and does not include network IO for sending the data.
 typedef void (*PulsarCallback)(connection_t* conn, uint64_t total_ns);
 
-// Callback to create a new context object(Locals) that is passed per-request.
-typedef Locals* (*LocalsCreateCallback)();
-
 /**
  * @brief Starts the Pulsar HTTP server event loop
  *
@@ -79,8 +76,6 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
  * before writing data to the socket.
  */
 void pulsar_set_callback(PulsarCallback cb);
-
-void pulsar_set_locals_callback(LocalsCreateCallback callback);
 
 // Set a user-owned value pointer to the context with a callback function to free the value.
 // Returns true on success.
@@ -250,11 +245,11 @@ typedef struct {
 
 #define SSE_EVENT_INIT(data_, event_, id_)                                                         \
     (sse_event_t){.data      = (data_),                                                            \
-                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,                                \
+                  .data_len  = ((data_) != NULL) ? strlen((data_)) : 0,                            \
                   .event     = (event_),                                                           \
-                  .event_len = (event_ != NULL) ? strlen(event_) : 0,                              \
+                  .event_len = ((event_) != NULL) ? strlen((event_)) : 0,                          \
                   .id        = (id_),                                                              \
-                  .id_len    = (id_ != NULL) ? strlen(id_) : 0}
+                  .id_len    = ((id_) != NULL) ? strlen((id_)) : 0}
 
 // Start SSE event.
 void conn_start_sse(connection_t* conn);
@@ -420,6 +415,9 @@ void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
  * @return void* User data pointer or NULL
  */
 void* get_userdata(connection_t* conn);
+
+// Returns a handle to the current route inside the handler function.
+route_t* pulsar_current_route(connection_t* conn);
 
 #ifdef __cplusplus
 }

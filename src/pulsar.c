@@ -20,7 +20,7 @@ typedef struct KeepAliveState {
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
 INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state);
 
-INLINE int get_num_available_cores() {
+INLINE long get_num_available_cores() {
     return sysconf(_SC_NPROCESSORS_ONLN);
 }
 
@@ -71,7 +71,7 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, long worker_id, int epoll_fd) {
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
@@ -323,8 +323,8 @@ INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method
                     buf[value_len] = '\0';
 
                     // Parse string to ulong
-                    StoError code;
-                    if ((code = str_to_ulong(buf, &req->content_length)) != STO_SUCCESS) {
+                    StoError code = str_to_ulong(buf, &req->content_length);
+                    if (code != STO_SUCCESS) {
                         fprintf(stderr, "Invalid content length: %s\n", sto_error_string(code));
                         return false;
                     };
@@ -437,6 +437,12 @@ const char* req_body(connection_t* conn) {
     return conn->request->body;
 }
 
+// Returns a handle to the current route inside the handler function.
+route_t* pulsar_current_route(connection_t* conn) {
+    if (!conn) return NULL;
+    return conn->request->route;
+}
+
 const char* req_method(connection_t* conn) {
     return conn->request->method;
 }
@@ -470,9 +476,9 @@ size_t req_content_len(connection_t* conn) {
 
 // Fast integer to string conversion for 3-digit HTTP status codes
 static inline int format_status_code(char* restrict dest, int code) {
-    dest[0] = '0' + (code / 100);
-    dest[1] = '0' + ((code / 10) % 10);
-    dest[2] = '0' + (code % 10);
+    dest[0] = (char)('0' + (code / 100));
+    dest[1] = (char)('0' + ((code / 10) % 10));
+    dest[2] = (char)('0' + (code % 10));
     return 3;
 }
 
@@ -727,7 +733,7 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
     va_list args;
     char stack_buf[1024];
     char* heap_buf = NULL;
-    int len, result;
+    int len = 0, result = 0;
 
     va_start(args, fmt);
     len = vsnprintf(stack_buf, sizeof(stack_buf), fmt, args);
@@ -884,7 +890,7 @@ INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
                 iov[i].iov_len -= (size_t)remaining;
                 break;
             }
-            remaining -= iov[i].iov_len;
+            remaining -= (ssize_t)iov[i].iov_len;
         }
 
         // Move iov pointer and count forward
@@ -896,7 +902,7 @@ INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
 
 INLINE void write_server_headers(connection_t* conn) {
     char date_buf[64];
-    int written;
+    size_t written = 0;
     conn_writeheader_raw(conn, "Server: Pulsar/1.0\r\n", 20);
     written = strftime(date_buf, sizeof(date_buf), "Date: %a, %d %b %Y %H:%M:%S GMT\r\n",
                        gmtime(&conn->last_activity));
@@ -1082,10 +1088,10 @@ bool conn_is_open(connection_t* conn) {
 INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end,
                         bool* has_end_range) {
     if (strstr(range_header, "bytes=") != NULL) {
-        if (sscanf(range_header, "bytes=%ld-%ld", start, end) == 2) {
+        if (sscanf(range_header, "bytes=%ld-%ld", start, end) == 2) {  // NOLINT
             *has_end_range = true;
             return true;
-        } else if (sscanf(range_header, "bytes=%ld-", start) == 1) {
+        } else if (sscanf(range_header, "bytes=%ld-", start) == 1) {  // NOLINT
             *has_end_range = false;
             return true;
         }
@@ -1195,8 +1201,11 @@ bool conn_servefile(connection_t* conn, const char* filename) {
     }
 
     // If we have a "Range" request, modify offset and file size to serve correct range.
-    ssize_t start_offset = 0, end_offset = 0;
-    bool range_valid, has_end_range;
+    ssize_t start_offset = 0;
+    ssize_t end_offset   = 0;
+    bool range_valid     = false;
+    bool has_end_range   = false;
+
     if (parse_range(range_header, &start_offset, &end_offset, &has_end_range)) {
         range_valid = validate_range(has_end_range, &start_offset, &end_offset, stat_buf.st_size);
         if (!range_valid) {
@@ -1381,9 +1390,9 @@ INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
 #define EXECUTE_MIDDLEWARE(mw, count)                                                              \
     do {                                                                                           \
         size_t index = 0;                                                                          \
-        if (count > 0) {                                                                           \
-            while (index < count) {                                                                \
-                mw[index++](conn);                                                                 \
+        if ((count) > 0) {                                                                         \
+            while (index < (count)) {                                                              \
+                (mw)[index++](conn);                                                               \
                 if (conn->abort) {                                                                 \
                     return;                                                                        \
                 }                                                                                  \
@@ -1556,10 +1565,10 @@ static int create_server_socket(const char* host, int port) {
         exit(EXIT_FAILURE);
     }
 
-    int fd;
-    int opt               = 1;
-    struct addrinfo hints = {0};
-    struct addrinfo *result, *rp;
+    int fd                  = -1;
+    int opt                 = 1;
+    struct addrinfo hints   = {0};
+    struct addrinfo *result = NULL, *rp = NULL;
 
     hints.ai_family    = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
     hints.ai_socktype  = SOCK_STREAM;  // TCP
@@ -1612,10 +1621,9 @@ static int create_server_socket(const char* host, int port) {
     return fd;
 }
 
-INLINE int conn_accept(int worker_id) {
-    (void)worker_id;
+INLINE int conn_accept() {
 
-    int client_fd;
+    int client_fd = -1;
     struct sockaddr_in client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
 
@@ -1768,8 +1776,8 @@ INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state)
     conn->read_buf[bytes_read] = '\0';
 
     // Process the request and parse the headers / query params.
-    http_status status;
-    if ((status = process_request(conn, (size_t)bytes_read, state, queue_fd)) != StatusOK) {
+    http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
+    if (status != StatusOK) {
         send_error_response(conn, status);
         return;
     };
@@ -2060,19 +2068,19 @@ INLINE void handle_buffer_write(int queue_fd, connection_t* conn, KeepAliveState
  * ================================================================ */
 
 typedef struct {
+    long worker_id;
+    long designated_core;
     int queue_fd;
-    int worker_id;
-    int designated_core;
     KeepAliveState* keep_alive_state;
 } WorkerData;
 
-int pin_current_thread_to_core(int core_id) {
+int pin_current_thread_to_core(long core_id) {
     // Get and validate core count
     long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cores <= 0) num_cores = 1;
 
     if (core_id < 0 || core_id >= (int)num_cores) {
-        fprintf(stderr, "Invalid core_id %d (available: 0-%ld)\n", core_id, num_cores - 1);
+        fprintf(stderr, "Invalid core_id %ld (available: 0-%ld)\n", core_id, num_cores - 1);
         return -1;
     }
 
@@ -2114,8 +2122,8 @@ int pin_current_thread_to_core(int core_id) {
 void* worker_thread(void* arg) {
     WorkerData* worker       = (WorkerData*)arg;
     int queue_fd             = worker->queue_fd;
-    int worker_id            = worker->worker_id;
-    int cpu_core             = worker->designated_core;
+    long worker_id           = worker->worker_id;
+    long cpu_core            = worker->designated_core;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
     pin_current_thread_to_core(cpu_core);
@@ -2152,7 +2160,7 @@ void* worker_thread(void* arg) {
             const event_t* event = &events[i];
 
             if (event_get_fd(event) == server_fd) {
-                int client_fd = conn_accept(worker_id);
+                int client_fd = conn_accept();
                 if (client_fd > 0) {
                     add_connection_to_worker(queue_fd, client_fd);
                 }
@@ -2207,11 +2215,11 @@ int pulsar_run(const char* addr, int port) {
 #endif                                      /* PULSAR_H */
 
     // When creating worker threads
-    int num_cores      = get_num_available_cores();
+    long num_cores     = get_num_available_cores();
     int reserved_cores = 1;  // Leave one core free
 
     // Initialize worker data and create workers
-    for (size_t i = 0; i < NUM_WORKERS; i++) {
+    for (long i = 0; i < NUM_WORKERS; i++) {
         int queue_fd = event_queue_create();
         if (queue_fd == -1) {
             perror("event_queue_create");
@@ -2220,7 +2228,7 @@ int pulsar_run(const char* addr, int port) {
 
         worker_data[i].queue_fd         = queue_fd;
         worker_data[i].worker_id        = i;
-        worker_data[i].designated_core  = i % ((size_t)(num_cores - reserved_cores));
+        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
@@ -2234,7 +2242,7 @@ int pulsar_run(const char* addr, int port) {
     printf("Listening on http://%s:%d\n", addr ? addr : "0.0.0.0", port);
 
     // Wait for all worker threads to exit.
-    for (int i = 0; i < NUM_WORKERS; i++) {
+    for (size_t i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }
 

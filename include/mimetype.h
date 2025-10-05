@@ -267,8 +267,8 @@ static MimeEntry* hash_table[HASH_TABLE_SIZE] = {0};
 // String jdb2 hash function.
 static unsigned int hash_func(const char* str) {
     unsigned long hash = 5381;
-    int c;
-    while ((c = *str++))
+    int c              = 0;
+    while ((c = (int)*str++))
         hash = ((hash << 5) + hash) + (unsigned)c; /* hash * 33 + c */
     return hash & HASH_TABLE_MASK;                 // Fast alternative to modulo
 }

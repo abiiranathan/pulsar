@@ -28,7 +28,7 @@ __attribute__((always_inline)) static inline void* memmem_scalar(const void* hay
 
     /* Single character needle - use optimized memchr */
     if (needle_len == 1) {
-        return memchr(haystack, n[0], haystack_len);
+        return (void*)memchr(haystack, n[0], haystack_len);
     }
 
     /* Two character needle */

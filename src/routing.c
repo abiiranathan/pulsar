@@ -168,8 +168,8 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
     r->dirname_len = 0;
     r->path_params = NULL;
 
-    bool pattern_valid;
-    size_t nparams = count_path_params(pattern, &pattern_valid);
+    bool pattern_valid = false;
+    size_t nparams     = count_path_params(pattern, &pattern_valid);
     ASSERT(pattern_valid && "Invalid path parameters in pattern");
 
     // Only allocate path params if they exist in the pattern.

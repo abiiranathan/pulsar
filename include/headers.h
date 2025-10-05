@@ -25,7 +25,7 @@ typedef struct {
 
 // Initialize headers
 INLINE headers_t* headers_new(Arena* arena) {
-    headers_t* headers = arena_alloc(arena, sizeof(headers_t));
+    headers_t* headers = (headers_t*)arena_alloc(arena, sizeof(headers_t));
     if (unlikely(!headers)) return NULL;
     headers->arena = arena;
     headers->count = 0;

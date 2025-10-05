@@ -137,4 +137,11 @@ typedef struct connection_t {
     char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
 } connection_t;
 
+typedef struct {
+    connection_t* conn;       // The connection being handled
+    struct route_t* route;    // Current route (NULL if no route matched)
+    size_t middleware_index;  // Current middleware index (0-based)
+    void* user_data;          // Optional user data (for future use)
+} pulsar_ctx;
+
 #endif /* COMMON_H */

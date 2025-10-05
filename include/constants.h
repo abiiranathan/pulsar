@@ -9,7 +9,7 @@
 
 // Per-connection arena memory.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY 8 * 1024
+#define ARENA_CAPACITY 8 * 1024UL
 #endif
 
 // Enable logging callback.
@@ -25,7 +25,7 @@
 
 // Number of workers. Should be ideally == ncpus.
 #ifndef NUM_WORKERS
-#define NUM_WORKERS 8
+#define NUM_WORKERS 8U
 #endif
 
 // maximum path length
@@ -35,23 +35,23 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 1024
+#define MAX_EVENTS 1024UL
 #endif
 
 // Buffer size for incoming request excluding body.
 #ifndef READ_BUFFER_SIZE
-#define READ_BUFFER_SIZE 1024
+#define READ_BUFFER_SIZE 1024UL
 #endif
 
 // Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
 #ifndef WRITE_BUFFER_SIZE
-#define WRITE_BUFFER_SIZE 4096
+#define WRITE_BUFFER_SIZE 4096UL
 #endif
 
 // Default buffer size for response body above which allocation happens, allocating
 // WRITE_BUFFER_SIZE.
 #ifndef STACK_BUFFER_SIZE
-#define STACK_BUFFER_SIZE 1024
+#define STACK_BUFFER_SIZE 1024UL
 #endif
 
 // Keep-Alive connection timeout in seconds.
@@ -62,7 +62,7 @@
 // Max Request body allowed. Default 10 MB
 // You need to increase this to allow large file uploads.
 #ifndef MAX_BODY_SIZE
-#define MAX_BODY_SIZE (10 << 20)
+#define MAX_BODY_SIZE (size_t)(10 << 20)
 #endif
 
 /**
@@ -70,17 +70,17 @@
  * @brief Maximum allowed file size (25KB default) in multipart forms.
  */
 #ifndef MAX_FILE_SIZE
-#define MAX_FILE_SIZE (25 * 1024)
+#define MAX_FILE_SIZE 25UL * 1024
 #endif
 
 // Maximum number of routes to support.
 #ifndef MAX_ROUTES
-#define MAX_ROUTES 128
+#define MAX_ROUTES 128U
 #endif
 
 // Maximum number of global middleware
 #ifndef MAX_GLOBAL_MIDDLEWARE
-#define MAX_GLOBAL_MIDDLEWARE 16
+#define MAX_GLOBAL_MIDDLEWARE 16U
 #endif
 
 // Maximum number of route middleware
@@ -115,7 +115,7 @@ static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
 static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
 static_assert(LOCALS_KEY_CAPACITY >= 4);
 
-static_assert(ARENA_CAPACITY > 4 * 1024, "ARENA_CAPACITY must be > 4KB");
+static_assert(ARENA_CAPACITY > (unsigned long)(4 * 1024), "ARENA_CAPACITY must be > 4KB");
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
 static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");

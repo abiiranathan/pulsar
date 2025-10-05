@@ -1,6 +1,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <pthread.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,21 +35,52 @@ INLINE bool is_malicious_path(const char* path) {
     return false;
 }
 
-// Precomputed lookup table for hex digit conversion
-static const uint8_t hex_decode_table[256] = {
-    ['0'] = 0,  ['1'] = 1,  ['2'] = 2,  ['3'] = 3,  ['4'] = 4,  ['5'] = 5,  ['6'] = 6,  ['7'] = 7,
-    ['8'] = 8,  ['9'] = 9,  ['A'] = 10, ['B'] = 11, ['C'] = 12, ['D'] = 13, ['E'] = 14, ['F'] = 15,
-    ['a'] = 10, ['b'] = 11, ['c'] = 12, ['d'] = 13, ['e'] = 14, ['f'] = 15,
-};
+// Lookup tables for hex digit conversion
+static uint8_t hex_decode_table[256];
+static uint8_t hex_valid_table[256];
 
-// Validity table - 1 for valid hex digits, 0 for invalid
-static const uint8_t hex_valid_table[256] = {
-    ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1, ['5'] = 1, ['6'] = 1, ['7'] = 1,
-    ['8'] = 1, ['9'] = 1, ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1, ['E'] = 1, ['F'] = 1,
-    ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
-};
+/** Initializes hex lookup tables.
+ */
+INLINE void init_hex_tables_impl(void) {
+    memset(hex_decode_table, 0, sizeof(hex_decode_table));
+    memset(hex_valid_table, 0, sizeof(hex_valid_table));
+
+    // Initialize decode table for '0'-'9'
+    for (int i = '0'; i <= '9'; i++) {
+        hex_decode_table[i] = i - '0';
+    }
+    // Initialize decode table for 'A'-'F'
+    for (int i = 'A'; i <= 'F'; i++) {
+        hex_decode_table[i] = i - 'A' + 10;
+    }
+    // Initialize decode table for 'a'-'f'
+    for (int i = 'a'; i <= 'f'; i++) {
+        hex_decode_table[i] = i - 'a' + 10;
+    }
+
+    // Initialize validity table for '0'-'9'
+    for (int i = '0'; i <= '9'; i++) {
+        hex_valid_table[i] = 1;
+    }
+    // Initialize validity table for 'A'-'F'
+    for (int i = 'A'; i <= 'F'; i++) {
+        hex_valid_table[i] = 1;
+    }
+    // Initialize validity table for 'a'-'f'
+    for (int i = 'a'; i <= 'f'; i++) {
+        hex_valid_table[i] = 1;
+    }
+}
+
+static pthread_once_t hex_tables_once = PTHREAD_ONCE_INIT;
+
+INLINE void init_hex_tables(void) {
+    pthread_once(&hex_tables_once, init_hex_tables_impl);
+}
 
 INLINE void url_percent_decode(const char* src, char* dst, size_t src_len, size_t dst_size) {
+    init_hex_tables();
+
     const char* dst_end = dst + dst_size - 1;  // reserve space for '\0';
     const char* src_end = src + src_len;       // avoids NULL termination assumption
 
@@ -85,7 +117,7 @@ INLINE void url_percent_decode(const char* src, char* dst, size_t src_len, size_
                 unsigned char h1 = (unsigned char)src[1];
                 unsigned char h2 = (unsigned char)src[2];
                 if (hex_valid_table[h1] & hex_valid_table[h2]) {
-                    *dst++ = (hex_decode_table[h1] << 4) | hex_decode_table[h2];
+                    *dst++ = (char)((hex_decode_table[h1] << 4) | hex_decode_table[h2]);
                     src += 3;
                 } else {
                     *dst++ = *src++;
