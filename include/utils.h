@@ -36,12 +36,12 @@ INLINE bool is_malicious_path(const char* path) {
 }
 
 // Lookup tables for hex digit conversion
-static uint8_t hex_decode_table[256];
-static uint8_t hex_valid_table[256];
+static uint8_t hex_decode_table[256] = {};
+static uint8_t hex_valid_table[256]  = {};
 
 /** Initializes hex lookup tables.
  */
-INLINE void init_hex_tables_impl(void) {
+__attribute__((constructor())) INLINE void init_hex_tables(void) {
     memset(hex_decode_table, 0, sizeof(hex_decode_table));
     memset(hex_valid_table, 0, sizeof(hex_valid_table));
 
@@ -72,15 +72,7 @@ INLINE void init_hex_tables_impl(void) {
     }
 }
 
-static pthread_once_t hex_tables_once = PTHREAD_ONCE_INIT;
-
-INLINE void init_hex_tables(void) {
-    pthread_once(&hex_tables_once, init_hex_tables_impl);
-}
-
 INLINE void url_percent_decode(const char* src, char* dst, size_t src_len, size_t dst_size) {
-    init_hex_tables();
-
     const char* dst_end = dst + dst_size - 1;  // reserve space for '\0';
     const char* src_end = src + src_len;       // avoids NULL termination assumption
 

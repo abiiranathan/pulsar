@@ -417,7 +417,7 @@ void set_userdata(connection_t* conn, void* ptr, void (*free_func)(void* ptr));
 void* get_userdata(connection_t* conn);
 
 // Returns a handle to the current route inside the handler function.
-route_t* pulsar_current_route(connection_t* conn);
+const route_t* pulsar_current_route(connection_t* conn);
 
 #ifdef __cplusplus
 }

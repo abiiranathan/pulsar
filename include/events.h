@@ -46,8 +46,12 @@ INLINE int event_queue_create() {
 INLINE int event_add_read(int queue_fd, int fd, void* data) {
 #if USE_EPOLL
     struct epoll_event event;
-    event.events   = EPOLLIN | EPOLLET | EPOLLRDHUP;
-    event.data.ptr = data;
+    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    if (data != NULL) {
+        event.data.ptr = data;
+    } else {
+        event.data.fd = fd;  // Store fd when no user data
+    }
     return epoll_ctl(queue_fd, EPOLL_CTL_ADD, fd, &event);
 #elif USE_KQUEUE
     struct kevent event;

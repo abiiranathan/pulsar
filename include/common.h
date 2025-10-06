@@ -88,7 +88,7 @@ typedef struct retry_state {
 } retry_state;
 
 // HTTP Response structure
-typedef struct response_t {
+typedef struct __attribute__((aligned(64))) response_t {
     http_status status_code;             // HTTP status code.
     char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
     char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.
@@ -104,19 +104,19 @@ typedef struct response_t {
 } response_t;
 
 // HTTP Request structure
-typedef struct request_t {
-    char* path;               // Request path (arena allocated)
-    char method[8];           // HTTP method (GET, POST etc.)
-    HttpMethod method_type;   // MethodType Enum
-    char* body;               // Request body (dynamically allocated)
-    size_t content_length;    // Content-Length header value
-    headers_t* headers;       // Request headers
-    headers_t* query_params;  // Query parameters
-    struct route_t* route;    // Matched route (has static lifetime)
+typedef struct __attribute__((aligned(64))) request_t {
+    char* path;                   // Request path (arena allocated)
+    char method[8];               // HTTP method (GET, POST etc.)
+    HttpMethod method_type;       // MethodType Enum
+    char* body;                   // Request body (dynamically allocated)
+    size_t content_length;        // Content-Length header value
+    headers_t* headers;           // Request headers
+    headers_t* query_params;      // Query parameters
+    const struct route_t* route;  // Matched route (has static lifetime)
 } request_t;
 
 // Connection state structure
-typedef struct connection_t {
+typedef struct __attribute__((aligned(64))) connection_t {
     int client_fd;              // Client socket file descriptor
     Locals* locals;             // Per-request context variables set by the user.
     response_t* response;       // HTTP response data (arena allocated)

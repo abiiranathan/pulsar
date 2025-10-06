@@ -9,7 +9,7 @@
 
 // Per-connection arena memory.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY 8 * 1024UL
+#define ARENA_CAPACITY 4 * 1024UL
 #endif
 
 // Enable logging callback.
@@ -35,7 +35,7 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 1024UL
+#define MAX_EVENTS 2048UL
 #endif
 
 // Buffer size for incoming request excluding body.
@@ -115,7 +115,7 @@ static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
 static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
 static_assert(LOCALS_KEY_CAPACITY >= 4);
 
-static_assert(ARENA_CAPACITY > (unsigned long)(4 * 1024), "ARENA_CAPACITY must be > 4KB");
+static_assert(ARENA_CAPACITY >= (unsigned long)(4 * 1024), "ARENA_CAPACITY must be > 4KB");
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
 static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");

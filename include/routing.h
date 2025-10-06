@@ -45,14 +45,13 @@ typedef struct route_t {
     size_t pattern_len;       // Length of the pattern
     HttpHandler handler;      // Handler function pointer
     PathParams* path_params;  // Path parameters
-    uint8_t flags;            // Bit mask for route type. NormalRoute | StaticRoute
     HttpMethod method;        // Http method.
-    const char* dirname;      // Directory name (for static routes)
-    size_t dirname_len;       // Length of the dirname
-
-    char __padding[8];  // Padding to push next field to seperate cache line
-    size_t mw_count;    // Number of middleware
+    uint8_t has_params;       // If we have path parameters
+    uint8_t flags;            // Bit mask for route type. NormalRoute | StaticRoute
+    uint8_t mw_count;         // Number of middleware
+    uint8_t dirname_len;      // Length of the dirname
     Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
+    const char* dirname;                          // Directory name (for static routes)
 } route_t;
 
 // Helper to sort routes after registration such that
@@ -71,7 +70,7 @@ route_t* route_static(const char* pattern, const char* dir);
 // Entry Point to router.
 // Matches request path and method to a registered route and parses and populates the path
 // parameters. The path params have the lifetime of the arena where they are allocated.
-route_t* route_match(const char* path, HttpMethod method);
+const route_t* route_match(const char* path, HttpMethod method);
 
 #ifdef __cplusplus
 }

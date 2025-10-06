@@ -158,19 +158,19 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
 
-    route_t* r     = &global_routes[global_route_count];
-    r->pattern     = pattern;
-    r->pattern_len = strlen(pattern);
-    r->method      = method;
-    r->handler     = handler;
-    r->flags       = NORMAL_ROUTE_FLAG;
-    r->dirname     = NULL;
-    r->dirname_len = 0;
-    r->path_params = NULL;
-
+    route_t* r         = &global_routes[global_route_count];
+    r->pattern         = pattern;
+    r->pattern_len     = strlen(pattern);
+    r->method          = method;
+    r->handler         = handler;
+    r->flags           = NORMAL_ROUTE_FLAG;
+    r->dirname         = NULL;
+    r->dirname_len     = 0;
+    r->path_params     = NULL;
     bool pattern_valid = false;
     size_t nparams     = count_path_params(pattern, &pattern_valid);
     ASSERT(pattern_valid && "Invalid path parameters in pattern");
+    r->has_params = nparams > 0 ? 1 : 0;
 
     // Only allocate path params if they exist in the pattern.
     if (nparams > 0) {
@@ -194,10 +194,14 @@ route_t* route_static(const char* pattern, const char* dirname) {
     ASSERT(pattern && dirname && "pattern and dirname must be non-NULL");
     ASSERT(is_dir(dirname) && "dir must be an existing directory");
 
-    route_t* r     = route_register(pattern, HTTP_GET, static_file_handler);
-    r->flags       = STATIC_ROUTE_FLAG;
-    r->dirname     = dirname;
-    r->dirname_len = strlen(dirname);
+    route_t* r    = route_register(pattern, HTTP_GET, static_file_handler);
+    r->flags      = STATIC_ROUTE_FLAG;
+    r->dirname    = dirname;
+    size_t length = strlen(dirname);
+
+    // Make sure length fits inside uint8_t.
+    ASSERT(length <= UINT8_MAX && "dirname should be <= 255 characters");
+    r->dirname_len = length;
     return r;
 }
 
@@ -250,54 +254,85 @@ void sort_routes(void) {
     }
 }
 
-INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_length) {
-    // Normal (non-static routes)
-    if (__builtin_expect(route->flags & NORMAL_ROUTE_FLAG, 1)) {
-
-        // Exact match normal route
-        if (route->path_params == NULL) {
-            return (route->pattern_len == url_length) &&
-                   (memcmp(route->pattern, url, url_length) == 0);
-        }
-        // Parameterized routes
-        return match_path_parameters(route->pattern, url, route->path_params);
-    }
-
-    // Static route (less common)
+// single fast path.
+INLINE bool route_matches_fast(const route_t* route, const char* url, size_t url_len) {
+    // Static route: prefix match only
     if (route->flags & STATIC_ROUTE_FLAG) {
-        return (route->pattern_len <= url_length) &&
+        return (route->pattern_len <= url_len) &&
                (memcmp(route->pattern, url, route->pattern_len) == 0);
     }
 
-    // Invalid route (neither normal nor static)
-    return false;
+    // Exact match route: memcmp with trailing slash tolerance
+    if (!route->has_params) {
+        // Try exact match first (most common case)
+        if (route->pattern_len == url_len && memcmp(route->pattern, url, url_len) == 0) {
+            return true;
+        }
+
+        // Handle trailing slash cases: /api/json vs /api/json/
+        const char* pat     = route->pattern;
+        const char* url_ptr = url;
+
+        // Skip past common prefix
+        size_t min_len = (route->pattern_len < url_len) ? route->pattern_len : url_len;
+        if (memcmp(pat, url_ptr, min_len) != 0) {
+            return false;
+        }
+
+        // Skip trailing slashes in both
+        pat += min_len;
+        url_ptr += min_len;
+        while (*pat == '/')
+            pat++;
+        while (*url_ptr == '/')
+            url_ptr++;
+
+        return (*pat == '\0' && *url_ptr == '\0');
+    }
+
+    // Exact match route
+    if (!route->has_params) {
+        return memcmp(route->pattern, url, url_len) == 0;
+    }
+
+    // Parameterized route.
+    return match_path_parameters(route->pattern, url, route->path_params);
 }
 
-route_t* route_match(const char* path, HttpMethod method) {
-    // Get method range using pre-computed lookup table
-    size_t start_idx  = method_start_idx[method];
-    size_t end_idx    = method_end_idx[method];
-    size_t url_length = strlen(path);
+const route_t* route_match(const char* path, HttpMethod method) {
+    size_t start   = method_start_idx[method];
+    size_t end     = method_end_idx[method];
+    size_t url_len = strlen(path);
 
-    // Linear search within method range.
-    for (size_t i = start_idx; i < end_idx; i++) {
-        route_t* current = &global_routes[i];
-        if (route_matches_fast(current, path, url_length)) {
-            return current;
+    // Primary search within method range
+    for (size_t i = start; i < end; i++) {
+        const route_t* r = &global_routes[i];
+        if (route_matches_fast(r, path, url_len)) {
+            return r;
         }
     }
 
-    // Handle special method fallbacks
+    // Fallback for HEAD -> GET
     if (method == HTTP_HEAD) {
-        return route_match(path, HTTP_GET);
-    } else if (method == HTTP_OPTIONS) {
-        // OPTIONS matches if ANY route exists for this path
-        for (size_t i = 0; i < global_route_count; i++) {
-            if (route_matches_fast(&global_routes[i], path, url_length)) {
-                return &global_routes[i];
+        start = method_start_idx[HTTP_GET];
+        end   = method_end_idx[HTTP_GET];
+        for (size_t i = start; i < end; i++) {
+            const route_t* r = &global_routes[i];
+            if (route_matches_fast(r, path, url_len)) {
+                return r;
             }
         }
     }
+    // OPTIONS: match any method (less common, acceptable to be slower)
+    else if (method == HTTP_OPTIONS) {
+        for (size_t i = 0; i < global_route_count; i++) {
+            const route_t* r = &global_routes[i];
+            if (route_matches_fast(r, path, url_len)) {
+                return r;
+            }
+        }
+    }
+
     return NULL;
 }
 

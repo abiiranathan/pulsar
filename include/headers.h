@@ -24,13 +24,9 @@ typedef struct {
 } headers_t;
 
 // Initialize headers
-INLINE headers_t* headers_new(Arena* arena) {
-    headers_t* headers = (headers_t*)arena_alloc(arena, sizeof(headers_t));
-    if (unlikely(!headers)) return NULL;
-    headers->arena = arena;
+INLINE void headers_init(Arena* arena, headers_t* headers) {
     headers->count = 0;
-    // headers->entries not zeroed as an optimization.
-    return headers;
+    headers->arena = arena;
 }
 
 // Set a header (case-insensitive)

@@ -1,5 +1,6 @@
 #include "../include/pulsar.h"
 #include <solidc/macros.h>
+#include <sys/timerfd.h>
 #include "../include/events.h"
 
 #define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
@@ -14,11 +15,11 @@ typedef struct KeepAliveState {
     connection_t* head;
     connection_t* tail;
     size_t count;
-} KeepAliveState;
+} KeepAlive;
 
 // Forward declarations.
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
-INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state);
+INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_state);
 
 INLINE long get_num_available_cores() {
     return sysconf(_SC_NPROCESSORS_ONLN);
@@ -28,7 +29,7 @@ INLINE bool conn_timedout(time_t now, time_t last_activity) {
     return (now - last_activity) > CONNECTION_TIMEOUT;
 }
 
-INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAlive* state) {
     if (!conn->in_keep_alive) {
         return;
     }
@@ -53,7 +54,7 @@ INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state)
     conn->in_keep_alive = false;
 }
 
-INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+INLINE void AddKeepAliveConnection(connection_t* conn, KeepAlive* state) {
     if (conn->in_keep_alive) return;
 
     // Add to front
@@ -71,23 +72,16 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, long worker_id, int epoll_fd) {
+INLINE void CheckKeepAliveTimeouts(KeepAlive* state, int epoll_fd) {
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
         connection_t* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
-            // printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
-            UNUSED(worker_id);
             close_connection(epoll_fd, current, state);
         }
         current = next;
     }
-
-#if defined(__linux__)
-    // Release memory to OS
-    malloc_trim(0);
-#endif
 }
 
 // Signal handler for graceful shutdown.
@@ -111,58 +105,45 @@ static void install_signal_handler(void) {
  * Connection Management Functions
  * ================================================================ */
 
-INLINE request_t* create_request(Arena* arena) {
-    // Allocate request structure.
-    request_t* req = arena_alloc(arena, sizeof(request_t));
-    if (!req) {
-        return NULL;
-    }
-
-    // Allocate request headers
-    req->headers = headers_new(arena);
-    if (!req->headers) {
-        return NULL;
+INLINE bool create_request_response(Arena* arena, request_t** req, response_t** resp) {
+    // Define all allocation sizes
+    static const size_t sizes[] = {
+        sizeof(request_t),   // request
+        sizeof(response_t),  // response
+        sizeof(headers_t),   // headers
+        MAX_PATH_LEN + 1     // path
     };
 
-    /* Allocate path */
-    req->path = arena_alloc(arena, MAX_PATH_LEN + 1);
-    if (!req->path) {
-        return NULL;
+    void* ptrs[4];
+
+    // Single batch allocation
+    if (!arena_alloc_batch(arena, sizes, 4, ptrs)) {
+        return false;
     }
 
-    req->method[0]      = '\0';          // Init method to empty string.
-    req->method_type    = HTTP_INVALID;  // Initial method is not valid
-    req->content_length = 0;             // No content length.
-    req->body           = NULL;          /* Init body to NULL */
-    req->query_params   = NULL;          // No query params initially
-    req->route          = NULL;          // No matching route.
-    return req;
-}
+    // Cast and assign pointers
+    *req               = ptrs[0];
+    *resp              = ptrs[1];
+    headers_t* headers = ptrs[2];
+    char* path         = ptrs[3];
 
-static inline void response_init(response_t* resp) {
-    if (!resp) return;
-    resp->status_code                 = 0;  // HTTP status code
-    resp->type                        = ResponseTypeBuffer;
-    resp->state.buffer.heap_allocated = false;
-    resp->state.buffer.heap_allocated = false;              // Start with stack allocation
-    resp->state.buffer.body_len       = 0;                  // No body content initially
-    resp->state.buffer.body_capacity  = WRITE_BUFFER_SIZE;  // Default to write buffer capacity
+    // Zero-initialize request/response structures.
+    memset(*req, 0, sizeof(request_t));
 
-    // Length tracking
-    resp->headers_len = 0;
-    resp->status_len  = 0;
-    resp->flags       = 0;
+    // Set and init request headers
+    (*req)->headers = headers;
+    headers_init(arena, headers);
 
-    // Epoll retry state
-    resp->retry.status_sent  = 0;
-    resp->retry.headers_sent = 0;
-    resp->retry.body_sent    = 0;
-}
+    // Assign path
+    (*req)->path        = path;
+    (*req)->method_type = HTTP_INVALID;
 
-INLINE response_t* create_response(Arena* arena) {
-    response_t* resp = arena_alloc(arena, sizeof(response_t));
-    if (resp) response_init(resp);
-    return resp;
+    // Initialize response state.
+    memset(*resp, 0, sizeof(response_t));
+    (*resp)->type         = ResponseTypeBuffer;
+    (*resp)->state.buffer = (BufferResponse){.body_capacity = WRITE_BUFFER_SIZE};
+
+    return true;
 }
 
 // Free request body. (Request structure is arena-allocated.)
@@ -196,16 +177,18 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->in_keep_alive = false;
     conn->abort         = false;
     conn->arena         = arena;
-    conn->last_activity = time(NULL);
-    conn->response      = create_response(arena);
-    conn->read_buf[0]   = '\0';
-    conn->request       = create_request(arena);
-    conn->locals        = malloc(sizeof(Locals));
+
+    clock_gettime(CLOCK_MONOTONIC, &conn->start);
+    conn->last_activity = conn->start.tv_sec;
+
+    // Initialize request and response.
+    if (!create_request_response(arena, &conn->request, &conn->response)) {
+        return false;
+    }
+
+    conn->locals = malloc(sizeof(Locals));
     if (conn->locals) LocalsInit(conn->locals);
 
-#if ENABLE_LOGGING
-    clock_gettime(CLOCK_MONOTONIC, &conn->start);
-#endif
     conn->next = NULL;
     conn->prev = NULL;
     return (conn->request && conn->response && conn->locals);
@@ -216,6 +199,9 @@ INLINE bool reset_connection(connection_t* conn) {
     conn->keep_alive = true;    // Default to Keep-Alive
     conn->abort      = false;   // Connection not aborted
     free(conn->request->body);  // Free request body.
+
+    clock_gettime(CLOCK_MONOTONIC, &conn->start);
+    conn->last_activity = conn->start.tv_sec;
 
     // Reset response buffer before resetting arena.
     switch (conn->response->type) {
@@ -229,20 +215,21 @@ INLINE bool reset_connection(connection_t* conn) {
 
     // Reset locals
     if (conn->locals) LocalsReset(conn->locals);
+
+    // Reset arena before allocating new objects.
     arena_reset(conn->arena);
 
-#if ENABLE_LOGGING
-    clock_gettime(CLOCK_MONOTONIC, &conn->start);
-#endif
-    conn->request     = create_request(conn->arena);
-    conn->response    = create_response(conn->arena);
-    conn->read_buf[0] = '\0';
+    // Create and initialize the request/response objects.
+    if (!create_request_response(conn->arena, &conn->request, &conn->response)) {
+        return false;
+    }
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
         conn->next = NULL;
         conn->prev = NULL;
     }
+
     return (conn->request && conn->response);
 }
 
@@ -250,7 +237,7 @@ INLINE bool reset_connection(connection_t* conn) {
  * Updated Connection Management Functions
  * ================================================================ */
 
-INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state) {
+INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_state) {
     if (!conn || conn->client_fd == -1) return;
 
     event_delete(queue_fd, conn->client_fd);
@@ -365,8 +352,12 @@ INLINE bool parse_query_params(connection_t* conn) {
     *query = '\0';
     query++;
 
-    conn->request->query_params = headers_new(conn->arena);
+    // Allocate the query params.
+    conn->request->query_params = arena_alloc(conn->arena, sizeof(headers_t));
     if (!conn->request->query_params) return false;
+
+    // Initialize the query params.
+    headers_init(conn->arena, conn->request->query_params);
 
     char* save_ptr1 = NULL;
     char* save_ptr2 = NULL;
@@ -438,7 +429,7 @@ const char* req_body(connection_t* conn) {
 }
 
 // Returns a handle to the current route inside the handler function.
-route_t* pulsar_current_route(connection_t* conn) {
+const route_t* pulsar_current_route(connection_t* conn) {
     if (!conn) return NULL;
     return conn->request->route;
 }
@@ -639,6 +630,11 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
 }
 
 int conn_write(connection_t* conn, const void* data, size_t len) {
+    // No need to write any data for OPTIONS route.
+    if (conn->request->method_type == HTTP_OPTIONS) {
+        return 0;
+    }
+
     response_t* res = conn->response;
     assert(res->type == ResponseTypeBuffer && "Must be in buffer response mode");
     BufferResponse* b = &res->state.buffer;
@@ -1253,6 +1249,8 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 
         snprintf(contentLen, sizeof(contentLen), "%zu", contentLength);
         conn_writeheader(conn, "Content-Length", contentLen);
+    } else if (method == HTTP_OPTIONS) {
+        conn_writeheader_raw(conn, "Content-Length: 0\r\n", 19);
     }
 
 #if WRITE_SERVER_HEADERS
@@ -1268,11 +1266,11 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 }
 
 void static_file_handler(connection_t* conn) {
-    route_t* route      = conn->request->route;
-    const char* path    = conn->request->path;
-    const char* dirname = route->dirname;
-    size_t dirlen       = route->dirname_len;
-    size_t pattern_len  = route->pattern_len;
+    const route_t* route = conn->request->route;
+    const char* path     = conn->request->path;
+    const char* dirname  = route->dirname;
+    size_t dirlen        = route->dirname_len;
+    size_t pattern_len   = route->pattern_len;
 
     // Early validation - single exit point for malicious paths
     bool is_malicious = is_malicious_path(path);
@@ -1374,7 +1372,7 @@ void static_file_handler(connection_t* conn) {
 
 const char* get_path_param(connection_t* conn, const char* name) {
     if (!name) return NULL;
-    route_t* route = conn->request->route;
+    const route_t* route = conn->request->route;
     if (!route) return NULL;
 
     PathParams* path_params = route->path_params;
@@ -1386,7 +1384,7 @@ const char* get_path_param(connection_t* conn, const char* name) {
     return NULL;
 }
 
-INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
+INLINE void execute_all_middleware(connection_t* conn, const route_t* route) {
 #define EXECUTE_MIDDLEWARE(mw, count)                                                              \
     do {                                                                                           \
         size_t index = 0;                                                                          \
@@ -1460,7 +1458,7 @@ INLINE void post_request_logger(connection_t* conn) {
 #define RESOLVE(S)  FORMAT(S)
 #define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAliveState* state,
+INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAlive* state,
                                    int queue_fd) {
     // replace with memmem for safety(but slower)
     char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
@@ -1500,7 +1498,7 @@ INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAl
         return StatusInternalServerError;
     };
 
-    route_t* route = route_match(conn->request->path, conn->request->method_type);
+    const route_t* route = route_match(conn->request->path, conn->request->method_type);
     if (route) {
         conn->request->route = route;
         if (!parse_request_body(conn, headers_len, read_bytes)) {
@@ -1620,16 +1618,15 @@ static int create_server_socket(const char* host, int port) {
 }
 
 INLINE int conn_accept() {
-
-    int client_fd = -1;
     struct sockaddr_in client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
 
-    // Accept with fast path (Linux 4.3+)
 #ifdef __linux__
-    client_fd = accept4(server_fd, (struct sockaddr*)&client_addr, &client_addr_len, SOCK_NONBLOCK);
+    // Accept with SOCK_NONBLOCK and SOCK_CLOEXEC in one syscall
+    int client_fd = accept4(server_fd, (struct sockaddr*)&client_addr, &client_addr_len,
+                            SOCK_NONBLOCK | SOCK_CLOEXEC);
 #else
-    client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+    int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
 #endif
 
     if (client_fd < 0) {
@@ -1641,88 +1638,26 @@ INLINE int conn_accept() {
 
 #ifndef __linux__
     set_nonblocking(client_fd);
+    fcntl(client_fd, F_SETFD, FD_CLOEXEC);
 #endif
 
-    // Set socket timeouts - CRITICAL for preventing hanging connections
-    struct timeval read_timeout  = {.tv_sec  = 30,  // 30 second read timeout
-                                    .tv_usec = 0};
-    struct timeval write_timeout = {.tv_sec  = 30,  // 30 second write timeout
-                                    .tv_usec = 0};
-
-    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof(read_timeout)) < 0) {
-        perror("setsockopt SO_RCVTIMEO");
-    }
-
-    if (setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &write_timeout, sizeof(write_timeout)) < 0) {
-        perror("setsockopt SO_SNDTIMEO");
-    }
-
-    // Set high-performance options
+    // Batch socket options to reduce syscalls
+    // TCP_NODELAY is the most critical - disables Nagle's algorithm
     int yes = 1;
-    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) < 0) {
-        perror("setsockopt TCP_NODELAY");
-    }
-
-    // Set TCP keepalive to detect dead connections
-    if (setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) < 0) {
-        perror("setsockopt SO_KEEPALIVE");
-    }
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
 
 #ifdef __linux__
-    // Configure keepalive parameters
-    int keepalive_idle     = 120;  // Start probes after 2 minutes of inactivity
-    int keepalive_interval = 15;   // Send probe every 15 seconds
-    int keepalive_count    = 3;    // Close after 3 failed probes
+    // SO_KEEPALIVE with sensible defaults is sufficient
+    // The kernel's TCP keepalive will detect dead connections
+    setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
 
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_idle, sizeof(keepalive_idle));
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_interval,
-               sizeof(keepalive_interval));
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepalive_count, sizeof(keepalive_count));
-
-    // Additional Linux-specific optimizations
-    // Enable TCP Fast Open (if configured)
-    setsockopt(client_fd, SOL_TCP, TCP_FASTOPEN, &yes, sizeof(yes));
-
-    // Enable TCP Quick ACK
+    // TCP_QUICKACK helps reduce latency for request-response patterns
     setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
-
-    // Set user timeout (total time for unacknowledged data)
-    unsigned int user_timeout = 60000;  // 60 seconds in milliseconds
-    setsockopt(client_fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(user_timeout));
-
-    // Set maximum segment size
-    int mss = 1460;  // Standard Ethernet MTU - headers
-    setsockopt(client_fd, IPPROTO_TCP, TCP_MAXSEG, &mss, sizeof(mss));
-
-    // Optimize buffer sizes for high throughput
-    int rcv_bufsize = 256 * 1024;  // 256KB receive buffer (reduced from 1MB)
-    int snd_bufsize = 256 * 1024;  // 256KB send buffer (reduced from 1MB)
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcv_bufsize, sizeof(rcv_bufsize));
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &snd_bufsize, sizeof(snd_bufsize));
 #endif
 
-// BSD/Darwin optimizations
 #if defined(__APPLE__) || defined(__FreeBSD__)
-    // Disable SIGPIPE generation
+    // Prevent SIGPIPE on write to closed socket
     setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
-
-    // Enable TCP_NOPUSH (similar to TCP_CORK)
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NOPUSH, &yes, sizeof(yes));
-
-    // BSD keepalive settings
-#ifdef TCP_KEEPIDLE
-    int keepalive_idle = 120;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_idle, sizeof(keepalive_idle));
-#endif
-#ifdef TCP_KEEPINTVL
-    int keepalive_interval = 15;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_interval,
-               sizeof(keepalive_interval));
-#endif
-#ifdef TCP_KEEPCNT
-    int keepalive_count = 3;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepalive_count, sizeof(keepalive_count));
-#endif
 #endif
 
     return client_fd;
@@ -1762,7 +1697,7 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
     }
 }
 
-INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_read(int queue_fd, connection_t* conn, KeepAlive* state) {
     // Read the headers into connection buffer.
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read <= 0) {
@@ -1812,7 +1747,7 @@ INLINE void handle_write_error(connection_t* conn, const char* operation) {
  * @param queue_fd Event queue file descriptor.
  * @param state Keep-alive state manager.
  */
-INLINE void complete_request(connection_t* conn, int queue_fd, KeepAliveState* state) {
+INLINE void complete_request(connection_t* conn, int queue_fd, KeepAlive* state) {
 
 #if ENABLE_LOGGING
     post_request_logger(conn);
@@ -1957,7 +1892,7 @@ INLINE ssize_t send_chunk(int client_fd, int file_fd, off_t* offset, off_t chunk
  * @param conn Connection handling the response.
  * @param state Keep-alive state manager.
  */
-INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAlive* state) {
     response_t* res  = conn->response;
     FileResponse* fr = &res->state.file;
     ssize_t sent     = -1;
@@ -2014,7 +1949,7 @@ INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAliveState* 
  * @param conn Connection handling the response.
  * @param state Keep-alive state manager.
  */
-INLINE void handle_buffer_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_buffer_write(int queue_fd, connection_t* conn, KeepAlive* state) {
     response_t* res    = conn->response;
     BufferResponse* br = &res->state.buffer;
 
@@ -2068,7 +2003,8 @@ typedef struct {
     long worker_id;
     long designated_core;
     int queue_fd;
-    KeepAliveState* keep_alive_state;
+    int timer_fd;
+    KeepAlive* keep_alive_state;
 } WorkerData;
 
 int pin_current_thread_to_core(long core_id) {
@@ -2117,11 +2053,11 @@ int pin_current_thread_to_core(long core_id) {
 }
 
 void* worker_thread(void* arg) {
-    WorkerData* worker       = (WorkerData*)arg;
-    int queue_fd             = worker->queue_fd;
-    long worker_id           = worker->worker_id;
-    long cpu_core            = worker->designated_core;
-    KeepAliveState* ka_state = worker->keep_alive_state;
+    WorkerData* worker    = (WorkerData*)arg;
+    KeepAlive* keep_alive = worker->keep_alive_state;
+    int queue_fd          = worker->queue_fd;
+    long cpu_core         = worker->designated_core;
+    int timer_fd          = worker->timer_fd;
 
     pin_current_thread_to_core(cpu_core);
 
@@ -2131,17 +2067,8 @@ void* worker_thread(void* arg) {
     }
 
     event_t events[MAX_EVENTS] = {0};
-    long last_timeout_check    = 0;
 
     while (server_running) {
-        // Check for Keep-Alive timeouts every 5 seconds.
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
-        if (now.tv_sec - last_timeout_check >= 5) {
-            CheckKeepAliveTimeouts(ka_state, worker_id, queue_fd);
-            last_timeout_check = now.tv_sec;
-        }
-
         int num_events = event_wait(queue_fd, events, MAX_EVENTS, 500);
         if (num_events == -1) {
             if (errno == EINTR) {
@@ -2151,37 +2078,42 @@ void* worker_thread(void* arg) {
             continue;
         }
 
-        // During graceful shutdown, don't accept new connections
-        // but continue processing existing ones
         for (int i = 0; i < num_events; i++) {
             const event_t* event = &events[i];
 
-            if (event_get_fd(event) == server_fd) {
+            int fd = event_get_fd(event);
+            if (fd == server_fd) {
                 int client_fd = conn_accept();
                 if (client_fd > 0) {
                     add_connection_to_worker(queue_fd, client_fd);
                 }
+            } else if (fd == timer_fd) {
+                // Timer fired - must read to clear it
+                uint64_t expirations;
+                ssize_t n = read(timer_fd, &expirations, sizeof(expirations));
+                if (n == sizeof(expirations)) {
+                    CheckKeepAliveTimeouts(keep_alive, queue_fd);
+                } else if (n < 0 && errno != EAGAIN) {
+                    perror("read(timer_fd)");
+                }
             } else {
                 connection_t* conn = (connection_t*)event_get_data(event);
-                if (!conn) continue;
-
                 if (event_is_read(event)) {
-                    handle_read(queue_fd, conn, ka_state);
+                    handle_read(queue_fd, conn, keep_alive);
                 } else if (event_is_write(event)) {
                     switch (conn->response->type) {
                         case ResponseTypeBuffer:
-                            handle_buffer_write(queue_fd, conn, ka_state);
+                            handle_buffer_write(queue_fd, conn, keep_alive);
                             break;
                         case ResponseTypeFile:
-                            handle_file_write(queue_fd, conn, ka_state);
+                            handle_file_write(queue_fd, conn, keep_alive);
                             break;
                     }
                 } else if (event_is_error(event)) {
                     conn->closing = true;
                 }
-
                 if (conn->closing) {
-                    close_connection(queue_fd, conn, ka_state);
+                    close_connection(queue_fd, conn, keep_alive);
                 }
             }
         }
@@ -2189,7 +2121,9 @@ void* worker_thread(void* arg) {
 
     // Remove server socket from event queue
     event_delete(queue_fd, server_fd);
+    event_delete(queue_fd, timer_fd);
     close(queue_fd);
+    close(timer_fd);
     return NULL;
 }
 
@@ -2197,23 +2131,22 @@ int pulsar_run(const char* addr, int port) {
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
-    pthread_t workers[NUM_WORKERS]                = {0};
-    WorkerData worker_data[NUM_WORKERS]           = {0};
-    KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
+    pthread_t workers[NUM_WORKERS]           = {0};
+    WorkerData worker_data[NUM_WORKERS]      = {0};
+    KeepAlive keep_alive_states[NUM_WORKERS] = {0};
 
     install_signal_handler();
     sort_routes();
     init_mimetypes();
 
-#if defined(__linux__)
-    // Tune malloc.
-    mallopt(M_MMAP_THRESHOLD, 128 * 1024);  // Larger allocations use mmap
-    mallopt(M_TRIM_THRESHOLD, 128 * 1024);  // More aggressive trimming
-#endif                                      /* PULSAR_H */
-
-    // When creating worker threads
     long num_cores     = get_num_available_cores();
-    int reserved_cores = 1;  // Leave one core free
+    int reserved_cores = 1;
+
+    // Set timer to fire every 15 seconds
+    struct itimerspec timer_spec = {
+        .it_interval = {.tv_sec = 15, .tv_nsec = 0},  // Repeat every 15s
+        .it_value    = {.tv_sec = 15, .tv_nsec = 0}   // Initial expiration in 15s
+    };
 
     // Initialize worker data and create workers
     for (long i = 0; i < NUM_WORKERS; i++) {
@@ -2223,7 +2156,27 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
+        int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+        if (timer_fd < 0) {
+            perror("timerfd_create");
+            exit(EXIT_FAILURE);
+        }
+
+        if (timerfd_settime(timer_fd, 0, &timer_spec, NULL) < 0) {
+            perror("timerfd_settime");
+            close(timer_fd);
+            exit(EXIT_FAILURE);
+        }
+
+        // Add to event queue with a special marker
+        if (event_add_read(queue_fd, timer_fd, NULL) < 0) {
+            perror("event_add timer_fd");
+            close(timer_fd);
+            exit(EXIT_FAILURE);
+        }
+
         worker_data[i].queue_fd         = queue_fd;
+        worker_data[i].timer_fd         = timer_fd;
         worker_data[i].worker_id        = i;
         worker_data[i].designated_core  = i % (num_cores - reserved_cores);
         worker_data[i].keep_alive_state = &keep_alive_states[i];
