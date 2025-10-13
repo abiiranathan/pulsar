@@ -88,7 +88,7 @@ typedef struct retry_state {
 } retry_state;
 
 // HTTP Response structure
-typedef struct __attribute__((aligned(64))) response_t {
+typedef struct response_t {
     http_status status_code;             // HTTP status code.
     char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
     char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.
@@ -104,7 +104,7 @@ typedef struct __attribute__((aligned(64))) response_t {
 } response_t;
 
 // HTTP Request structure
-typedef struct __attribute__((aligned(64))) request_t {
+typedef struct request_t {
     char* path;                   // Request path (arena allocated)
     char method[8];               // HTTP method (GET, POST etc.)
     HttpMethod method_type;       // MethodType Enum
@@ -116,7 +116,7 @@ typedef struct __attribute__((aligned(64))) request_t {
 } request_t;
 
 // Connection state structure
-typedef struct __attribute__((aligned(64))) connection_t {
+typedef struct connection_t {
     int client_fd;              // Client socket file descriptor
     Locals* locals;             // Per-request context variables set by the user.
     response_t* response;       // HTTP response data (arena allocated)
@@ -127,14 +127,14 @@ typedef struct __attribute__((aligned(64))) connection_t {
 #endif
     time_t last_activity;  // Timestamp of last I/O activity
 
+    bool closing;        // Server closing because of an error.
+    bool keep_alive;     // Keep-alive flag
+    bool abort;          // Abort handler/middleware processing
+    bool in_keep_alive;  // Flag for a tracked connection
+
     // Linked List nodes.
     struct connection_t* next;
     struct connection_t* prev;
-    bool closing;                     // Server closing because of an error.
-    bool keep_alive;                  // Keep-alive flag
-    bool abort;                       // Abort handler/middleware processing
-    bool in_keep_alive;               // Flag for a tracked connection
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
 } connection_t;
 
 #endif /* COMMON_H */

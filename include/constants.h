@@ -9,7 +9,7 @@
 
 // Per-connection arena memory.
 #ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY 4 * 1024UL
+#define ARENA_CAPACITY 8 * 1024UL
 #endif
 
 // Enable logging callback.

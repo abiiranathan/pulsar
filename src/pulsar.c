@@ -73,12 +73,14 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAlive* state) {
 }
 
 INLINE void CheckKeepAliveTimeouts(KeepAlive* state, int epoll_fd) {
+    (void)epoll_fd;
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
         connection_t* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
-            close_connection(epoll_fd, current, state);
+            RemoveKeepAliveConnection(current, state);
+            current->closing = true;  // Mark for closure
         }
         current = next;
     }
@@ -248,8 +250,12 @@ INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_sta
 
     free_request(conn->request);
     free_response(conn->response);
-    LocalsReset(conn->locals);
-    free(conn->locals);
+
+    if (conn->locals) {
+        LocalsReset(conn->locals);
+        free(conn->locals);
+        conn->locals = NULL;
+    }
 
     if (conn->arena) arena_destroy(conn->arena);
     free(conn);
@@ -270,8 +276,8 @@ INLINE void send_error_response(connection_t* conn, http_status status) {
  * ================================================================ */
 
 INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method,
-                                  size_t headers_len) {
-    const char* restrict ptr = conn->read_buf;
+                                  const char* read_buf, size_t headers_len) {
+    const char* restrict ptr = read_buf;
     const char* const end    = ptr + headers_len;
     const bool is_safe       = SAFE_METHOD(method);
     request_t* const req     = conn->request;
@@ -376,7 +382,8 @@ INLINE bool parse_query_params(connection_t* conn) {
     return true;
 }
 
-INLINE bool parse_request_body(connection_t* conn, size_t headers_len, size_t read_bytes) {
+INLINE bool parse_request_body(connection_t* conn, const char* read_buf, size_t headers_len,
+                               size_t read_bytes) {
     if (conn->request->content_length == 0) return true;
 
     request_t* req        = conn->request;
@@ -396,7 +403,7 @@ INLINE bool parse_request_body(connection_t* conn, size_t headers_len, size_t re
         return false;
     }
 
-    memcpy(req->body, conn->read_buf + headers_len, body_available);
+    memcpy(req->body, read_buf + headers_len, body_available);
     req->body[body_available] = '\0';
 
     size_t body_received = body_available;
@@ -1458,20 +1465,20 @@ INLINE void post_request_logger(connection_t* conn) {
 #define RESOLVE(S)  FORMAT(S)
 #define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAlive* state,
-                                   int queue_fd) {
+INLINE http_status process_request(connection_t* conn, const char* read_buf, size_t read_bytes,
+                                   KeepAlive* state, int queue_fd) {
     // replace with memmem for safety(but slower)
-    char* end_of_headers = strstr(conn->read_buf, "\r\n\r\n");
+    char* end_of_headers = strstr(read_buf, "\r\n\r\n");
     if (!end_of_headers) {
         return StatusBadRequest;
     }
 
-    size_t headers_len = (size_t)(end_of_headers - conn->read_buf) + 4;
+    size_t headers_len = (size_t)(end_of_headers - read_buf) + 4;
     char url[MAX_PATH_LEN + 1];
     url[0] = '\0';
 
     char http_protocol[16] = {0};
-    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, url, http_protocol) != 3) {
+    if (sscanf(read_buf, STATUS_LINE, conn->request->method, url, http_protocol) != 3) {
         return StatusBadRequest;
     }
 
@@ -1494,14 +1501,14 @@ INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAl
     }
 
     // We need to parse the headers even for 404.
-    if (!parse_request_headers(conn, conn->request->method_type, headers_len)) {
+    if (!parse_request_headers(conn, conn->request->method_type, read_buf, headers_len)) {
         return StatusInternalServerError;
     };
 
     const route_t* route = route_match(conn->request->path, conn->request->method_type);
     if (route) {
         conn->request->route = route;
-        if (!parse_request_body(conn, headers_len, read_bytes)) {
+        if (!parse_request_body(conn, read_buf, headers_len, read_bytes)) {
             return StatusInternalServerError;
         }
     }
@@ -1522,7 +1529,6 @@ INLINE http_status process_request(connection_t* conn, size_t read_bytes, KeepAl
         if (conn->keep_alive) {
             conn->last_activity = time(NULL);
             AddKeepAliveConnection(conn, state);
-            conn->closing = true;
             if (reset_connection(conn)) {
                 conn->closing = (event_mod_read(queue_fd, conn->client_fd, conn) < 0);
             }
@@ -1698,18 +1704,20 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
 }
 
 INLINE void handle_read(int queue_fd, connection_t* conn, KeepAlive* state) {
+    char read_buf[READ_BUFFER_SIZE];
+
     // Read the headers into connection buffer.
-    ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
+    ssize_t bytes_read = read(conn->client_fd, read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read <= 0) {
         // connection reset by peer
         // or EWOULDBLOCK (Should not happen since socket is ready to read)
         conn->closing = true;
         return;
     }
-    conn->read_buf[bytes_read] = '\0';
+    read_buf[bytes_read] = '\0';
 
     // Process the request and parse the headers / query params.
-    http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
+    http_status status = process_request(conn, read_buf, (size_t)bytes_read, state, queue_fd);
     if (status != StatusOK) {
         send_error_response(conn, status);
     };
