@@ -5,15 +5,13 @@
 // Static file handler is provided by pulsar.c.
 extern void static_file_handler(struct connection_t* conn);
 
-// Global routes
-static route_t global_routes[MAX_ROUTES] = {0};
-static size_t global_route_count         = 0;
+// Normal routes
+static route_t dynamic_routes[MAX_ROUTES] = {0};
+static size_t dynamic_route_count         = 0;
 
-#define HTTP_METHOD_COUNT 7
-
-// Pre-computed method offsets for O(1) method lookup
-static size_t method_start_idx[HTTP_METHOD_COUNT] = {0};
-static size_t method_end_idx[HTTP_METHOD_COUNT]   = {0};
+// Static routes routes
+static route_t static_routes[MAX_STATIC_ROUTES] = {0};
+static size_t static_route_count                = 0;
 
 // Count the number of path parameters in pattern.
 // If there is an invalid (unterminated) parameter, valid is updated to false.
@@ -152,23 +150,29 @@ malloc_fail:
     return false;
 }
 
-route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
-    ASSERT(global_route_count < MAX_ROUTES);
+INLINE route_t* _register_route_helper(const char* pattern, HttpMethod method, HttpHandler handler,
+                                       bool is_static) {
+    route_t* routes   = is_static ? static_routes : dynamic_routes;
+    size_t* count     = (is_static ? &static_route_count : &dynamic_route_count);
+    size_t max_routes = (is_static ? MAX_STATIC_ROUTES : MAX_ROUTES);
+
     ASSERT(METHOD_VALID(method));
-
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
+    ASSERT(
+        *count < max_routes &&
+        "Exceeded maximum allowed routes. Increase the MAX_ROUTES or MAX_STATIC_ROUTES constants");
 
-    route_t* r         = &global_routes[global_route_count];
+    route_t* r         = &routes[*count];
     r->pattern         = pattern;
     r->pattern_len     = strlen(pattern);
     r->method          = method;
     r->handler         = handler;
-    r->flags           = NORMAL_ROUTE_FLAG;
     r->dirname         = NULL;
     r->dirname_len     = 0;
     r->path_params     = NULL;
     bool pattern_valid = false;
-    size_t nparams     = count_path_params(pattern, &pattern_valid);
+
+    size_t nparams = count_path_params(pattern, &pattern_valid);
     ASSERT(pattern_valid && "Invalid path parameters in pattern");
     r->has_params = nparams > 0 ? 1 : 0;
 
@@ -186,16 +190,19 @@ route_t* route_register(const char* pattern, HttpMethod method, HttpHandler hand
 
     memset(r->middleware, 0, sizeof(r->middleware));  // zero middleware array
     r->mw_count = 0;                                  // intialize count to 0
-    global_route_count++;                             // Increment global count
+    (*count)++;                                       // Increment global count
     return r;
+}
+
+route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
+    return _register_route_helper(pattern, method, handler, false);
 }
 
 route_t* route_static(const char* pattern, const char* dirname) {
     ASSERT(pattern && dirname && "pattern and dirname must be non-NULL");
     ASSERT(is_dir(dirname) && "dir must be an existing directory");
 
-    route_t* r    = route_register(pattern, HTTP_GET, static_file_handler);
-    r->flags      = STATIC_ROUTE_FLAG;
+    route_t* r    = _register_route_helper(pattern, HTTP_GET, static_file_handler, true);
     r->dirname    = dirname;
     size_t length = strlen(dirname);
 
@@ -205,63 +212,8 @@ route_t* route_static(const char* pattern, const char* dirname) {
     return r;
 }
 
-// Comparison function for sorting routes by method, then by specificity
-static int compare_routes(const void* a, const void* b) {
-    const route_t* ra = (const route_t*)a;
-    const route_t* rb = (const route_t*)b;
-
-    // First sort by method
-    if (ra->method < rb->method) return -1;
-    if (ra->method > rb->method) return 1;
-
-    // Sort by specificity: exact matches before parameterized routes
-    bool ra_has_params = (ra->path_params != NULL);
-    bool rb_has_params = (rb->path_params != NULL);
-
-    if (!ra_has_params && rb_has_params) return -1;  // Exact routes first
-    if (ra_has_params && !rb_has_params) return 1;
-
-    // For routes of same type, longer patterns first (more specific)
-    if (ra->pattern_len > rb->pattern_len) return -1;
-    if (ra->pattern_len < rb->pattern_len) return 1;
-
-    // Finally sort alphabetically for deterministic ordering
-    return strcmp(ra->pattern, rb->pattern);
-}
-
-static int global_sort_state = 0;
-
-// Sort routes and build method lookup tables
-void sort_routes(void) {
-    if (global_sort_state == 0 && global_route_count > 0) {
-        qsort(global_routes, global_route_count, sizeof(route_t), compare_routes);
-
-        // Build method lookup tables for O(1) method range finding
-        HttpMethod current_method        = global_routes[0].method;
-        method_start_idx[current_method] = 0;
-
-        for (size_t i = 1; i < global_route_count; i++) {
-            HttpMethod method = global_routes[i].method;
-            if (method != current_method) {
-                method_end_idx[current_method] = i;
-                method_start_idx[method]       = i;
-                current_method                 = method;
-            }
-        }
-        method_end_idx[current_method] = global_route_count;
-
-        global_sort_state = 1;
-    }
-}
-
 // single fast path.
 INLINE bool route_matches_fast(const route_t* route, const char* url, size_t url_len) {
-    // Static route: prefix match only
-    if (route->flags & STATIC_ROUTE_FLAG) {
-        return (route->pattern_len <= url_len) &&
-               (memcmp(route->pattern, url, route->pattern_len) == 0);
-    }
-
     // Exact match route: memcmp with trailing slash tolerance
     if (!route->has_params) {
         // Try exact match first (most common case)
@@ -299,38 +251,52 @@ INLINE bool route_matches_fast(const route_t* route, const char* url, size_t url
     return match_path_parameters(route->pattern, url, route->path_params);
 }
 
-const route_t* route_match(const char* path, HttpMethod method) {
-    size_t start   = method_start_idx[method];
-    size_t end     = method_end_idx[method];
+__attribute__((hot)) const route_t* route_match(const char* path, HttpMethod method) {
     size_t url_len = strlen(path);
 
-    // Primary search within method range
-    for (size_t i = start; i < end; i++) {
-        const route_t* r = &global_routes[i];
-        if (route_matches_fast(r, path, url_len)) {
-            return r;
-        }
+retry_method:
+    // --- 1. Dynamic routes (parameterized) ---
+    for (size_t i = 0; i < dynamic_route_count; i++) {
+        const route_t* route = &dynamic_routes[i];
+
+        // Methods always match for dynamic routes
+        if (route->method != method) continue;
+
+        if (route_matches_fast(route, path, url_len)) return route;
     }
 
-    // Fallback for HEAD -> GET
-    if (method == HTTP_HEAD) {
-        start = method_start_idx[HTTP_GET];
-        end   = method_end_idx[HTTP_GET];
-        for (size_t i = start; i < end; i++) {
-            const route_t* r = &global_routes[i];
-            if (route_matches_fast(r, path, url_len)) {
-                return r;
-            }
-        }
+    // --- 2. Static routes (prefix match) ---
+    for (size_t i = 0; i < static_route_count; i++) {
+        const route_t* route = &static_routes[i];
+
+        if (route->method != method) continue;
+        if (route->pattern_len > url_len) continue;
+
+        // Prefix match only (fast path)
+        if (memcmp(route->pattern, path, route->pattern_len) == 0) return route;
     }
-    // OPTIONS: match any method (less common, acceptable to be slower)
-    else if (method == HTTP_OPTIONS) {
-        for (size_t i = 0; i < global_route_count; i++) {
-            const route_t* r = &global_routes[i];
-            if (route_matches_fast(r, path, url_len)) {
-                return r;
+
+    // --- 3. Fallback logic ---
+    switch (method) {
+        case HTTP_HEAD:
+            // Retry as GET (shared handlers)
+            method = HTTP_GET;
+            goto retry_method;
+
+        case HTTP_OPTIONS:
+            // OPTIONS matches any existing route
+            for (size_t i = 0; i < dynamic_route_count; i++) {
+                if (route_matches_fast(&dynamic_routes[i], path, url_len))
+                    return &dynamic_routes[i];
             }
-        }
+            for (size_t i = 0; i < static_route_count; i++) {
+                if (memcmp(static_routes[i].pattern, path, static_routes[i].pattern_len) == 0)
+                    return &static_routes[i];
+            }
+            break;
+
+        default:
+            break;
     }
 
     return NULL;
@@ -353,8 +319,8 @@ INLINE void free_path_params(PathParams* path_params) {
 }
 
 __attribute__((destructor())) void routing_cleanup(void) {
-    for (size_t i = 0; i < global_route_count; i++) {
-        route_t* r = &global_routes[i];
+    for (size_t i = 0; i < dynamic_route_count; i++) {
+        route_t* r = &dynamic_routes[i];
         free_path_params(r->path_params);
     }
 }

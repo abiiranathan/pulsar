@@ -73,9 +73,14 @@
 #define MAX_FILE_SIZE 25UL * 1024
 #endif
 
-// Maximum number of routes to support.
+// Maximum number of non-static routes to support.
 #ifndef MAX_ROUTES
 #define MAX_ROUTES 128U
+#endif
+
+// maximum number of static routes to support.
+#ifndef MAX_STATIC_ROUTES
+#define MAX_STATIC_ROUTES 4U
 #endif
 
 // Maximum number of global middleware

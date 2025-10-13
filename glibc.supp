@@ -1,0 +1,76 @@
+# This is a Valgrind suppression file for glibc/ld.so internal allocations.
+# These are often reported as "still reachable" blocks and are not memory
+# leaks in the application code. They can be safely suppressed to clean up
+# the Valgrind report.
+
+{
+   glibc_dl_load_cache_lookup
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   ...
+   fun:_dl_load_cache_lookup
+}
+
+{
+   glibc_dl_new_object_malloc
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   ...
+   fun:_dl_new_object
+}
+
+{
+   glibc_dl_check_map_versions
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   ...
+   fun:_dl_check_map_versions
+}
+
+{
+   glibc_dl_new_object_calloc
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   ...
+   fun:_dl_new_object
+}
+
+{
+   glibc_dl_init
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   ...
+   fun:_dl_init
+}
+
+{
+   glibc_dl_open
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   ...
+   fun:_dl_open
+}
+
+{
+   pthread_create_internals
+   Memcheck:Leak
+   match-leak-kinds: possible,reachable
+   fun:calloc
+   ...
+   fun:pthread_create*
+}
+
+{
+   pthread_create_internals_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible,reachable
+   fun:malloc
+   ...
+   fun:pthread_create*
+}

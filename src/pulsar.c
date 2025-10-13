@@ -888,36 +888,57 @@ void conn_start_chunked_transfer(connection_t* conn, int max_age_seconds) {
 }
 
 INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
-    ssize_t total_written = 0;
+    ssize_t total_written     = 0;
+    size_t retry_count        = 0;
+    const uint8_t max_retries = 3;  // Limit retries to prevent hanging
 
-    while (iovcnt > 0) {
+    while (iovcnt > 0 && retry_count < max_retries) {
         ssize_t written = writev(fd, iov, iovcnt);
+
         if (written < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(500);
-                continue;  // retry
+                // Use exponential backoff instead of fixed sleep
+                if (++retry_count < max_retries) {
+                    struct timespec ts = {
+                        .tv_sec  = 0,
+                        .tv_nsec = (long)((1UL << retry_count) * 1000UL)  // 1, 2, 4 ms
+                    };
+                    nanosleep(&ts, NULL);
+                    continue;
+                }
             }
-            return -1;  // permanent write error
+            return total_written > 0 ? total_written : -1;
         }
 
         total_written += written;
+        retry_count = 0;  // Reset retry count on successful write
 
-        // Advance iov based on bytes written
-        ssize_t remaining = written;
-        int i             = 0;
-        for (; i < iovcnt && remaining > 0; ++i) {
-            if ((size_t)remaining < iov[i].iov_len) {
-                iov[i].iov_base = (char*)iov[i].iov_base + remaining;
-                iov[i].iov_len -= (size_t)remaining;
-                break;
+        // Fast path: complete write
+        if ((size_t)written >= iov[0].iov_len) {
+            ssize_t remaining = written;
+            int skip_count    = 0;
+
+            // Skip fully written iovecs
+            while (skip_count < iovcnt && (size_t)remaining >= iov[skip_count].iov_len) {
+                remaining -= (ssize_t)iov[skip_count].iov_len;
+                skip_count++;
             }
-            remaining -= (ssize_t)iov[i].iov_len;
-        }
 
-        // Move iov pointer and count forward
-        iov += i;
-        iovcnt -= i;
+            iov += skip_count;
+            iovcnt -= skip_count;
+
+            // Handle partial write to current iov
+            if (iovcnt > 0 && remaining > 0) {
+                iov[0].iov_base = (char*)iov[0].iov_base + remaining;
+                iov[0].iov_len -= (size_t)remaining;
+            }
+        } else {
+            // Partial write to first iovec only (common case)
+            iov[0].iov_base = (char*)iov[0].iov_base + written;
+            iov[0].iov_len -= (size_t)written;
+        }
     }
+
     return total_written;
 }
 
@@ -1722,13 +1743,6 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
 }
 
 INLINE void handle_read(int queue_fd, connection_t* conn, KeepAlive* state) {
-    if (conn->shutting_down) {
-        // Kernel signaled read-ready on a shutdown socket
-        // This means either EOF or an error - both mean: close now
-        close_connection(queue_fd, conn, state);
-        return;
-    }
-
     char read_buf[READ_BUFFER_SIZE];
 
     // Read the headers into connection buffer.
@@ -2133,6 +2147,11 @@ void* worker_thread(void* arg) {
                 connection_t* conn = (connection_t*)event_get_data(event);
 
                 if (event_is_read(event)) {
+                    // We have EOF on shutdown socket.
+                    if (conn->shutting_down) {
+                        close_connection(queue_fd, conn, keep_alive);
+                        continue;
+                    }
                     handle_read(queue_fd, conn, keep_alive);
                 } else if (event_is_write(event)) {
                     switch (conn->response->type) {
@@ -2148,7 +2167,6 @@ void* worker_thread(void* arg) {
                 }
 
                 // Queue for closure. Wait for Kernel to send all the data.
-                // Change this line in your event loop:
                 if (conn->closing && !conn->shutting_down) {
                     initiate_graceful_shutdown(conn, keep_alive, queue_fd);
                 }
@@ -2173,7 +2191,6 @@ int pulsar_run(const char* addr, int port) {
     KeepAlive keep_alive_states[NUM_WORKERS] = {0};
 
     install_signal_handler();
-    sort_routes();
     init_mimetypes();
 
     long num_cores     = get_num_available_cores();
