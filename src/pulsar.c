@@ -173,12 +173,12 @@ INLINE void free_response(response_t* resp) {
 }
 
 INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
-    conn->closing       = false;
-    conn->client_fd     = client_fd;
-    conn->keep_alive    = true;
-    conn->in_keep_alive = false;
-    conn->abort         = false;
-    conn->arena         = arena;
+    conn->closing = conn->shutting_down = false;
+    conn->abort = conn->in_keep_alive = false;
+
+    conn->keep_alive = true;
+    conn->client_fd  = client_fd;
+    conn->arena      = arena;
 
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
     conn->last_activity = conn->start.tv_sec;
@@ -188,19 +188,21 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
         return false;
     }
 
-    conn->locals = malloc(sizeof(Locals));
-    if (conn->locals) LocalsInit(conn->locals);
+    if (!LocalsInit(&conn->locals)) {
+        return false;
+    }
 
     conn->next = NULL;
     conn->prev = NULL;
-    return (conn->request && conn->response && conn->locals);
+    return (conn->request && conn->response);
 }
 
 INLINE bool reset_connection(connection_t* conn) {
-    conn->closing    = false;
-    conn->keep_alive = true;    // Default to Keep-Alive
-    conn->abort      = false;   // Connection not aborted
-    free(conn->request->body);  // Free request body.
+    conn->closing       = false;
+    conn->shutting_down = false;
+    conn->keep_alive    = true;   // Default to Keep-Alive
+    conn->abort         = false;  // Connection not aborted
+    free(conn->request->body);    // Free request body.
 
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
     conn->last_activity = conn->start.tv_sec;
@@ -216,7 +218,7 @@ INLINE bool reset_connection(connection_t* conn) {
     }
 
     // Reset locals
-    if (conn->locals) LocalsReset(conn->locals);
+    LocalsReset(&conn->locals);
 
     // Reset arena before allocating new objects.
     arena_reset(conn->arena);
@@ -231,13 +233,33 @@ INLINE bool reset_connection(connection_t* conn) {
         conn->next = NULL;
         conn->prev = NULL;
     }
-
     return (conn->request && conn->response);
 }
 
 /* ================================================================
  * Updated Connection Management Functions
  * ================================================================ */
+
+INLINE void initiate_graceful_shutdown(connection_t* conn, KeepAlive* ka_state, int queue_fd) {
+    // Shutdown write side
+    if (shutdown(conn->client_fd, SHUT_WR) < 0) {
+        if (errno != ENOTCONN) {
+            // If shutdown fails (except for "not connected"), just close immediately
+            conn->closing = true;
+            close_connection(queue_fd, conn, ka_state);
+            return;
+        }
+    }
+
+    conn->shutting_down = true;
+    RemoveKeepAliveConnection(conn, ka_state);
+
+    // Switch epoll to only monitor reads (to detect EOF)
+    if (event_mod_read(queue_fd, conn->client_fd, conn) < 0) {
+        // If we can't modify, just close
+        close_connection(queue_fd, conn, ka_state);
+    }
+}
 
 INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_state) {
     if (!conn || conn->client_fd == -1) return;
@@ -251,11 +273,7 @@ INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_sta
     free_request(conn->request);
     free_response(conn->response);
 
-    if (conn->locals) {
-        LocalsReset(conn->locals);
-        free(conn->locals);
-        conn->locals = NULL;
-    }
+    LocalsDestroy(&conn->locals);
 
     if (conn->arena) arena_destroy(conn->arena);
     free(conn);
@@ -1434,15 +1452,15 @@ void pulsar_set_callback(PulsarCallback cb) {
 
 bool pulsar_set_context_value(connection_t* conn, const char* key, void* value,
                               ValueFreeFunc free_func) {
-    return LocalsSetValue(conn->locals, key, value, free_func);
+    return LocalsSetValue(&conn->locals, key, value, free_func);
 }
 
 void* pulsar_get_context_value(connection_t* conn, const char* key) {
-    return LocalsGetValue(conn->locals, key);
+    return LocalsGetValue(&conn->locals, key);
 }
 
 void pulsar_delete_context_value(connection_t* conn, const char* key) {
-    LocalsRemove(conn->locals, key);
+    LocalsRemove(&conn->locals, key);
 }
 
 #if ENABLE_LOGGING
@@ -1704,6 +1722,13 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
 }
 
 INLINE void handle_read(int queue_fd, connection_t* conn, KeepAlive* state) {
+    if (conn->shutting_down) {
+        // Kernel signaled read-ready on a shutdown socket
+        // This means either EOF or an error - both mean: close now
+        close_connection(queue_fd, conn, state);
+        return;
+    }
+
     char read_buf[READ_BUFFER_SIZE];
 
     // Read the headers into connection buffer.
@@ -2106,6 +2131,7 @@ void* worker_thread(void* arg) {
                 }
             } else {
                 connection_t* conn = (connection_t*)event_get_data(event);
+
                 if (event_is_read(event)) {
                     handle_read(queue_fd, conn, keep_alive);
                 } else if (event_is_write(event)) {
@@ -2120,8 +2146,11 @@ void* worker_thread(void* arg) {
                 } else if (event_is_error(event)) {
                     conn->closing = true;
                 }
-                if (conn->closing) {
-                    close_connection(queue_fd, conn, keep_alive);
+
+                // Queue for closure. Wait for Kernel to send all the data.
+                // Change this line in your event loop:
+                if (conn->closing && !conn->shutting_down) {
+                    initiate_graceful_shutdown(conn, keep_alive, queue_fd);
                 }
             }
         }

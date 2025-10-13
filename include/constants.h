@@ -93,11 +93,6 @@
 #define HEADERS_CAPACITY 32
 #endif
 
-// Maximum number of connection context variables set by the user.
-#ifndef LOCALS_CAPACITY
-#define LOCALS_CAPACITY 16
-#endif
-
 // Maximum capacity of the locals key.
 #ifndef LOCALS_KEY_CAPACITY
 #define LOCALS_KEY_CAPACITY 16

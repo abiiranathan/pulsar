@@ -118,7 +118,7 @@ typedef struct request_t {
 // Connection state structure
 typedef struct connection_t {
     int client_fd;              // Client socket file descriptor
-    Locals* locals;             // Per-request context variables set by the user.
+    Locals locals;              // Per-request context variables set by the user.
     response_t* response;       // HTTP response data (arena allocated)
     struct request_t* request;  // HTTP request data (arena allocated)
     Arena* arena;               // Memory arena for allocations
@@ -128,6 +128,7 @@ typedef struct connection_t {
     time_t last_activity;  // Timestamp of last I/O activity
 
     bool closing;        // Server closing because of an error.
+    bool shutting_down;  // Connection is shutting down
     bool keep_alive;     // Keep-alive flag
     bool abort;          // Abort handler/middleware processing
     bool in_keep_alive;  // Flag for a tracked connection
