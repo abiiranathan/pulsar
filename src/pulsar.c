@@ -3,7 +3,8 @@
 #include <sys/timerfd.h>
 #include "../include/events.h"
 
-#define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
+// reserves space for \r\n\0 in the response header buffer
+#define SAFETY_MARGIN 3
 
 static int server_fd                                        = -1;   // Server socket file descriptor
 volatile sig_atomic_t server_running                        = 1;    // Server running flag
@@ -20,6 +21,7 @@ typedef struct KeepAliveState {
 // Forward declarations.
 INLINE void finalize_response(connection_t* conn, HttpMethod method);
 INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_state);
+INLINE void initiate_graceful_shutdown(connection_t* conn, KeepAlive* ka_state, int queue_fd);
 
 INLINE long get_num_available_cores() {
     return sysconf(_SC_NPROCESSORS_ONLN);
@@ -73,15 +75,25 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAlive* state) {
 }
 
 INLINE void CheckKeepAliveTimeouts(KeepAlive* state, int epoll_fd) {
-    (void)epoll_fd;
     connection_t* current = state->head;
     time_t now            = time(NULL);
     while (current) {
         connection_t* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
             RemoveKeepAliveConnection(current, state);
-            current->closing = true;  // Mark for closure
+            initiate_graceful_shutdown(current, state, epoll_fd);
+            current->closing = true;
         }
+        current = next;
+    }
+}
+
+INLINE void CleanupKeepAlive(KeepAlive* state, int queue_fd) {
+    if (!state) return;
+    connection_t* current = state->head;
+    while (current) {
+        connection_t* next = current->next;
+        close_connection(queue_fd, current, state);
         current = next;
     }
 }
@@ -262,19 +274,11 @@ INLINE void initiate_graceful_shutdown(connection_t* conn, KeepAlive* ka_state, 
 }
 
 INLINE void close_connection(int queue_fd, connection_t* conn, KeepAlive* ka_state) {
-    if (!conn || conn->client_fd == -1) return;
-
     event_delete(queue_fd, conn->client_fd);
-    close(conn->client_fd);
-    conn->client_fd = -1;
-
     RemoveKeepAliveConnection(conn, ka_state);
-
     free_request(conn->request);
     free_response(conn->response);
-
     LocalsDestroy(&conn->locals);
-
     if (conn->arena) arena_destroy(conn->arena);
     free(conn);
 }
@@ -1206,10 +1210,9 @@ INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, o
 
 bool conn_servefile(connection_t* conn, const char* filename) {
     if (!filename) return false;
-
     int fd = open(filename, O_RDONLY);
-    if (fd == -1) {
-        perror("open");
+    if (fd < 0) {
+        conn->closing = true;
         return false;
     }
 
@@ -1217,6 +1220,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
     if (fstat(fd, &stat_buf) != 0) {
         perror("fstat");
         close(fd);
+        conn_send(conn, StatusInternalServerError, "error reading file stats", 24);
         return false;
     }
 
@@ -1653,6 +1657,7 @@ static int create_server_socket(const char* host, int port) {
         exit(EXIT_FAILURE);
     }
 
+    // Requires updates to /etc/sysctl.conf
     if (listen(fd, SOMAXCONN) < 0) {
         perror("listen");
         close(fd);
@@ -1949,7 +1954,7 @@ INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAlive* state
     if (!HAS_HEADERS_WRITTEN(res->flags)) {
         sent = write_file_response_headers(res, conn->client_fd);
         if (sent < 0) {
-            handle_write_error(conn, "header write failed");
+            close(fr->file_fd);
             return;
         }
         if (sent == 0) {
@@ -1957,36 +1962,33 @@ INLINE void handle_file_write(int queue_fd, connection_t* conn, KeepAlive* state
         }
     }
 
-    // Keep sending data until done.
-    while (1) {
-        // Calculate remaining file data
-        off_t remaining = fr->file_size - fr->file_offset;
-        if (remaining <= 0) {
-            close(fr->file_fd);
-            fr->file_fd = -1;
-            complete_request(conn, queue_fd, state);
-            return;
-        }
+    // Calculate remaining file data
+    off_t remaining = fr->file_size - fr->file_offset;
+    if (remaining <= 0) {
+        close(fr->file_fd);
+        fr->file_fd = -1;
+        complete_request(conn, queue_fd, state);
+        return;
+    }
 
-        off_t chunk_size = is_range ? (off_t)MIN(MAX_CHUNK_SIZE, (size_t)remaining) : remaining;
-        off_t offset     = (off_t)fr->file_offset;
-        sent             = send_chunk(conn->client_fd, fr->file_fd, &offset, chunk_size);
-        if (sent < 0) {
-            close(fr->file_fd);
-            fr->file_fd = -1;
-            handle_write_error(conn, "file transfer failed");
-            return;
-        }
+    off_t chunk_size = is_range ? (off_t)MIN(MAX_CHUNK_SIZE, (size_t)remaining) : remaining;
+    off_t offset     = (off_t)fr->file_offset;
+    sent             = send_chunk(conn->client_fd, fr->file_fd, &offset, chunk_size);
+    if (sent < 0) {
+        close(fr->file_fd);
+        fr->file_fd = -1;
+        return;
+    }
 
-        if (sent == 0) {
-            return;  // Socket buffer full, wait for next write event
-        }
-        fr->file_offset += offset;
+    if (sent == 0) {
+        return;  // Socket buffer full, wait for next write event
+    }
+    fr->file_offset = offset;
 
-        // Check if transfer is complete
-        if (fr->file_offset >= fr->file_size) {
-            complete_request(conn, queue_fd, state);
-        }
+    // Check if transfer is complete
+    if (fr->file_offset >= fr->file_size) {
+        close(fr->file_fd);
+        complete_request(conn, queue_fd, state);
     }
 }
 
@@ -2049,9 +2051,10 @@ INLINE void handle_buffer_write(int queue_fd, connection_t* conn, KeepAlive* sta
 typedef struct {
     long worker_id;
     long designated_core;
+    size_t active_connections;
     int queue_fd;
     int timer_fd;
-    KeepAlive* keep_alive_state;
+    KeepAlive* state;
 } WorkerData;
 
 int pin_current_thread_to_core(long core_id) {
@@ -2101,7 +2104,7 @@ int pin_current_thread_to_core(long core_id) {
 
 void* worker_thread(void* arg) {
     WorkerData* worker    = (WorkerData*)arg;
-    KeepAlive* keep_alive = worker->keep_alive_state;
+    KeepAlive* keep_alive = worker->state;
     int queue_fd          = worker->queue_fd;
     long cpu_core         = worker->designated_core;
     int timer_fd          = worker->timer_fd;
@@ -2140,18 +2143,21 @@ void* worker_thread(void* arg) {
                 ssize_t n = read(timer_fd, &expirations, sizeof(expirations));
                 if (n == sizeof(expirations)) {
                     CheckKeepAliveTimeouts(keep_alive, queue_fd);
-                } else if (n < 0 && errno != EAGAIN) {
-                    perror("read(timer_fd)");
                 }
+
             } else {
                 connection_t* conn = (connection_t*)event_get_data(event);
 
                 if (event_is_read(event)) {
-                    // We have EOF on shutdown socket.
                     if (conn->shutting_down) {
+                        /*
+                         * Receiving this event on a previously shutdown socket
+                         * guarantees that all data has been sent.
+                         */
                         close_connection(queue_fd, conn, keep_alive);
                         continue;
                     }
+
                     handle_read(queue_fd, conn, keep_alive);
                 } else if (event_is_write(event)) {
                     switch (conn->response->type) {
@@ -2174,15 +2180,31 @@ void* worker_thread(void* arg) {
         }
     }
 
+    // Free all connections in keep-alive.
+    CleanupKeepAlive(keep_alive, queue_fd);
+
     // Remove server socket from event queue
     event_delete(queue_fd, server_fd);
     event_delete(queue_fd, timer_fd);
     close(queue_fd);
     close(timer_fd);
+
     return NULL;
 }
 
+#include <sys/resource.h>
+
+void raise_fd_limits(void) {
+    struct rlimit rlim;
+    if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
+        rlim.rlim_cur = rlim.rlim_max;  // Raise soft limit to hard limit
+        setrlimit(RLIMIT_NOFILE, &rlim);
+    }
+}
+
 int pulsar_run(const char* addr, int port) {
+    raise_fd_limits();
+
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
@@ -2195,12 +2217,6 @@ int pulsar_run(const char* addr, int port) {
 
     long num_cores     = get_num_available_cores();
     int reserved_cores = 1;
-
-    // Set timer to fire every 15 seconds
-    struct itimerspec timer_spec = {
-        .it_interval = {.tv_sec = 15, .tv_nsec = 0},  // Repeat every 15s
-        .it_value    = {.tv_sec = 15, .tv_nsec = 0}   // Initial expiration in 15s
-    };
 
     // Initialize worker data and create workers
     for (long i = 0; i < NUM_WORKERS; i++) {
@@ -2216,6 +2232,12 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
+        // Set timer to fire every 5 seconds
+        struct itimerspec timer_spec = {
+            .it_interval = {.tv_sec = 15, .tv_nsec = 0},  // Repeat every 5s
+            .it_value    = {.tv_sec = 2, .tv_nsec = 0}    // Initial expiration in 2s
+        };
+
         if (timerfd_settime(timer_fd, 0, &timer_spec, NULL) < 0) {
             perror("timerfd_settime");
             close(timer_fd);
@@ -2229,11 +2251,14 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].queue_fd         = queue_fd;
-        worker_data[i].timer_fd         = timer_fd;
-        worker_data[i].worker_id        = i;
-        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
-        worker_data[i].keep_alive_state = &keep_alive_states[i];
+        worker_data[i].queue_fd           = queue_fd;
+        worker_data[i].timer_fd           = timer_fd;
+        worker_data[i].worker_id          = i;
+        worker_data[i].designated_core    = i % (num_cores - reserved_cores);
+        worker_data[i].state              = &keep_alive_states[i];
+        worker_data[i].active_connections = 0;
+
+        memset(worker_data[i].state, 0, sizeof(WorkerData));
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
             perror("pthread_create");

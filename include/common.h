@@ -77,7 +77,7 @@ typedef struct file_response {
 
 // The type of response we are sending.
 typedef enum response_type : uint8_t {
-    ResponseTypeBuffer,
+    ResponseTypeBuffer = 1,
     ResponseTypeFile,
 } ResponseType;
 

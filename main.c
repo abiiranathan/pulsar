@@ -374,8 +374,8 @@ int main() {
 
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
+    route_t* hello = route_register("/hello", HTTP_GET, hello_world_handler);
 
-    route_t* hello   = route_register("/hello", HTTP_GET, hello_world_handler);
     Middleware mw[2] = {mw1, mw2};
     use_route_middleware(hello, mw, 2);
 

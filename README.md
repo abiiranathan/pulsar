@@ -187,5 +187,3 @@ For detailed API documentation, see the [API Reference](docs/API.md).
 ## License
 
 Pulsar is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
-

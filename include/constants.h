@@ -35,7 +35,7 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 2048UL
+#define MAX_EVENTS 1024UL
 #endif
 
 // Buffer size for incoming request excluding body.
