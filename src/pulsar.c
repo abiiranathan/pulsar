@@ -1591,13 +1591,15 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
         route->handler(conn);
 
         // Free allocated route params.
-        for (size_t i = 0; i < route->path_params->match_count; i++) {
-            free(route->path_params->params[i].name);
-            free(route->path_params->params[i].value);
+        if (route->path_params) {
+            for (size_t i = 0; i < route->path_params->match_count; i++) {
+                free(route->path_params->params[i].name);
+                free(route->path_params->params[i].value);
 
-            // Set to NULL to avoid double free on exit.
-            route->path_params->params[i].name  = NULL;
-            route->path_params->params[i].value = NULL;
+                // Set to NULL to avoid double free on exit.
+                route->path_params->params[i].name  = NULL;
+                route->path_params->params[i].value = NULL;
+            }
         }
     }
 
