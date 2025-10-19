@@ -17,7 +17,7 @@ static size_t method_end_idx[HTTP_METHOD_COUNT]   = {0};
 
 // Count the number of path parameters in pattern.
 // If there is an invalid (unterminated) parameter, valid is updated to false.
-INLINE size_t count_path_params(const char* pattern, bool* valid) {
+size_t count_path_params(const char* pattern, bool* valid) {
     const char* ptr = pattern;
     size_t count    = 0;
     *valid          = true;
@@ -65,7 +65,7 @@ INLINE size_t count_path_params(const char* pattern, bool* valid) {
  * @return true if the pattern and URL match, false otherwise
  */
 INLINE bool match_path_parameters(const char* pattern, const char* url_path,
-                                  PathParams* path_params) {
+                                  PathParams* path_params, Arena* arena) {
     const char* pat = pattern;
     const char* url = url_path;
     size_t nparams  = 0;
@@ -101,30 +101,23 @@ INLINE bool match_path_parameters(const char* pattern, const char* url_path,
             if (*pat != '}') return false;
 
             size_t name_len = (size_t)(pat - name_start);
-
-            param->name = malloc(name_len + 1);
-            if (param->name == NULL) {
-                perror("malloc");
-                goto malloc_fail;
+            param->name     = arena_strdupn(arena, name_start, name_len);
+            if (!param->name) {
+                return false;
             }
-
-            memcpy(param->name, name_start, name_len);
-            param->name[name_len] = '\0';
             pat++;  // Skip '}'
 
             // Extract parameter value
             const char* val_start = url;
-            while (*url && *url != '/' && *url != *pat)
+            while (*url && *url != '/' && *url != *pat) {
                 url++;
-            size_t val_len = (size_t)(url - val_start);
-
-            param->value = malloc(val_len + 1);
-            if (param->value == NULL) {
-                perror("malloc");
-                goto malloc_fail;
             }
-            memcpy(param->value, val_start, val_len);
-            param->value[val_len] = '\0';
+
+            size_t val_len = (size_t)(url - val_start);
+            param->value   = arena_strdupn(arena, val_start, val_len);
+            if (!param->value) {
+                return false;
+            }
         } else {
             if (*pat != *url) return false;
             pat++;
@@ -140,16 +133,6 @@ INLINE bool match_path_parameters(const char* pattern, const char* url_path,
 
     path_params->match_count = nparams;
     return (*pat == '\0' && *url == '\0' && path_params->total_params == path_params->match_count);
-
-malloc_fail:
-    // Free all params allocated.
-    for (size_t i = 0; i < nparams; i++) {
-        char* name  = path_params->params[i].name;
-        char* value = path_params->params[i].value;
-        if (name) free(name);
-        if (value) free(value);
-    }
-    return false;
 }
 
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler) {
@@ -250,7 +233,7 @@ void sort_routes(void) {
     }
 }
 
-INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_length) {
+INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_length, Arena* arena) {
     // Normal (non-static routes)
     if (__builtin_expect(route->flags & NORMAL_ROUTE_FLAG, 1)) {
 
@@ -259,8 +242,9 @@ INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_lengt
             return (route->pattern_len == url_length) &&
                    (memcmp(route->pattern, url, url_length) == 0);
         }
+
         // Parameterized routes
-        return match_path_parameters(route->pattern, url, route->path_params);
+        return match_path_parameters(route->pattern, url, route->path_params, arena);
     }
 
     // Static route (less common)
@@ -273,7 +257,7 @@ INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_lengt
     return false;
 }
 
-route_t* route_match(const char* path, size_t url_length, HttpMethod method) {
+route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
     // Get method range using pre-computed lookup table
     size_t start_idx = method_start_idx[method];
     size_t end_idx   = method_end_idx[method];
@@ -281,18 +265,18 @@ route_t* route_match(const char* path, size_t url_length, HttpMethod method) {
     // Linear search within method range.
     for (size_t i = start_idx; i < end_idx; i++) {
         route_t* current = &global_routes[i];
-        if (route_matches_fast(current, path, url_length)) {
+        if (route_matches_fast(current, path, url_length, arena)) {
             return current;
         }
     }
 
     // Handle special method fallbacks
     if (method == HTTP_HEAD) {
-        return route_match(path, url_length, HTTP_GET);
+        return route_match(path, url_length, HTTP_GET, arena);
     } else if (method == HTTP_OPTIONS) {
         // OPTIONS matches if ANY route exists for this path
         for (size_t i = 0; i < global_route_count; i++) {
-            if (route_matches_fast(&global_routes[i], path, url_length)) {
+            if (route_matches_fast(&global_routes[i], path, url_length, arena)) {
                 return &global_routes[i];
             }
         }
@@ -300,25 +284,11 @@ route_t* route_match(const char* path, size_t url_length, HttpMethod method) {
     return NULL;
 }
 
-INLINE void free_path_params(PathParams* path_params) {
-    if (!path_params) return;
-
-    PathParam* params_array = path_params->params;
-    if (params_array) {
-        for (size_t i = 0; i < path_params->match_count; i++) {
-            char* name  = params_array[i].name;
-            char* value = params_array[i].value;
-            if (name) free(name);
-            if (value) free(value);
-        }
-        free(params_array);
-    }
-    free(path_params);
-}
-
 __attribute__((destructor())) void routing_cleanup(void) {
     for (size_t i = 0; i < global_route_count; i++) {
         route_t* r = &global_routes[i];
-        free_path_params(r->path_params);
+        if (!r->path_params) continue;
+        if (r->path_params->params) free(r->path_params->params);
+        free(r->path_params);
     }
 }

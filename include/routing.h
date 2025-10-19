@@ -69,7 +69,7 @@ route_t* route_static(const char* pattern, const char* dir);
 // Entry Point to router.
 // Matches request path and method to a registered route and parses and populates the path
 // parameters. The path params have the lifetime of the arena where they are allocated.
-route_t* route_match(const char* path, size_t url_length, HttpMethod method);
+route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena);
 
 #ifdef __cplusplus
 }

@@ -1576,7 +1576,7 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
         return StatusInternalServerError;
     };
 
-    route_t* route = route_match(req->path, path_len, req->method_type);
+    route_t* route = route_match(req->path, path_len, req->method_type, conn->arena);
     if (!route) {
         return StatusNotFound;
     }
@@ -1589,18 +1589,6 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
     execute_all_middleware(conn, route);
     if (!conn->abort) {
         route->handler(conn);
-
-        // Free allocated route params.
-        if (route->path_params) {
-            for (size_t i = 0; i < route->path_params->match_count; i++) {
-                free(route->path_params->params[i].name);
-                free(route->path_params->params[i].value);
-
-                // Set to NULL to avoid double free on exit.
-                route->path_params->params[i].name  = NULL;
-                route->path_params->params[i].value = NULL;
-            }
-        }
     }
 
     // Chunked transfer is handled by the handler directly outside event loop.
