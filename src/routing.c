@@ -273,11 +273,10 @@ INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_lengt
     return false;
 }
 
-route_t* route_match(const char* path, HttpMethod method) {
+route_t* route_match(const char* path, size_t url_length, HttpMethod method) {
     // Get method range using pre-computed lookup table
-    size_t start_idx  = method_start_idx[method];
-    size_t end_idx    = method_end_idx[method];
-    size_t url_length = strlen(path);
+    size_t start_idx = method_start_idx[method];
+    size_t end_idx   = method_end_idx[method];
 
     // Linear search within method range.
     for (size_t i = start_idx; i < end_idx; i++) {
@@ -289,7 +288,7 @@ route_t* route_match(const char* path, HttpMethod method) {
 
     // Handle special method fallbacks
     if (method == HTTP_HEAD) {
-        return route_match(path, HTTP_GET);
+        return route_match(path, url_length, HTTP_GET);
     } else if (method == HTTP_OPTIONS) {
         // OPTIONS matches if ANY route exists for this path
         for (size_t i = 0; i < global_route_count; i++) {

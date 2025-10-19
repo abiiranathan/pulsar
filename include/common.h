@@ -101,12 +101,12 @@ typedef struct request_t {
 
 // Connection state structure
 typedef struct connection_t {
-    int client_fd;                    // Client socket file descriptor
-    char read_buf[READ_BUFFER_SIZE];  // Buffer for incoming data.
-    Locals* locals;                   // Per-request context variables set by the user.
-    response_t* response;             // HTTP response data (arena allocated)
-    struct request_t* request;        // HTTP request data (arena allocated)
-    Arena* arena;                     // Memory arena for allocations
+    int client_fd;              // Client socket file descriptor
+    char* read_buf;             // Buffer for incoming data.
+    Locals* locals;             // Per-request context variables set by the user.
+    response_t* response;       // HTTP response data (arena allocated)
+    struct request_t* request;  // HTTP request data (arena allocated)
+    Arena* arena;               // Memory arena for allocations
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
 #endif

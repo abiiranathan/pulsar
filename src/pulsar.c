@@ -200,18 +200,17 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     conn->arena         = arena;
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
-    conn->read_buf[0]   = '\0';
-    memset(conn->read_buf, 0, sizeof(conn->read_buf));
-    conn->request = create_request(arena);
-    conn->locals  = malloc(sizeof(Locals));
+    conn->request       = create_request(arena);
+    conn->locals        = malloc(sizeof(Locals));
     if (conn->locals) LocalsInit(conn->locals);
+    conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
 
 #if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
     conn->next = NULL;
     conn->prev = NULL;
-    return (conn->request && conn->response && conn->locals);
+    return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
 INLINE bool reset_connection(connection_t* conn) {
@@ -234,14 +233,14 @@ INLINE bool reset_connection(connection_t* conn) {
 #endif
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
-    memset(conn->read_buf, 0, sizeof(conn->read_buf));
+    conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
 
     // Don't reset these fields if connection is in keep-alive list
     if (!conn->in_keep_alive) {
         conn->next = NULL;
         conn->prev = NULL;
     }
-    return (conn->request && conn->response);
+    return (conn->request && conn->response && conn->read_buf);
 }
 
 /* ================================================================
@@ -267,7 +266,7 @@ INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* k
 }
 
 // Send an error response during request processing.
-INLINE void send_error_response(connection_t* conn, http_status status) {
+INLINE void write_error(connection_t* conn, http_status status) {
     const char* status_text = conn_set_status(conn, status);  // is non-NULL.
     conn_set_content_type(conn, PLAINTEXT_TYPE);
     conn_write_string(conn, status_text);
@@ -1437,6 +1436,93 @@ INLINE void request_complete(connection_t* conn) {
 }
 #endif
 
+/**
+ * Parses an HTTP request line (method, URL, protocol).
+ * @param input The input buffer containing the request line.
+ * @param input_len Length of the input buffer.
+ * @param method Output buffer for HTTP method (e.g., "GET").
+ * @param method_size Size of method buffer.
+ * @param method_len Output: actual length of method written.
+ * @param url Output buffer for URL path.
+ * @param url_size Size of url buffer.
+ * @param url_len Output: actual length of url written.
+ * @param protocol Output buffer for protocol (e.g., "HTTP/1.1").
+ * @param protocol_size Size of protocol buffer.
+ * @param protocol_len Output: actual length of protocol written.
+ * @return 0 on success, -1 on parse error.
+ */
+INLINE int parse_request_line(const char* input, size_t input_len, char* method, size_t method_size,
+                              size_t* method_len, char* url, size_t url_size, size_t* url_len,
+                              char* protocol, size_t protocol_size, size_t* protocol_len) {
+    const char* ptr = input;
+    const char* end = input + input_len;
+
+    // Parse method (up to first space)
+    const char* method_start = ptr;
+    while (ptr < end && *ptr != ' ' && *ptr != '\0') {
+        ptr++;
+    }
+
+    size_t m_len = (size_t)(ptr - method_start);
+    if (m_len == 0 || m_len >= method_size) {
+        return -1;  // Empty method or overflow
+    }
+
+    memcpy(method, method_start, m_len);
+    method[m_len] = '\0';
+    *method_len   = m_len;
+
+    // Skip spaces after method
+    while (ptr < end && *ptr == ' ') {
+        ptr++;
+    }
+
+    if (ptr >= end) {
+        return -1;  // No URL found
+    }
+
+    // Parse URL (up to next space)
+    const char* url_start = ptr;
+    while (ptr < end && *ptr != ' ' && *ptr != '\0') {
+        ptr++;
+    }
+
+    size_t u_len = (size_t)(ptr - url_start);
+    if (u_len == 0 || u_len >= url_size) {
+        return -1;  // Empty URL or overflow
+    }
+
+    memcpy(url, url_start, u_len);
+    url[u_len] = '\0';
+    *url_len   = u_len;
+
+    // Skip spaces after URL
+    while (ptr < end && *ptr == ' ') {
+        ptr++;
+    }
+
+    if (ptr >= end) {
+        return -1;  // No protocol found
+    }
+
+    // Parse protocol (up to newline, carriage return, or end)
+    const char* protocol_start = ptr;
+    while (ptr < end && *ptr != '\r' && *ptr != '\n' && *ptr != '\0') {
+        ptr++;
+    }
+
+    size_t p_len = (size_t)(ptr - protocol_start);
+    if (p_len == 0 || p_len >= protocol_size) {
+        return -1;  // Empty protocol or overflow
+    }
+
+    memcpy(protocol, protocol_start, p_len);
+    protocol[p_len] = '\0';
+    *protocol_len   = p_len;
+
+    return 0;  // Success
+}
+
 // Support for dynamic sscanf string size.
 #define FORMAT(S)   "%" #S "s"
 #define RESOLVE(S)  FORMAT(S)
@@ -1452,26 +1538,32 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
         return StatusBadRequest;
     }
 
+    request_t* req     = conn->request;
     size_t headers_len = (size_t)(end_of_headers - conn->read_buf) + 4;
-    char url[MAX_PATH_LEN + 1];
-    url[0] = '\0';
 
+    char url[MAX_PATH_LEN + 1];  // no-init
     char http_protocol[16] = {0};
-    if (sscanf(conn->read_buf, STATUS_LINE, conn->request->method, url, http_protocol) != 3) {
+    size_t method_len      = 0;
+    size_t url_len         = 0;
+    size_t protocol_len    = 0;
+
+    if (parse_request_line(conn->read_buf, read_bytes, req->method, sizeof(req->method),
+                           &method_len, url, sizeof(url), &url_len, http_protocol,
+                           sizeof(http_protocol), &protocol_len) != 0) {
         return StatusBadRequest;
     }
 
     // Percent-decode the URL into connection request path.
     // src, dest, src_len, dst_len.
-    url_percent_decode(url, conn->request->path, strlen(url), MAX_PATH_LEN);
+    size_t path_len = url_percent_decode(url, req->path, url_len, MAX_PATH_LEN);
 
     // Validate HTTP version. We only support http 1.1
-    if (strcmp(http_protocol, "HTTP/1.1") != 0) {
+    if (strncmp(http_protocol, "HTTP/1.1", protocol_len) != 0) {
         return StatusHTTPVersionNotSupported;
     }
 
-    conn->request->method_type = http_method_from_string(conn->request->method);
-    if (!METHOD_VALID(conn->request->method_type)) {
+    req->method_type = http_method_from_string(req->method);
+    if (!METHOD_VALID(req->method_type)) {
         return StatusMethodNotAllowed;
     }
 
@@ -1480,31 +1572,37 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
     }
 
     // We need to parse the headers even for 404.
-    if (!parse_request_headers(conn, conn->request->method_type, headers_len)) {
+    if (!parse_request_headers(conn, req->method_type, headers_len)) {
         return StatusInternalServerError;
     };
 
-    route_t* route = route_match(conn->request->path, conn->request->method_type);
-    if (route) {
-        conn->request->route = route;
-        if (!parse_request_body(conn, headers_len, read_bytes)) {
-            return StatusInternalServerError;
-        }
-    }
-
-    if (route) {
-        // Prefetch response and buffer
-        __builtin_prefetch(conn->response, 0, 3);
-        execute_all_middleware(conn, route);
-        if (!conn->abort) {
-            route->handler(conn);
-        }
-    } else {
+    route_t* route = route_match(req->path, path_len, req->method_type);
+    if (!route) {
         return StatusNotFound;
     }
 
+    req->route = route;
+    if (!parse_request_body(conn, headers_len, read_bytes)) {
+        return StatusInternalServerError;
+    }
+
+    execute_all_middleware(conn, route);
+    if (!conn->abort) {
+        route->handler(conn);
+
+        // Free allocated route params.
+        for (size_t i = 0; i < route->path_params->match_count; i++) {
+            free(route->path_params->params[i].name);
+            free(route->path_params->params[i].value);
+
+            // Set to NULL to avoid double free on exit.
+            route->path_params->params[i].name  = NULL;
+            route->path_params->params[i].value = NULL;
+        }
+    }
+
     // Chunked transfer is handled by the handler directly outside event loop.
-    if (unlikely(HAS_CHUNKED_TRANSFER(conn->response->flags))) {
+    if (HAS_CHUNKED_TRANSFER(conn->response->flags)) {
         if (conn->keep_alive) {
             conn->last_activity = time(NULL);
             AddKeepAliveConnection(conn, state);
@@ -1517,9 +1615,8 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
         request_complete(conn);
 #endif
     } else {
-        finalize_response(conn, conn->request->method_type);
+        finalize_response(conn, req->method_type);
         conn->last_activity = time(NULL);
-        // Switch to writing response.
     }
     return StatusOK;
 }
@@ -1767,10 +1864,9 @@ INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state)
     conn->read_buf[bytes_read] = '\0';
 
     // Process the request and parse the headers / query params.
-    http_status status;
-    if ((status = process_request(conn, (size_t)bytes_read, state, queue_fd)) != StatusOK) {
-        send_error_response(conn, status);
-        return;
+    http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
+    if (status != StatusOK) {
+        write_error(conn, status);
     };
 
     // Switch to writing response.

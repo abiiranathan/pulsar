@@ -181,9 +181,6 @@ pkg-config:
 gcc your_program.c -o your_program $(pkg-config --cflags --libs pulsar)
 ```
 
-## Documentation
-For detailed API documentation, see the [API Reference](docs/API.md).
-
 ## License
 
 Pulsar is licensed under the MIT License. See [LICENSE](LICENSE) for details.

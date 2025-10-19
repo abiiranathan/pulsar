@@ -4,7 +4,7 @@
 #include <string.h>
 
 void LocalsInit(Locals* locals) {
-    // memset(locals->entries, 0, sizeof(locals->entries));
+    memset(locals->entries, 0, sizeof(locals->entries));
     locals->size = 0;
 }
 
@@ -76,11 +76,12 @@ void LocalsRemove(Locals* locals, const char* key) {
 void LocalsReset(Locals* locals) {
     if (!locals) return;
 
-    // Free all values.
     for (size_t i = 0; i < locals->size; ++i) {
         if (locals->entries[i].free_func) {
             locals->entries[i].free_func((void*)locals->entries[i].value);
         }
     }
-    LocalsInit(locals);
+
+    // Just reset size - no need to zero memory
+    locals->size = 0;
 }
