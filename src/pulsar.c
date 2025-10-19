@@ -8,16 +8,18 @@ volatile sig_atomic_t server_running                        = 1;    // Server ru
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global middleware array
 static size_t global_mw_count                               = 0;    // Global middleware count
 static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
+// Global userdata passed to every handler/middleware and logger callback.
+static void* GLOBAL_HANDLER_USERDATA = NULL;
 
 typedef struct KeepAliveState {
-    connection_t* head;
-    connection_t* tail;
+    PulsarConn* head;
+    PulsarConn* tail;
     size_t count;
 } KeepAliveState;
 
 // Forward declarations.
-INLINE void finalize_response(connection_t* conn, HttpMethod method);
-INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state);
+INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
+INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_state);
 
 INLINE int get_num_available_cores() {
     return sysconf(_SC_NPROCESSORS_ONLN);
@@ -27,7 +29,7 @@ INLINE bool conn_timedout(time_t now, time_t last_activity) {
     return (now - last_activity) > CONNECTION_TIMEOUT;
 }
 
-INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+INLINE void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     if (!conn->in_keep_alive) {
         return;
     }
@@ -52,7 +54,7 @@ INLINE void RemoveKeepAliveConnection(connection_t* conn, KeepAliveState* state)
     conn->in_keep_alive = false;
 }
 
-INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
+INLINE void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     if (conn->in_keep_alive) return;
 
     // Add to front
@@ -71,10 +73,10 @@ INLINE void AddKeepAliveConnection(connection_t* conn, KeepAliveState* state) {
 }
 
 INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
-    connection_t* current = state->head;
-    time_t now            = time(NULL);
+    PulsarConn* current = state->head;
+    time_t now          = time(NULL);
     while (current) {
-        connection_t* next = current->next;
+        PulsarConn* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
             // printf("Worker %d: closing timeout connection: %p\n", worker_id, (void*)current);
             UNUSED(worker_id);
@@ -191,7 +193,7 @@ INLINE void free_response(response_t* resp) {
     }
 }
 
-INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
+INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd) {
     conn->closing       = false;
     conn->client_fd     = client_fd;
     conn->keep_alive    = true;
@@ -213,7 +215,7 @@ INLINE bool init_connection(connection_t* conn, Arena* arena, int client_fd) {
     return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
-INLINE bool reset_connection(connection_t* conn) {
+INLINE bool reset_connection(PulsarConn* conn) {
     conn->closing    = false;
     conn->keep_alive = true;    // Default to Keep-Alive
     conn->abort      = false;   // Connection not aborted
@@ -247,7 +249,7 @@ INLINE bool reset_connection(connection_t* conn) {
  * Updated Connection Management Functions
  * ================================================================ */
 
-INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* ka_state) {
+INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_state) {
     if (!conn || conn->client_fd == -1) return;
 
     event_delete(queue_fd, conn->client_fd);
@@ -266,7 +268,7 @@ INLINE void close_connection(int queue_fd, connection_t* conn, KeepAliveState* k
 }
 
 // Send an error response during request processing.
-INLINE void write_error(connection_t* conn, http_status status) {
+INLINE void write_error(PulsarConn* conn, http_status status) {
     const char* status_text = conn_set_status(conn, status);  // is non-NULL.
     conn_set_content_type(conn, PLAINTEXT_TYPE);
     conn_write_string(conn, status_text);
@@ -279,7 +281,7 @@ INLINE void write_error(connection_t* conn, http_status status) {
  * Request Parsing Functions
  * ================================================================ */
 
-INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method,
+INLINE bool parse_request_headers(PulsarConn* restrict conn, HttpMethod method,
                                   size_t headers_len) {
     const char* restrict ptr = conn->read_buf;
     const char* const end    = ptr + headers_len;
@@ -354,7 +356,7 @@ INLINE bool parse_request_headers(connection_t* restrict conn, HttpMethod method
     return true;
 }
 
-INLINE bool parse_query_params(connection_t* conn) {
+INLINE bool parse_query_params(PulsarConn* conn) {
     char* path  = conn->request->path;
     char* query = strchr(path, '?');
     if (!query) return true;
@@ -382,7 +384,7 @@ INLINE bool parse_query_params(connection_t* conn) {
     return true;
 }
 
-INLINE bool parse_request_body(connection_t* conn, size_t headers_len, size_t read_bytes) {
+INLINE bool parse_request_body(PulsarConn* conn, size_t headers_len, size_t read_bytes) {
     if (conn->request->content_length == 0) return true;
 
     request_t* req        = conn->request;
@@ -430,34 +432,34 @@ Request getters.
 */
 
 // Returns request body or NULL if not available.
-const char* req_body(connection_t* conn) {
+const char* req_body(PulsarConn* conn) {
     return conn->request->body;
 }
 
-const char* req_method(connection_t* conn) {
+const char* req_method(PulsarConn* conn) {
     return conn->request->method;
 }
 
-const char* req_path(connection_t* conn) {
+const char* req_path(PulsarConn* conn) {
     return conn->request->path;
 }
 
 // Get value for a query parameter if present or NULL.
-const char* query_get(connection_t* conn, const char* name) {
+const char* query_get(PulsarConn* conn, const char* name) {
     if (!conn->request->query_params) return NULL;  // no query params.
     return headers_get(conn->request->query_params, name);
 }
 
-headers_t* query_params(connection_t* conn) {
+headers_t* query_params(PulsarConn* conn) {
     return conn->request->query_params;
 }
 
-const char* req_header_get(connection_t* conn, const char* name) {
+const char* req_header_get(PulsarConn* conn, const char* name) {
     return headers_get(conn->request->headers, name);
 }
 
 // Returns request body size. (Content-Length).
-size_t req_content_len(connection_t* conn) {
+size_t req_content_len(PulsarConn* conn) {
     return conn->request->content_length;
 }
 
@@ -473,7 +475,7 @@ static inline int format_status_code(char* restrict dest, int code) {
     return 3;
 }
 
-const char* conn_set_status(connection_t* restrict conn, http_status code) {
+const char* conn_set_status(PulsarConn* restrict conn, http_status code) {
     const status_info_t* status = get_http_status(code);
     response_t* res             = conn->response;
     res->status_code            = code;
@@ -489,7 +491,7 @@ const char* conn_set_status(connection_t* restrict conn, http_status code) {
 
 // Get the value of a response header. Returns a dynamically allocated char* pointer or NULL
 // If header does not exist or malloc fails.
-char* res_header_get(connection_t* conn, const char* name) {
+char* res_header_get(PulsarConn* conn, const char* name) {
     response_t* res = conn->response;
     char* buf       = res->headers_buf;
 
@@ -516,7 +518,7 @@ char* res_header_get(connection_t* conn, const char* name) {
 
 // Get the value of a response header, copying it into the buffer of size dest_size.
 // Returns true on success or false if buffer is very small or header not found.
-bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t dest_size) {
+bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t dest_size) {
     response_t* res = conn->response;
     char* buf       = res->headers_buf;
 
@@ -544,11 +546,11 @@ bool res_header_get_buf(connection_t* conn, const char* name, char* dest, size_t
     return dest;
 }
 
-http_status res_get_status(connection_t* conn) {
+http_status res_get_status(PulsarConn* conn) {
     return conn->response->status_code;
 }
 
-void conn_writeheader(connection_t* conn, const char* name, const char* value) {
+void conn_writeheader(PulsarConn* conn, const char* name, const char* value) {
     // Calculate lengths once
     size_t name_len  = strlen(name);
     size_t value_len = strlen(value);
@@ -580,7 +582,7 @@ void conn_writeheader(connection_t* conn, const char* name, const char* value) {
     // resp->headers_buf[resp->headers_len] = '\0';
 }
 
-void conn_writeheader_raw(connection_t* conn, const char* header, size_t length) {
+void conn_writeheader_raw(PulsarConn* conn, const char* header, size_t length) {
     response_t* resp = conn->response;
     size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
     if (length > remaining) {
@@ -595,7 +597,7 @@ void conn_writeheader_raw(connection_t* conn, const char* header, size_t length)
     // resp->headers_buf[resp->headers_len] = '\0';
 }
 
-void conn_writeheaders_vec(connection_t* conn, const struct iovec* headers, size_t count) {
+void conn_writeheaders_vec(PulsarConn* conn, const struct iovec* headers, size_t count) {
     response_t* resp = conn->response;
 
     // Calculate total length first
@@ -620,7 +622,7 @@ void conn_writeheaders_vec(connection_t* conn, const struct iovec* headers, size
     resp->headers_len += total_len;
 }
 
-void conn_set_content_type(connection_t* conn, const char* content_type) {
+void conn_set_content_type(PulsarConn* conn, const char* content_type) {
     if (HAS_CONTENT_TYPE(conn->response->flags)) {
         return;
     }
@@ -629,7 +631,7 @@ void conn_set_content_type(connection_t* conn, const char* content_type) {
     SET_CONTENT_TYPE(conn->response->flags);
 }
 
-int conn_write(connection_t* conn, const void* data, size_t len) {
+int conn_write(PulsarConn* conn, const void* data, size_t len) {
     response_t* res = conn->response;
     size_t body_len = res->body_len;
     size_t required = body_len + len;
@@ -706,17 +708,17 @@ int conn_write(connection_t* conn, const void* data, size_t len) {
 }
 
 // Send a 404 response (StatusNotFound)
-int conn_notfound(connection_t* conn) {
+int conn_notfound(PulsarConn* conn) {
     conn_set_status(conn, StatusNotFound);
     conn_set_content_type(conn, PLAINTEXT_TYPE);
     return conn_write(conn, "404 Not Found", 13);
 }
 
-int conn_write_string(connection_t* conn, const char* str) {
+int conn_write_string(PulsarConn* conn, const char* str) {
     return str ? conn_write(conn, str, strlen(str)) : 0;
 }
 
-__attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const char* restrict fmt,
+__attribute__((format(printf, 2, 3))) int conn_writef(PulsarConn* conn, const char* restrict fmt,
                                                       ...) {
     va_list args;
     char stack_buf[1024];
@@ -750,34 +752,34 @@ __attribute__((format(printf, 2, 3))) int conn_writef(connection_t* conn, const 
     return result;
 }
 
-void conn_abort(connection_t* conn) {
+void conn_abort(PulsarConn* conn) {
     conn->abort = true;
 }
 
-void conn_send(connection_t* conn, http_status status, const void* data, size_t length) {
+void conn_send(PulsarConn* conn, http_status status, const void* data, size_t length) {
     conn_set_status(conn, status);
     conn_write(conn, data, length);
 }
 
-void conn_send_json(connection_t* conn, http_status status, const char* json) {
+void conn_send_json(PulsarConn* conn, http_status status, const char* json) {
     conn_writeheader_raw(conn, "Content-Type: application/json\r\n", 32);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, json, strlen(json));
 }
 
-void conn_send_html(connection_t* conn, http_status status, const char* html) {
+void conn_send_html(PulsarConn* conn, http_status status, const char* html) {
     conn_writeheader_raw(conn, "Content-Type: text/html\r\n", 25);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, html, strlen(html));
 }
 
-void conn_send_text(connection_t* conn, http_status status, const char* text) {
+void conn_send_text(PulsarConn* conn, http_status status, const char* text) {
     conn_writeheader_raw(conn, "Content-Type: text/plain\r\n", 26);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, text, strlen(text));
 }
 
-void conn_send_redirect(connection_t* conn, const char* location, bool permanent) {
+void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) {
     // Set status code
     conn_set_status(conn, permanent ? StatusMovedPermanently : StatusFound);
 
@@ -804,26 +806,26 @@ void conn_send_redirect(connection_t* conn, const char* location, bool permanent
     // resp->headers_buf[resp->headers_len] = '\0';
 }
 
-void conn_send_xml(connection_t* conn, http_status status, const char* xml) {
+void conn_send_xml(PulsarConn* conn, http_status status, const char* xml) {
     conn_writeheader_raw(conn, "Content-Type: application/xml\r\n", 31);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, xml, strlen(xml));
 }
 
-void conn_send_javascript(connection_t* conn, http_status status, const char* javascript) {
+void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript) {
     conn_writeheader_raw(conn, "Content-Type: application/javascript\r\n", 38);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, javascript, strlen(javascript));
 }
 
-void conn_send_css(connection_t* conn, http_status status, const char* css) {
+void conn_send_css(PulsarConn* conn, http_status status, const char* css) {
     conn_writeheader_raw(conn, "Content-Type: text/css\r\n", 24);
     SET_CONTENT_TYPE(conn->response->flags);
     conn_send(conn, status, css, strlen(css));
 }
 
 // Start SSE event.
-void conn_start_sse(connection_t* conn) {
+void conn_start_sse(PulsarConn* conn) {
     // Set status and SSE headers
     conn_set_status(conn, StatusOK);
 
@@ -838,7 +840,7 @@ void conn_start_sse(connection_t* conn) {
     SET_CHUNKED_TRANSFER(conn->response->flags);
 }
 
-void conn_start_chunked_transfer(connection_t* conn, int max_age_seconds) {
+void conn_start_chunked_transfer(PulsarConn* conn, int max_age_seconds) {
     // Set status and SSE headers
     conn_set_status(conn, StatusOK);
 
@@ -888,7 +890,7 @@ INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
     return total_written;
 }
 
-INLINE void write_server_headers(connection_t* conn) {
+INLINE void write_server_headers(PulsarConn* conn) {
     char date_buf[64];
     int written;
     conn_writeheader_raw(conn, "Server: Pulsar/1.0\r\n", 20);
@@ -897,7 +899,7 @@ INLINE void write_server_headers(connection_t* conn) {
     conn_writeheader_raw(conn, date_buf, (size_t)written);
 }
 
-ssize_t conn_write_chunk(connection_t* conn, const void* data, size_t size) {
+ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
     struct iovec iov[6];
     int iovcnt = 0;
 
@@ -951,7 +953,7 @@ ssize_t conn_write_chunk(connection_t* conn, const void* data, size_t size) {
 // SSE batch size.
 #define BATCH_SIZE 4096
 
-void conn_send_event(connection_t* conn, const sse_event_t* evt) {
+void conn_send_event(PulsarConn* conn, const sse_event_t* evt) {
     // Handle headers if not yet sent
     bool send_headers = false;
     if (!HAS_HEADERS_WRITTEN(conn->response->flags)) {
@@ -1058,17 +1060,17 @@ void conn_send_event(connection_t* conn, const sse_event_t* evt) {
 }
 
 // End chunked transfer (works for both SSE and generic chunked)
-void conn_end_chunked_transfer(connection_t* conn) {
+void conn_end_chunked_transfer(PulsarConn* conn) {
     conn_write_chunk(conn, NULL, 0);  // Send final chunk
 }
 
 // Alias for backward compatibility
-void conn_end_sse(connection_t* conn) {
+void conn_end_sse(PulsarConn* conn) {
     conn_write_chunk(conn, NULL, 0);  // Send final chunk
 }
 
 // Returns true if connection is still open.
-bool conn_is_open(connection_t* conn) {
+bool conn_is_open(PulsarConn* conn) {
     return conn && (conn->client_fd != -1 && !conn->closing);
 }
 
@@ -1125,7 +1127,7 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
 
 // Write headers for the Content-Range and Accept-Ranges.
 // Also sets the status code for partial content.
-INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, off64_t file_size) {
+INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off64_t file_size) {
     static const char header_fmt[] =
         "Accept-Ranges: bytes\r\n"
         "Content-Length: %ld\r\n"
@@ -1148,7 +1150,7 @@ INLINE void send_range_headers(connection_t* conn, ssize_t start, ssize_t end, o
     conn->closing = true;
 }
 
-bool conn_servefile(connection_t* conn, const char* filename) {
+bool conn_servefile(PulsarConn* conn, const char* filename) {
     if (!filename) return false;
 
     int fd = open(filename, O_RDONLY);
@@ -1211,7 +1213,7 @@ bool conn_servefile(connection_t* conn, const char* filename) {
 }
 
 // Build the complete HTTP response
-INLINE void finalize_response(connection_t* conn, HttpMethod method) {
+INLINE void finalize_response(PulsarConn* conn, HttpMethod method) {
     response_t* resp = conn->response;
     if (resp->status_len == 0) conn_set_status(conn, StatusOK);
 
@@ -1248,7 +1250,8 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
     resp->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
 }
 
-void static_file_handler(connection_t* conn) {
+void static_file_handler(PulsarConn* conn, void* userdata) {
+    UNUSED(userdata);
     route_t* route = conn->request->route;
     ASSERT(route->is_static);
 
@@ -1355,7 +1358,7 @@ void static_file_handler(connection_t* conn) {
     }
 }
 
-const char* get_path_param(connection_t* conn, const char* name) {
+const char* get_path_param(PulsarConn* conn, const char* name) {
     if (!conn || !name) return NULL;
 
     route_t* route = conn->request->route;
@@ -1371,13 +1374,13 @@ const char* get_path_param(connection_t* conn, const char* name) {
     return NULL;
 }
 
-INLINE void execute_all_middleware(connection_t* conn, route_t* route) {
+INLINE void execute_all_middleware(PulsarConn* conn, route_t* route) {
 #define EXECUTE_MIDDLEWARE(mw, count)                                                              \
     do {                                                                                           \
         size_t index = 0;                                                                          \
         if (count > 0) {                                                                           \
             while (index < count) {                                                                \
-                mw[index++](conn);                                                                 \
+                mw[index++](conn, GLOBAL_HANDLER_USERDATA);                                        \
                 if (conn->abort) {                                                                 \
                     return;                                                                        \
                 }                                                                                  \
@@ -1408,24 +1411,32 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
     }
 }
 
+void pulsar_set_handler_userdata(void* userdata) {
+    GLOBAL_HANDLER_USERDATA = userdata;
+}
+
+void* pulsar_get_handler_userdata(void) {
+    return GLOBAL_HANDLER_USERDATA;
+}
+
 void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
-bool pulsar_set(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func) {
+bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func) {
     return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
-void* pulsar_get(connection_t* conn, const char* key) {
+void* pulsar_get(PulsarConn* conn, const char* key) {
     return LocalsGetValue(conn->locals, key);
 }
 
-void pulsar_delete(connection_t* conn, const char* key) {
+void pulsar_delete(PulsarConn* conn, const char* key) {
     LocalsRemove(conn->locals, key);
 }
 
 #if ENABLE_LOGGING
-INLINE void request_complete(connection_t* conn) {
+INLINE void request_complete(PulsarConn* conn) {
     if (LOGGER_CALLBACK) {
         struct timespec end;
         clock_gettime(CLOCK_MONOTONIC, &end);
@@ -1434,7 +1445,7 @@ INLINE void request_complete(connection_t* conn) {
             (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
         uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + (size_t)end.tv_nsec;
         uint64_t latency_ns = end_ns - start_ns;
-        LOGGER_CALLBACK(conn, latency_ns);
+        LOGGER_CALLBACK(conn, latency_ns, GLOBAL_HANDLER_USERDATA);
     }
 }
 #endif
@@ -1531,7 +1542,7 @@ INLINE int parse_request_line(const char* input, size_t input_len, char* method,
 #define RESOLVE(S)  FORMAT(S)
 #define STATUS_LINE ("%7s" RESOLVE(MAX_PATH_LEN) "%15s")
 
-__attribute_warn_unused_result__ INLINE http_status process_request(connection_t* conn,
+__attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* conn,
                                                                     size_t read_bytes,
                                                                     KeepAliveState* state,
                                                                     int queue_fd) {
@@ -1591,7 +1602,7 @@ __attribute_warn_unused_result__ INLINE http_status process_request(connection_t
 
     execute_all_middleware(conn, route);
     if (!conn->abort) {
-        route->handler(conn);
+        route->handler(conn, GLOBAL_HANDLER_USERDATA);
     }
 
     // Chunked transfer is handled by the handler directly outside event loop.
@@ -1808,7 +1819,7 @@ INLINE int conn_accept(int worker_id) {
  * ================================================================ */
 
 INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
-    connection_t* conn = malloc(sizeof(connection_t));
+    PulsarConn* conn = malloc(sizeof(PulsarConn));
     if (!conn) {
         perror("malloc");
         close(client_fd);
@@ -1845,7 +1856,7 @@ INLINE size_t MAX(size_t x, size_t y) {
     return x > y ? x : y;
 }
 
-INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     // Read the headers into connection buffer.
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read <= 0) {
@@ -1869,7 +1880,7 @@ INLINE void handle_read(int queue_fd, connection_t* conn, KeepAliveState* state)
     }
 }
 
-INLINE void handle_write(int queue_fd, connection_t* conn, KeepAliveState* state) {
+INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
 
     response_t* res         = conn->response;
@@ -2155,7 +2166,7 @@ void* worker_thread(void* arg) {
                     add_connection_to_worker(queue_fd, client_fd);
                 }
             } else {
-                connection_t* conn = (connection_t*)event_get_data(event);
+                PulsarConn* conn = (PulsarConn*)event_get_data(event);
                 if (!conn) continue;
 
                 if (event_is_read(event)) {

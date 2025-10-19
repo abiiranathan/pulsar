@@ -100,7 +100,7 @@ typedef struct request_t {
 } request_t;
 
 // Connection state structure
-typedef struct connection_t {
+struct pulsar_conn {
     int client_fd;              // Client socket file descriptor
     char* read_buf;             // Buffer for incoming data.
     Locals* locals;             // Per-request context variables set by the user.
@@ -113,12 +113,12 @@ typedef struct connection_t {
     time_t last_activity;  // Timestamp of last I/O activity
 
     // Linked List nodes.
-    struct connection_t* next;
-    struct connection_t* prev;
+    struct pulsar_conn* next;
+    struct pulsar_conn* prev;
     bool closing;        // Server closing because of an error.
     bool keep_alive;     // Keep-alive flag
     bool abort;          // Abort handler/middleware processing
     bool in_keep_alive;  // Flag for a tracked connection
-} connection_t;
+};
 
 #endif /* COMMON_H */

@@ -25,13 +25,14 @@ typedef struct PathParams {
 // Forward declaration for main connection structure defined in pulsar.c.
 // This avoid circular imports and need to make everything public.
 // We want to keep the struct Opaque.
-struct connection_t;
+struct pulsar_conn;
 
 // Http handler function pointer.
 // This is also the same signature for the middleware.
-// If its returns false, a 500 response is sent unless another code was already set.
-// If a middleware was being executed, the chain will be aborted and handler will never be called.
-typedef void (*HttpHandler)(struct connection_t* conn);
+// Handlers and middleware now receive a second `userdata` pointer which is set
+// globally via `pulsar_set_handler_userdata`. This allows passing DB connections,
+// loggers, etc. to every handler without changing per-route registration.
+typedef void (*HttpHandler)(struct pulsar_conn* conn, void* userdata);
 
 typedef HttpHandler Middleware;  // Middleware function is same as the handler.
 

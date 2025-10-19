@@ -1,6 +1,7 @@
 #include <pulsar/pulsar.h>
 
-void hello_handler(connection_t* conn) {
+void hello_handler(connection_t* conn, void* userdata) {
+    UNUSED(userdata);
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "text/plain");
     conn_write_string(conn, "Hello World!");

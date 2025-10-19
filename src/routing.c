@@ -3,7 +3,7 @@
 #include "../include/method.h"
 
 // Static file handler is provided by pulsar.c.
-extern void static_file_handler(struct connection_t* conn);
+extern void static_file_handler(struct pulsar_conn* conn, void* userdata);
 
 // Global routes
 static route_t global_routes[MAX_ROUTES] = {0};
