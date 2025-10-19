@@ -35,12 +35,12 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 1024
+#define MAX_EVENTS 4096
 #endif
 
 // Buffer size for incoming request excluding body.
 #ifndef READ_BUFFER_SIZE
-#define READ_BUFFER_SIZE 1024
+#define READ_BUFFER_SIZE 2048
 #endif
 
 // Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
@@ -51,12 +51,12 @@
 // Default buffer size for response body above which allocation happens, allocating
 // WRITE_BUFFER_SIZE.
 #ifndef STACK_BUFFER_SIZE
-#define STACK_BUFFER_SIZE 256
+#define STACK_BUFFER_SIZE 1024
 #endif
 
 // Keep-Alive connection timeout in seconds.
 #ifndef CONNECTION_TIMEOUT
-#define CONNECTION_TIMEOUT 30
+#define CONNECTION_TIMEOUT 60
 #endif
 
 // Max Request body allowed. Default 10 MB
@@ -95,7 +95,7 @@
 
 // Maximum number of connection context variables set by the user.
 #ifndef LOCALS_CAPACITY
-#define LOCALS_CAPACITY 16
+#define LOCALS_CAPACITY 8
 #endif
 
 // Maximum capacity of the locals key.
