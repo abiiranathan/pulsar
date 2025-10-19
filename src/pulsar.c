@@ -1249,10 +1249,12 @@ INLINE void finalize_response(connection_t* conn, HttpMethod method) {
 }
 
 void static_file_handler(connection_t* conn) {
-    route_t* route      = conn->request->route;
+    route_t* route = conn->request->route;
+    ASSERT(route->is_static);
+
     const char* path    = conn->request->path;
-    const char* dirname = route->dirname;
-    size_t dirlen       = route->dirname_len;
+    const char* dirname = route->state.static_.dirname;
+    size_t dirlen       = route->state.static_.dirname_len;
     size_t pattern_len  = route->pattern_len;
 
     // Early validation - single exit point for malicious paths
@@ -1356,12 +1358,12 @@ void static_file_handler(connection_t* conn) {
 const char* get_path_param(connection_t* conn, const char* name) {
     if (!name) return NULL;
     route_t* route = conn->request->route;
-    if (!route) return NULL;
+    if (!route || route->is_static) return NULL;
 
-    PathParams* path_params = route->path_params;
+    PathParams* path_params = route->state.path_params;
     for (size_t i = 0; i < path_params->match_count; i++) {
-        if (strcmp(path_params->params[i].name, name) == 0) {
-            return path_params->params[i].value;
+        if (strcmp(path_params->items[i].name, name) == 0) {
+            return path_params->items[i].value;
         }
     }
     return NULL;

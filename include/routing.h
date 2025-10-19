@@ -9,11 +9,6 @@ extern "C" {
 #include "headers.h"
 #include "method.h"
 
-#define STATIC_ROUTE_FLAG 0x01
-#define NORMAL_ROUTE_FLAG 0x02
-#define ROUTE_CACHE_SIZE  (NEXT_POWER_OF_TWO(MAX_ROUTES))
-#define ROUTE_CACHE_MASK  (ROUTE_CACHE_SIZE - 1)
-
 // Path parameter.
 typedef struct {
     char* name;   // Parameter name
@@ -22,7 +17,7 @@ typedef struct {
 
 // Array structure for path parameters.
 typedef struct PathParams {
-    PathParam* params;    // Array of matched parameters
+    PathParam* items;     // Array of matched parameters
     size_t match_count;   // Number of matched parameters from request path.
     size_t total_params;  // Total parameters counted at startup.
 } PathParams;
@@ -41,16 +36,20 @@ typedef void (*HttpHandler)(struct connection_t* conn);
 typedef HttpHandler Middleware;  // Middleware function is same as the handler.
 
 typedef struct route_t {
-    const char* pattern;      // dynamically allocated route pattern
-    size_t pattern_len;       // Length of the pattern
-    const char* dirname;      // Directory name (for static routes)
-    size_t dirname_len;       // Length of the dirname
-    HttpHandler handler;      // Handler function pointer
-    PathParams* path_params;  // Path parameters
-    uint8_t flags;            // Bit mask for route type. NormalRoute | StaticRoute
-    HttpMethod method;        // Http method.
+    const char* pattern;  // dynamically allocated route pattern
+    uint8_t is_static;    // true for static route.
+    uint8_t pattern_len;  // Length of the pattern
+    HttpMethod method;    // Http method.
+    HttpHandler handler;  // Handler function pointer
+    union {
+        struct {
+            const char* dirname;  // Directory name (for static routes)
+            uint8_t dirname_len;  // Length of the dirname
+        } static_;
+        PathParams* path_params;  // Path parameters
+    } state;
     Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
-    size_t mw_count;                              // Number of middleware
+    uint8_t mw_count;                             // Number of middleware
 } route_t;
 
 // Helper to sort routes after registration such that
