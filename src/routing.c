@@ -233,8 +233,21 @@ INLINE bool route_matches_fast(route_t* route, const char* url, size_t url_lengt
         return match_path_parameters(route->pattern, url, route->state.path_params, arena);
     }
 
-    // Unparameterized routes.
-    return (route->pattern_len == url_length) && (memcmp(route->pattern, url, url_length) == 0);
+    // Unparameterized routes - handle trailing slashes
+    const char* pat     = route->pattern;
+    const char* url_ptr = url;
+    size_t pat_len      = route->pattern_len;
+    size_t url_len      = url_length;
+
+    // Strip trailing slashes from both pattern and URL for comparison
+    while (pat_len > 1 && pat[pat_len - 1] == '/') {
+        pat_len--;
+    }
+    while (url_len > 1 && url_ptr[url_len - 1] == '/') {
+        url_len--;
+    }
+
+    return (pat_len == url_len) && (memcmp(pat, url_ptr, url_len) == 0);
 }
 
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
