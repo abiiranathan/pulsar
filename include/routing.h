@@ -59,6 +59,41 @@ void sort_routes(void);
 // Register a new route.
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler);
 
+// Register a /GET route.
+static inline route_t* route_get(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_GET, handler);
+}
+
+// Register a /POST route.
+static inline route_t* route_post(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_POST, handler);
+}
+
+// Register a /PUT route.
+static inline route_t* route_put(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_PUT, handler);
+}
+
+// Register a /PATCH route.
+static inline route_t* route_patch(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_PATCH, handler);
+}
+
+// Register a /HEAD route.
+static inline route_t* route_head(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_HEAD, handler);
+}
+
+// Register a /OPTIONS route.
+static inline route_t* route_options(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_OPTIONS, handler);
+}
+
+// Register a /DELETE route.
+static inline route_t* route_delete(const char* pattern, HttpHandler handler) {
+    return route_register(pattern, HTTP_DELETE, handler);
+}
+
 // Register a new route to server static file in directory at dir.
 // dir must be a resolved path and must exist and pattern not NULL.
 // Handles serving of index.html at root of directory. File System Traversal

@@ -1412,16 +1412,15 @@ void pulsar_set_callback(PulsarCallback cb) {
     LOGGER_CALLBACK = cb;
 }
 
-bool pulsar_set_context_value(connection_t* conn, const char* key, void* value,
-                              ValueFreeFunc free_func) {
+bool pulsar_set(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func) {
     return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
-void* pulsar_get_context_value(connection_t* conn, const char* key) {
+void* pulsar_get(connection_t* conn, const char* key) {
     return LocalsGetValue(conn->locals, key);
 }
 
-void pulsar_delete_context_value(connection_t* conn, const char* key) {
+void pulsar_delete(connection_t* conn, const char* key) {
     LocalsRemove(conn->locals, key);
 }
 

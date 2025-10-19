@@ -360,12 +360,12 @@ void pulsar_callback(connection_t* conn, uint64_t total_ns) {
 }
 
 void mw1(connection_t* conn) {
-    pulsar_set_context_value(conn, "name", "PULSAR", NULL);
+    pulsar_set(conn, "name", "PULSAR", NULL);
 }
 
 void mw2(connection_t* conn) {
     // value retrieved from context.
-    char* value = pulsar_get_context_value(conn, "name");
+    char* value = pulsar_get(conn, "name");
     printf("Context value: %s\n", value);
 }
 
@@ -376,19 +376,18 @@ int main() {
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
 
-    route_t* hello   = route_register("/hello", HTTP_GET, hello_world_handler);
+    route_t* hello   = route_get("/hello", hello_world_handler);
     Middleware mw[2] = {mw1, mw2};
     use_route_middleware(hello, mw, 2);
 
-    route_register("/json", HTTP_GET, json_handler);
-    route_register("/sse", HTTP_GET, sse_handler);
-    route_register("/chunked", HTTP_GET, chunked_handler);
-    route_register("/echo", HTTP_GET, echo_handler);
-    route_register("/echo", HTTP_POST, echo_handler);
-    route_register("/params/{user_id}/{username}", HTTP_GET, pathparams_query_params_handler);
-    route_register("/form", HTTP_POST, handle_form);
-    route_register("/movie", HTTP_GET, serve_movie);
-
+    route_get("/json", json_handler);
+    route_get("/sse", sse_handler);
+    route_get("/chunked", chunked_handler);
+    route_get("/echo", echo_handler);
+    route_get("/params/{user_id}/{username}", pathparams_query_params_handler);
+    route_post("/echo", echo_handler);
+    route_post("/form", handle_form);
+    route_get("/movie", serve_movie);
     route_static("/static/", "./");
 
     return pulsar_run("localhost", 8080);

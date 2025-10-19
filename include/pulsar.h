@@ -80,18 +80,16 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
  */
 void pulsar_set_callback(PulsarCallback cb);
 
-void pulsar_set_locals_callback(LocalsCreateCallback callback);
-
 // Set a user-owned value pointer to the context with a callback function to free the value.
+// The function may be NULL if the value is not to be freed.
 // Returns true on success.
-bool pulsar_set_context_value(connection_t* conn, const char* key, void* value,
-                              ValueFreeFunc free_func);
+bool pulsar_set(connection_t* conn, const char* key, void* value, ValueFreeFunc free_func);
 
-// Get a context value.
-void* pulsar_get_context_value(connection_t* conn, const char* key);
+// Get a context value stored with pulsar_set.
+void* pulsar_get(connection_t* conn, const char* key);
 
-// Delete the context value.
-void pulsar_delete_context_value(connection_t* conn, const char* key);
+// Delete the context value stored with pulsar_set.
+void pulsar_delete(connection_t* conn, const char* key);
 
 /**
  * @brief Serves a file as the response
