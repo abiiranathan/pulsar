@@ -35,6 +35,19 @@ struct pulsar_conn;
 typedef void (*HttpHandler)(struct pulsar_conn* conn, void* userdata);
 
 typedef HttpHandler Middleware;  // Middleware function is same as the handler.
+struct route_t;                  // Forward declaration
+
+typedef union {
+    struct {
+        const char* dirname;  // Directory name (for static routes)
+        uint8_t dirname_len;  // Length of the dirname
+    } static_;
+    PathParams* path_params;  // Path parameters
+} route_state_t;
+
+// Route matching functions for each type
+typedef bool (*route_matcher_t)(struct route_t* route, const char* url, size_t url_length,
+                                Arena* arena);
 
 typedef struct route_t {
     const char* pattern;  // dynamically allocated route pattern
@@ -42,13 +55,8 @@ typedef struct route_t {
     uint8_t pattern_len;  // Length of the pattern
     HttpMethod method;    // Http method.
     HttpHandler handler;  // Handler function pointer
-    union {
-        struct {
-            const char* dirname;  // Directory name (for static routes)
-            uint8_t dirname_len;  // Length of the dirname
-        } static_;
-        PathParams* path_params;  // Path parameters
-    } state;
+    route_state_t state;
+    route_matcher_t matcher;
     Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Array of middleware
     uint8_t mw_count;                             // Number of middleware
 } route_t;

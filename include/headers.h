@@ -26,7 +26,7 @@ typedef struct {
 // Initialize headers
 INLINE headers_t* headers_new(Arena* arena) {
     headers_t* headers = arena_alloc(arena, sizeof(headers_t));
-    if (unlikely(!headers)) return NULL;
+    if (!headers) return NULL;
     headers->arena = arena;
     headers->count = 0;
     // headers->entries not zeroed as an optimization.
@@ -35,13 +35,13 @@ INLINE headers_t* headers_new(Arena* arena) {
 
 // Set a header (case-insensitive)
 INLINE bool headers_set(headers_t* headers, const char* name, const char* value) {
-    if (unlikely(headers->count >= HEADERS_CAPACITY)) return false;
+    if (headers->count >= HEADERS_CAPACITY) return false;
 
     // Check if header already exists (update if found)
     for (size_t i = 0; i < headers->count; i++) {
         if (strcasecmp(headers->entries[i].name, name) == 0) {
             char* new_value = arena_strdup(headers->arena, value);
-            if (unlikely(!new_value)) return false;
+            if (!new_value) return false;
 
             headers->entries[i].value = new_value;
 
@@ -54,15 +54,18 @@ INLINE bool headers_set(headers_t* headers, const char* name, const char* value)
     }
 
 new_header:
+    bool state = false;
     // Add new header with copied strings
     char* new_name  = arena_strdup(headers->arena, name);
     char* new_value = arena_strdup(headers->arena, value);
-    if (unlikely(!new_name || !new_value)) return false;
+    if (new_name && new_value) {
+        headers->entries[headers->count].name  = new_name;
+        headers->entries[headers->count].value = new_value;
+        headers->count++;
+        state = true;
+    }
 
-    headers->entries[headers->count].name  = new_name;
-    headers->entries[headers->count].value = new_value;
-    headers->count++;
-    return true;
+    return state;
 }
 
 // Get a header (case-insensitive)

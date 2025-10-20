@@ -119,6 +119,7 @@ struct pulsar_conn {
     bool keep_alive;     // Keep-alive flag
     bool abort;          // Abort handler/middleware processing
     bool in_keep_alive;  // Flag for a tracked connection
+    int worker_id;       // ID of the current worker running the thread.
 };
 
 #endif /* COMMON_H */

@@ -19,12 +19,16 @@ typedef enum : int8_t {
     HTTP_OPTIONS,
 } HttpMethod;
 
-#define METHOD_VALID(method) ((method) > HTTP_INVALID && (method) <= HTTP_OPTIONS)
-#define SAFE_METHOD(method)  (((method) == HTTP_GET || (method) == HTTP_OPTIONS || (method) == HTTP_HEAD))
+#define HTTP_METHOD_COUNT 7
 
-static char* methods[] = {
-    [HTTP_GET] = "GET",       [HTTP_POST] = "POST", [HTTP_PUT] = "PUT",         [HTTP_PATCH] = "PATCH",
-    [HTTP_DELETE] = "DELETE", [HTTP_HEAD] = "HEAD", [HTTP_OPTIONS] = "OPTIONS",
+#define METHOD_VALID(method) ((method) > HTTP_INVALID && (method) <= HTTP_OPTIONS)
+#define SAFE_METHOD(method)                                                                        \
+    (((method) == HTTP_GET || (method) == HTTP_OPTIONS || (method) == HTTP_HEAD))
+
+static const char* methods[] = {
+    [HTTP_GET] = "GET",         [HTTP_POST] = "POST",     [HTTP_PUT] = "PUT",
+    [HTTP_PATCH] = "PATCH",     [HTTP_DELETE] = "DELETE", [HTTP_HEAD] = "HEAD",
+    [HTTP_OPTIONS] = "OPTIONS",
 };
 
 static inline const char* http_method_to_string(const HttpMethod method) {
@@ -34,16 +38,14 @@ static inline const char* http_method_to_string(const HttpMethod method) {
     return methods[method];
 }
 
-static inline HttpMethod http_method_from_string(const char* method) {
-    if (method == NULL) return HTTP_INVALID;
-
-    if (strcmp(method, "GET") == 0) return HTTP_GET;
-    if (strcmp(method, "HEAD") == 0) return HTTP_HEAD;
-    if (strcmp(method, "POST") == 0) return HTTP_POST;
-    if (strcmp(method, "PUT") == 0) return HTTP_PUT;
-    if (strcmp(method, "PATCH") == 0) return HTTP_PATCH;
-    if (strcmp(method, "DELETE") == 0) return HTTP_DELETE;
-    if (strcmp(method, "OPTIONS") == 0) return HTTP_OPTIONS;
+static inline HttpMethod http_method_from_string(const char* method, size_t length) {
+    if (strncmp(method, "GET", length) == 0) return HTTP_GET;
+    if (strncmp(method, "HEAD", length) == 0) return HTTP_HEAD;
+    if (strncmp(method, "POST", length) == 0) return HTTP_POST;
+    if (strncmp(method, "PUT", length) == 0) return HTTP_PUT;
+    if (strncmp(method, "PATCH", length) == 0) return HTTP_PATCH;
+    if (strncmp(method, "DELETE", length) == 0) return HTTP_DELETE;
+    if (strncmp(method, "OPTIONS", length) == 0) return HTTP_OPTIONS;
 
     return HTTP_INVALID;
 }

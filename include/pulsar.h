@@ -56,6 +56,12 @@ typedef Locals* (*LocalsCreateCallback)();
  */
 int pulsar_run(const char* addr, int port);
 
+/** Returns the worker id of the current worker.
+Can be used as an index for per-thread objects because each worker runs in a seperate
+thread. The returned IDs are in the range 0 - NUM_WORKERS.
+*/
+int conn_worker_id(PulsarConn* conn);
+
 // Returns true if connection is still open.
 bool conn_is_open(PulsarConn* conn);
 

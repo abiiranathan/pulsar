@@ -193,9 +193,10 @@ INLINE void free_response(response_t* resp) {
     }
 }
 
-INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd) {
+INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int worker_id) {
     conn->closing       = false;
     conn->client_fd     = client_fd;
+    conn->worker_id     = worker_id;
     conn->keep_alive    = true;
     conn->in_keep_alive = false;
     conn->abort         = false;
@@ -578,7 +579,7 @@ void conn_writeheader(PulsarConn* conn, const char* name, const char* value) {
 
     resp->headers_len += required;
 
-    // Not necessary to be NULL-terminated. Perf->SLOW instruction
+    // Not necessary to be NULL-terminated.
     // resp->headers_buf[resp->headers_len] = '\0';
 }
 
@@ -1074,9 +1075,13 @@ bool conn_is_open(PulsarConn* conn) {
     return conn && (conn->client_fd != -1 && !conn->closing);
 }
 
+int conn_worker_id(PulsarConn* conn) {
+    return conn ? conn->worker_id : 0;
+}
+
 // Parses the Range header and extracts start and end values
-INLINE bool parse_range(const char* range_header, ssize_t* start, ssize_t* end,
-                        bool* has_end_range) {
+INLINE
+bool parse_range(const char* range_header, ssize_t* start, ssize_t* end, bool* has_end_range) {
     if (strstr(range_header, "bytes=") != NULL) {
         if (sscanf(range_header, "bytes=%ld-%ld", start, end) == 2) {
             *has_end_range = true;
@@ -1576,7 +1581,7 @@ __attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* 
         return StatusHTTPVersionNotSupported;
     }
 
-    req->method_type = http_method_from_string(req->method);
+    req->method_type = http_method_from_string(req->method, method_len);
     if (!METHOD_VALID(req->method_type)) {
         return StatusMethodNotAllowed;
     }
@@ -1818,7 +1823,7 @@ INLINE int conn_accept(int worker_id) {
  * Socket and Connection I/O Functions
  * ================================================================ */
 
-INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
+INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id) {
     PulsarConn* conn = malloc(sizeof(PulsarConn));
     if (!conn) {
         perror("malloc");
@@ -1834,7 +1839,7 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd) {
         return;
     }
 
-    if (!init_connection(conn, arena, client_fd)) {
+    if (!init_connection(conn, arena, client_fd, worker_id)) {
         fprintf(stderr, "init_connection failed\n");
         close(client_fd);
         free(conn);
@@ -2069,10 +2074,10 @@ handle_error:
  * ================================================================ */
 
 typedef struct {
-    int queue_fd;
-    int worker_id;
-    int designated_core;
-    KeepAliveState* keep_alive_state;
+    int queue_fd;                      // Epoll fd for this worker.
+    int id;                            // Worker ID
+    int designated_core;               // CPU core to pin worker to.
+    KeepAliveState* keep_alive_state;  // KeepAlive state.
 } WorkerData;
 
 int pin_current_thread_to_core(int core_id) {
@@ -2123,7 +2128,7 @@ int pin_current_thread_to_core(int core_id) {
 void* worker_thread(void* arg) {
     WorkerData* worker       = (WorkerData*)arg;
     int queue_fd             = worker->queue_fd;
-    int worker_id            = worker->worker_id;
+    int worker_id            = worker->id;
     int cpu_core             = worker->designated_core;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
@@ -2163,11 +2168,14 @@ void* worker_thread(void* arg) {
             if (event_get_fd(event) == server_fd) {
                 int client_fd = conn_accept(worker_id);
                 if (client_fd > 0) {
-                    add_connection_to_worker(queue_fd, client_fd);
+                    add_connection_to_worker(queue_fd, client_fd, worker_id);
                 }
             } else {
                 PulsarConn* conn = (PulsarConn*)event_get_data(event);
                 if (!conn) continue;
+
+                // Make sure the worker_id was not reset
+                conn->worker_id = worker_id;
 
                 if (event_is_read(event)) {
                     handle_read(queue_fd, conn, ka_state);
@@ -2221,7 +2229,7 @@ int pulsar_run(const char* addr, int port) {
         }
 
         worker_data[i].queue_fd         = queue_fd;
-        worker_data[i].worker_id        = i;
+        worker_data[i].id               = i;
         worker_data[i].designated_core  = i % ((size_t)(num_cores - reserved_cores));
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
