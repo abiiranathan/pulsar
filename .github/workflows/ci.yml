@@ -28,7 +28,7 @@ jobs:
       - name: Install CMake and Ninja
         uses: lukka/get-cmake@latest
         with:
-          cmakeVersion: 3.25.x
+          cmakeVersion: 3.30.x
 
       - name: Install system dependencies (build-essential, ninja)
         run: |
