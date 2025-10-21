@@ -23,47 +23,83 @@ jobs:
       fail-fast: false
 
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-    - name: Install CMake and Ninja
-      uses: lukka/get-cmake@latest
-      with:
-        cmakeVersion: 3.25.x
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 3.25.x
 
-    - name: Install dependencies
-      run: |
-        if [[ "$RUNNER_OS" == "Linux" ]]; then
-          sudo apt-get update
-          sudo apt-get install -y build-essential ninja-build
-        elif [[ "$RUNNER_OS" == "macOS" ]]; then
-          brew update
-          brew install ninja
-        fi
+      - name: Install system dependencies (build-essential, ninja)
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential ninja-build
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew update
+            brew install ninja
+          fi
 
-    - name: Configure CMake with Ninja
-      run: |
-        cmake -B build \
-          -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DBUILD_TESTS=ON \
-          -DCMAKE_C_COMPILER=${{ matrix.cc }} \
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
-          -DCMAKE_MAKE_PROGRAM=ninja
+      # --- Start of new steps for solidc dependency ---
+      - name: Clone solidc repository
+        run: git clone https://github.com/abiiranathan/solidc solidc_dependency
 
-    - name: Build with Ninja
-      run: |
-        cmake --build build --config ${{ matrix.build_type }} --parallel 4
+      - name: Build and install solidc
+        run: |
+          # Create a build directory for solidc
+          mkdir solidc_dependency/build
+          cd solidc_dependency/build
 
-    - name: Run Tests
-      run: |
-        cd build
-        ctest --output-on-failure --parallel 4
+          # Configure solidc with CMake/Ninja. 
+          # Install to a path that CMake can find easily, like /usr/local/
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_MAKE_PROGRAM=ninja
 
-    - name: Verify Installation
-      run: |
-        cmake --install build --prefix ./install
-        if [[ "$RUNNER_OS" == "Linux" ]]; then
-          ldd install/lib/libpulsar.so
-        elif [[ "$RUNNER_OS" == "macOS" ]]; then
-          otool -L install/lib/libpulsar.dylib
-        fi
+          # Build solidc
+          cmake --build . --config Release --parallel 4
+
+          # Install solidc system-wide (requires sudo on Linux/macOS)
+          sudo cmake --install .
+
+          # Go back to the root of the main project
+          cd ../..
+      # --- End of new steps for solidc dependency ---
+      - name: Configure CMake with Ninja
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_MAKE_PROGRAM=ninja
+
+      - name: Build with Ninja
+        run: |
+          cmake --build build --config ${{ matrix.build_type }} --parallel 4
+
+      - name: Run Tests
+        run: |
+          cd build
+          ctest --output-on-failure --parallel 4
+
+      - name: Verify Installation
+        run: |
+          cmake --install build --prefix ./install
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # Check dynamic linking for Linux
+            ldd install/lib/libpulsar.so
+            # Check for solidc as well (assuming libpulsar links to it)
+            ldd install/lib/libpulsar.so | grep solidc
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Check dynamic linking for macOS
+            otool -L install/lib/libpulsar.dylib
+            # Check for solidc as well (assuming libpulsar links to it)
+            otool -L install/lib/libpulsar.dylib | grep solidc
+          fi
