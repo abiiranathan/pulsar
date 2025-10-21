@@ -1258,7 +1258,7 @@ INLINE void finalize_response(PulsarConn* conn, HttpMethod method) {
 void static_file_handler(PulsarConn* conn, void* userdata) {
     UNUSED(userdata);
     route_t* route = conn->request->route;
-    ASSERT(route->is_static);
+    ASSERT(route->route_type == ROUTE_TYPE_STATIC);
 
     const char* path    = conn->request->path;
     const char* dirname = route->state.static_.dirname;
@@ -1367,13 +1367,14 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
     if (!conn || !name) return NULL;
 
     route_t* route = conn->request->route;
-    if (!route || route->is_static) return NULL;
-    PathParams* path_params = route->state.path_params;
-    if (!path_params) return NULL;
+    if (route && route->route_type == ROUTE_TYPE_PARAM) {
+        PathParams* pp = route->state.path_params;
+        if (!pp) return NULL;
 
-    for (size_t i = 0; i < path_params->match_count; i++) {
-        if (strcmp(path_params->items[i].name, name) == 0) {
-            return path_params->items[i].value;
+        for (size_t i = 0; i < pp->match_count; i++) {
+            if (strcmp(pp->items[i].name, name) == 0) {
+                return pp->items[i].value;
+            }
         }
     }
     return NULL;
