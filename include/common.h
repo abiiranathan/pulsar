@@ -65,8 +65,8 @@ typedef struct response_t {
     bool heap_allocated;                 // If heap allocation is used.
     union {
         uint8_t stack[STACK_BUFFER_SIZE];  // stack buffer for smaller responses
-        uint8_t* heap;  // Dynamically allocated body buffer. (not null-terminated)
-    } body;             // Response body.
+        uint8_t* heap;                     // Dynamically allocated body buffer. (not null-terminated)
+    } body;                                // Response body.
 
     // Pre-computed lengths of status line, headers, body.
     size_t body_len;       // Actual length of body

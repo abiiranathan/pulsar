@@ -99,8 +99,7 @@ MultipartCode multipart_init(MultipartForm* form, size_t memory);
  *
  * @note The boundary should match the Content-Type header value
  */
-MultipartCode multipart_parse(const char* data, size_t size, const char* boundary,
-                              MultipartForm* form);
+MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form);
 
 /**
  * @brief Free all resources associated with a form
@@ -132,8 +131,7 @@ FileHeader* multipart_file(const MultipartForm* form, const char* field_name);
  * @param max_indices Array size of out_indices.
  * @return size_t Number of matches in out_indices array.
  */
-size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices,
-                       size_t max_indices);
+size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices, size_t max_indices);
 
 /**
  * @brief Save file contents to disk

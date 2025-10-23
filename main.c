@@ -86,13 +86,12 @@ void chunked_handler(PulsarConn* conn, void* userdata) {
             size_t remaining = sizeof(multi_line) - 1;
 
             for (int i = 0; i < 20 && remaining > 100; i++) {
-                int written =
-                    snprintf(pos, remaining,
-                             "Line %d: This is a very long line of text that exceeds normal sizes. "
-                             "It contains repeated information to make it longer and test large "
-                             "chunk handling. "
-                             "Data data data data data data data data data data data data.\n",
-                             i);
+                int written = snprintf(pos, remaining,
+                                       "Line %d: This is a very long line of text that exceeds normal sizes. "
+                                       "It contains repeated information to make it longer and test large "
+                                       "chunk handling. "
+                                       "Data data data data data data data data data data data data.\n",
+                                       i);
                 if (written >= (int)remaining) break;
                 pos += written;
                 remaining -= (size_t)written;
@@ -116,11 +115,10 @@ void chunked_handler(PulsarConn* conn, void* userdata) {
 
             // Add many user objects
             for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
-                len += snprintf(
-                    json_data + len, sizeof(json_data) - (size_t)len,
-                    "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
-                    "\"active\": %s}%s\n",
-                    i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
+                len += snprintf(json_data + len, sizeof(json_data) - (size_t)len,
+                                "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
+                                "\"active\": %s}%s\n",
+                                i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
             }
 
             len += snprintf(json_data + len, sizeof(json_data) - (size_t)len,
@@ -196,10 +194,9 @@ void chunked_handler(PulsarConn* conn, void* userdata) {
             remaining -= (size_t)written;
 
             for (int i = 0; i < 200 && remaining > 80; i++) {
-                written = snprintf(
-                    pos, remaining,
-                    "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n", i,
-                    time(NULL) + i);
+                written =
+                    snprintf(pos, remaining, "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n",
+                             i, time(NULL) + i);
                 if (written >= (int)remaining) break;
                 pos += written;
                 remaining -= (size_t)written;

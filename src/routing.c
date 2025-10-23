@@ -89,8 +89,7 @@ static inline uint8_t classify_route(const char* pattern, bool is_static, uint8_
  * @param is_static True for static file routes
  * @return Pointer to registered route
  */
-static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler,
-                                      int is_static) {
+static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler, int is_static) {
     ASSERT(global_route_count < MAX_ROUTES && "Route table full");
     ASSERT(METHOD_VALID(method) && "Invalid HTTP method");
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
@@ -195,8 +194,7 @@ void sort_routes(void) {
  * Fast exact string comparison optimized for route matching.
  * Checks length first, then first character, then full memcmp.
  */
-static inline bool str_exact_match(const char* pattern, uint16_t pat_len, const char* url,
-                                   size_t url_len) {
+static inline bool str_exact_match(const char* pattern, uint16_t pat_len, const char* url, size_t url_len) {
     return (pat_len == url_len) && (pattern[0] == url[0]) && (memcmp(pattern, url, url_len) == 0);
 }
 
@@ -204,8 +202,7 @@ static inline bool str_exact_match(const char* pattern, uint16_t pat_len, const 
  * Fast prefix match for static routes.
  * Checks if URL starts with pattern.
  */
-static inline bool str_prefix_match(const char* pattern, uint16_t pat_len, const char* url,
-                                    size_t url_len) {
+static inline bool str_prefix_match(const char* pattern, uint16_t pat_len, const char* url, size_t url_len) {
     return (pat_len <= url_len) && (pattern[0] == url[0]) && (memcmp(pattern, url, pat_len) == 0);
 }
 
@@ -217,8 +214,7 @@ static inline bool str_prefix_match(const char* pattern, uint16_t pat_len, const
  * @param arena Arena for string allocations
  * @return true if pattern matches URL and all params extracted
  */
-static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params,
-                                  Arena* arena) {
+static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params, Arena* arena) {
     const char* pat            = pattern;
     const char* url_ptr        = url;
     uint8_t nparams            = 0;
@@ -295,8 +291,7 @@ static inline bool route_matches(route_t* route, const char* url, size_t url_len
  * Searches routes for a specific method.
  * Linear search is optimal for small arrays (< 64 routes per method).
  */
-static inline route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length,
-                                           Arena* arena) {
+static inline route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length, Arena* arena) {
     if (method >= HTTP_METHOD_COUNT) return nullptr;
 
     MethodRoutes* mr     = &method_routes[method];

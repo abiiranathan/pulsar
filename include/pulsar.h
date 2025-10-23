@@ -237,18 +237,18 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size);
 // End SSE or chunked transfer.
 void conn_end_chunked_transfer(PulsarConn* conn);
 
-#define WITH_SSE_CONNECTION(conn, block)                                                           \
-    do {                                                                                           \
-        conn_start_sse(conn);                                                                      \
-        block;                                                                                     \
-        if (conn_is_open(conn)) conn_end_sse(conn);                                                \
+#define WITH_SSE_CONNECTION(conn, block)                                                                               \
+    do {                                                                                                               \
+        conn_start_sse(conn);                                                                                          \
+        block;                                                                                                         \
+        if (conn_is_open(conn)) conn_end_sse(conn);                                                                    \
     } while (0)
 
-#define WITH_CHUNKED_TRANSFER(conn, block)                                                         \
-    do {                                                                                           \
-        conn_start_chunked_transfer(conn, 0);                                                      \
-        block;                                                                                     \
-        if (conn_is_open(conn)) conn_end_chunked_transfer(conn);                                   \
+#define WITH_CHUNKED_TRANSFER(conn, block)                                                                             \
+    do {                                                                                                               \
+        conn_start_chunked_transfer(conn, 0);                                                                          \
+        block;                                                                                                         \
+        if (conn_is_open(conn)) conn_end_chunked_transfer(conn);                                                       \
     } while (0)
 
 typedef struct {
@@ -260,12 +260,12 @@ typedef struct {
     size_t id_len;
 } sse_event_t;
 
-#define SSE_EVENT_INIT(data_, event_, id_)                                                         \
-    (sse_event_t){.data      = (data_),                                                            \
-                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,                                \
-                  .event     = (event_),                                                           \
-                  .event_len = (event_ != NULL) ? strlen(event_) : 0,                              \
-                  .id        = (id_),                                                              \
+#define SSE_EVENT_INIT(data_, event_, id_)                                                                             \
+    (sse_event_t){.data      = (data_),                                                                                \
+                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,                                                    \
+                  .event     = (event_),                                                                               \
+                  .event_len = (event_ != NULL) ? strlen(event_) : 0,                                                  \
+                  .id        = (id_),                                                                                  \
                   .id_len    = (id_ != NULL) ? strlen(id_) : 0}
 
 // Start SSE event.

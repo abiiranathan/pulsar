@@ -24,8 +24,7 @@ bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc 
     // Key doesn't exist, validate key length before adding
     const size_t keylen = strlen(key);
     if (keylen >= LOCALS_KEY_CAPACITY) {
-        fprintf(stderr, "Key length must not exceed: %d, %s is %lu bytes\n",
-                LOCALS_KEY_CAPACITY - 1, key, keylen);
+        fprintf(stderr, "Key length must not exceed: %d, %s is %lu bytes\n", LOCALS_KEY_CAPACITY - 1, key, keylen);
         return false;
     }
 
