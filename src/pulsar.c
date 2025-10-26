@@ -1257,8 +1257,10 @@ void static_file_handler(PulsarConn* conn, void* userdata) {
 
     const char* path    = conn->request->path;
     const char* dirname = route->state.static_.dirname;
-    size_t dirlen       = route->state.static_.dirname_len;
-    size_t pattern_len  = route->pattern_len;
+    const char* pattern = route->pattern;
+
+    size_t dirlen      = route->state.static_.dirname_len;
+    size_t pattern_len = route->pattern_len;
 
     // Early validation - single exit point for malicious paths
     bool is_malicious = is_malicious_path(path);
@@ -1267,9 +1269,11 @@ void static_file_handler(PulsarConn* conn, void* userdata) {
     const char* static_ptr = path + pattern_len;
     size_t static_len      = strlen(static_ptr);
 
-    // Skip leading slash
-    static_ptr += (*static_ptr == '/');
-    static_len -= (*static_ptr == '/');
+    // Skip leading slash if path is not / (root)
+    if (strcmp(pattern, "/") != 0) {
+        static_ptr += (*static_ptr == '/');
+        static_len -= (*static_ptr == '/');
+    }
 
     // Validate all path lengths at once
     bool path_too_long = (dirlen >= PATH_MAX) | (static_len >= PATH_MAX) | ((dirlen + static_len + 2) >= PATH_MAX);

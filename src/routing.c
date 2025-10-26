@@ -130,7 +130,6 @@ route_t* route_static(const char* pattern, const char* dirname) {
     ASSERT(is_dir(dirname) && "dir must be an existing directory");
 
     route_t* r                   = route_register_helper(pattern, HTTP_GET, static_file_handler, 1);
-    r->route_type                = ROUTE_TYPE_STATIC;
     r->state.static_.dirname     = dirname;
     r->state.static_.dirname_len = (uint8_t)strlen(dirname);
     return r;
