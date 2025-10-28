@@ -151,6 +151,13 @@ static int compare_routes(const void* a, const void* b) {
     if (ra->method < rb->method) return -1;
     if (ra->method > rb->method) return 1;
 
+    // Special case: "/" static routes go last (catch-all)
+    bool ra_is_root_static = (ra->route_type == ROUTE_TYPE_STATIC && ra->pattern_len == 1 && ra->pattern[0] == '/');
+    bool rb_is_root_static = (rb->route_type == ROUTE_TYPE_STATIC && rb->pattern_len == 1 && rb->pattern[0] == '/');
+
+    if (ra_is_root_static && !rb_is_root_static) return 1;   // a goes after b
+    if (!ra_is_root_static && rb_is_root_static) return -1;  // b goes after a
+
     // Sort by route type (exact < static < param for best matching order)
     if (ra->route_type < rb->route_type) return -1;
     if (ra->route_type > rb->route_type) return 1;
