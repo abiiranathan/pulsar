@@ -30,12 +30,17 @@ typedef struct PathParams {
 /** Forward declaration for main connection structure. */
 struct pulsar_conn;
 
+// The context object, a pointer of which is passed to every handler function.
+typedef struct {
+    struct pulsar_conn* conn;  // The connection object
+    void* userdata;            // Global user data set via pulsar_set_handler_userdata
+} PulsarCtx;
+
 /**
  * HTTP handler function pointer.
- * @param conn The connection object
- * @param userdata Global user data set via pulsar_set_handler_userdata
+ * @param ctx The context object.
  */
-typedef void (*HttpHandler)(struct pulsar_conn* conn, void* userdata);
+typedef void (*HttpHandler)(PulsarCtx* ctx);
 
 /** Middleware function (same signature as handler). */
 typedef HttpHandler Middleware;

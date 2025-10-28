@@ -4,7 +4,7 @@
 #include "../include/method.h"
 
 /** Static file handler provided by pulsar.c. */
-extern void static_file_handler(struct pulsar_conn* conn, void* userdata);
+extern void static_file_handler(PulsarCtx* ctx);
 
 /** Global route storage. */
 static route_t global_routes[MAX_ROUTES] = {0};

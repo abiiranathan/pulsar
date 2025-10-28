@@ -207,10 +207,7 @@ INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     conn->locals        = malloc(sizeof(Locals));
     if (conn->locals) LocalsInit(conn->locals);
     conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
-
-#if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
-#endif
     conn->next = NULL;
     conn->prev = NULL;
     return (conn->request && conn->response && conn->locals && conn->read_buf);
@@ -231,9 +228,7 @@ INLINE bool reset_connection(PulsarConn* conn) {
     if (conn->locals) LocalsReset(conn->locals);
     arena_reset(conn->arena);
 
-#if ENABLE_LOGGING
     clock_gettime(CLOCK_MONOTONIC, &conn->start);
-#endif
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
@@ -1250,9 +1245,9 @@ INLINE void finalize_response(PulsarConn* conn, HttpMethod method) {
     resp->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
 }
 
-void static_file_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
-    route_t* route = conn->request->route;
+void static_file_handler(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
+    route_t* route   = conn->request->route;
     ASSERT(route->route_type == ROUTE_TYPE_STATIC);
 
     const char* path    = conn->request->path;
@@ -1377,14 +1372,14 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
     return NULL;
 }
 
-INLINE void execute_all_middleware(PulsarConn* conn, route_t* route) {
+INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
 #define EXECUTE_MIDDLEWARE(mw, count)                                                                                  \
     do {                                                                                                               \
         size_t index = 0;                                                                                              \
         if (count > 0) {                                                                                               \
             while (index < count) {                                                                                    \
-                mw[index++](conn, GLOBAL_HANDLER_USERDATA);                                                            \
-                if (conn->abort) {                                                                                     \
+                mw[index++](ctx);                                                                                      \
+                if (ctx->conn->abort) {                                                                                \
                     return;                                                                                            \
                 }                                                                                                      \
             }                                                                                                          \
@@ -1447,7 +1442,12 @@ INLINE void request_complete(PulsarConn* conn) {
         uint64_t start_ns   = (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
         uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + (size_t)end.tv_nsec;
         uint64_t latency_ns = end_ns - start_ns;
-        LOGGER_CALLBACK(conn, latency_ns, GLOBAL_HANDLER_USERDATA);
+        LOGGER_CALLBACK(
+            &(PulsarCtx){
+                .conn     = conn,
+                .userdata = GLOBAL_HANDLER_USERDATA,
+            },
+            latency_ns);
     }
 }
 #endif
@@ -1600,9 +1600,14 @@ __attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* 
         return StatusInternalServerError;
     }
 
-    execute_all_middleware(conn, route);
+    PulsarCtx ctx = {
+        .conn     = conn,
+        .userdata = GLOBAL_HANDLER_USERDATA,
+    };
+
+    execute_all_middleware(&ctx, route);
     if (!conn->abort) {
-        route->handler(conn, GLOBAL_HANDLER_USERDATA);
+        route->handler(&ctx);
     }
 
     // Chunked transfer is handled by the handler directly outside event loop.

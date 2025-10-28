@@ -1,8 +1,8 @@
 #include "include/forms.h"
 #include "include/pulsar.h"
 
-void hello_world_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void hello_world_handler(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     static const char headers[] =
         "Set-Cookie: sessionId=12345; Path=/; HttpOnly\r\n"
         "Set-Cookie: theme=dark; Path=/; Secure\r\n"
@@ -13,8 +13,8 @@ void hello_world_handler(PulsarConn* conn, void* userdata) {
     conn_write(conn, "Hello World", 11);
 }
 
-void json_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void json_handler(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "application/json");
 
@@ -22,8 +22,8 @@ void json_handler(PulsarConn* conn, void* userdata) {
     conn_write(conn, json, strlen(json));
 }
 
-void echo_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void echo_handler(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "text/plain");
 
@@ -45,8 +45,8 @@ void echo_handler(PulsarConn* conn, void* userdata) {
     }
 }
 
-void sse_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void sse_handler(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     WITH_SSE_CONNECTION(conn, {
         size_t total = 1000;
 
@@ -66,8 +66,8 @@ void sse_handler(PulsarConn* conn, void* userdata) {
     });
 }
 
-void chunked_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void chunked_handler(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     WITH_CHUNKED_TRANSFER(conn, {
         // Test case 1: Large single chunk (2KB)
         {
@@ -213,8 +213,8 @@ void chunked_handler(PulsarConn* conn, void* userdata) {
     });
 }
 
-void pathparams_query_params_handler(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void pathparams_query_params_handler(PulsarCtx* ctx) {
+    PulsarConn* conn     = ctx->conn;
     const char* userId   = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
     ASSERT(userId && username);
@@ -235,8 +235,8 @@ void pathparams_query_params_handler(PulsarConn* conn, void* userdata) {
     conn_writef(conn, "Your user_id is %s and username %s\n", userId, username);
 }
 
-void handle_form(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void handle_form(PulsarCtx* ctx) {
+    PulsarConn* conn   = ctx->conn;
     MultipartForm form = {0};
     char boundary[128];
     MultipartCode code;
@@ -287,8 +287,8 @@ void handle_form(PulsarConn* conn, void* userdata) {
     multipart_cleanup(&form);
 }
 
-void serve_movie(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void serve_movie(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     const char* html =
         "<html><body style='max-width: 1000px; margin: 20px;'><video "
         "src='/static/FlightRisk.mp4' "
@@ -303,8 +303,9 @@ void serve_movie(PulsarConn* conn, void* userdata) {
 #define LOGGING_ON      0
 static __thread char log_buffer[LOG_BUFFER_SIZE];
 
-void pulsar_callback(PulsarConn* conn, uint64_t total_ns, void* userdata) {
-    UNUSED(userdata);
+void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
+    PulsarConn* conn = ctx->conn;
+
     if (!LOGGING_ON) {
         return;
     }
@@ -365,13 +366,13 @@ void pulsar_callback(PulsarConn* conn, uint64_t total_ns, void* userdata) {
     };
 }
 
-void mw1(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void mw1(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     pulsar_set(conn, "name", "PULSAR", NULL);
 }
 
-void mw2(PulsarConn* conn, void* userdata) {
-    UNUSED(userdata);
+void mw2(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
     // value retrieved from context.
     char* value = pulsar_get(conn, "name");
     printf("Context value: %s\n", value);

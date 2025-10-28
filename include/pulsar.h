@@ -42,7 +42,7 @@ typedef struct request_t request_t;
 // data to the socket. Ideal for logging. total_ns is the server processing time
 // and does not include network IO for sending the data. The userdata pointer
 // is the same pointer set via pulsar_set_handler_userdata.
-typedef void (*PulsarCallback)(PulsarConn* conn, uint64_t total_ns, void* userdata);
+typedef void (*PulsarCallback)(PulsarCtx* ctx, uint64_t total_ns);
 
 // Callback to create a new context object(Locals) that is passed per-request.
 typedef Locals* (*LocalsCreateCallback)();
