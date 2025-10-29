@@ -207,9 +207,8 @@ INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     conn->locals        = malloc(sizeof(Locals));
     if (conn->locals) LocalsInit(conn->locals);
     conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
-    clock_gettime(CLOCK_MONOTONIC, &conn->start);
-    conn->next = NULL;
-    conn->prev = NULL;
+    conn->next     = NULL;
+    conn->prev     = NULL;
     return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
@@ -227,8 +226,6 @@ INLINE bool reset_connection(PulsarConn* conn) {
     // Reset locals
     if (conn->locals) LocalsReset(conn->locals);
     arena_reset(conn->arena);
-
-    clock_gettime(CLOCK_MONOTONIC, &conn->start);
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
@@ -1433,8 +1430,8 @@ void pulsar_delete(PulsarConn* conn, const char* key) {
     LocalsRemove(conn->locals, key);
 }
 
-#if ENABLE_LOGGING
 INLINE void request_complete(PulsarConn* conn) {
+#if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
         struct timespec end;
         clock_gettime(CLOCK_MONOTONIC, &end);
@@ -1442,6 +1439,7 @@ INLINE void request_complete(PulsarConn* conn) {
         uint64_t start_ns   = (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
         uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + (size_t)end.tv_nsec;
         uint64_t latency_ns = end_ns - start_ns;
+
         LOGGER_CALLBACK(
             &(PulsarCtx){
                 .conn     = conn,
@@ -1449,8 +1447,8 @@ INLINE void request_complete(PulsarConn* conn) {
             },
             latency_ns);
     }
-}
 #endif
+}
 
 /**
  * Parses an HTTP request line (method, URL, protocol).
@@ -1612,6 +1610,8 @@ __attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* 
 
     // Chunked transfer is handled by the handler directly outside event loop.
     if (HAS_CHUNKED_TRANSFER(conn->response->flags)) {
+        request_complete(conn);
+
         if (conn->keep_alive) {
             conn->last_activity = time(NULL);
             AddKeepAliveConnection(conn, state);
@@ -1620,9 +1620,6 @@ __attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* 
                 conn->closing = (event_mod_read(queue_fd, conn->client_fd, conn) < 0);
             }
         }
-#if ENABLE_LOGGING
-        request_complete(conn);
-#endif
     } else {
         finalize_response(conn, req->method_type);
         conn->last_activity = time(NULL);
@@ -1870,6 +1867,9 @@ INLINE void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     }
     conn->read_buf[bytes_read] = '\0';
 
+    // Request processing starts here. Avoids computing latency of idle time in Keep-Alive.
+    clock_gettime(CLOCK_MONOTONIC, &conn->start);
+
     // Process the request and parse the headers / query params.
     http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
     if (status != StatusOK) {
@@ -2022,10 +2022,10 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
         }
 
         conn->last_activity = time(NULL);
+
         if (complete) {
-#if ENABLE_LOGGING
             request_complete(conn);
-#endif
+
             if (sending_file) {
                 close(res->file_fd);
                 res->file_fd = -1;
@@ -2062,6 +2062,7 @@ handle_error:
             perror("write failed");
         }
         conn->closing = true;
+        request_complete(conn);
     }
 }
 
