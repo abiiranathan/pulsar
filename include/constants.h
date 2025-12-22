@@ -93,16 +93,6 @@
 #define HEADERS_CAPACITY 32
 #endif
 
-// Maximum number of connection context variables set by the user.
-#ifndef LOCALS_CAPACITY
-#define LOCALS_CAPACITY 8
-#endif
-
-// Maximum capacity of the locals key.
-#ifndef LOCALS_KEY_CAPACITY
-#define LOCALS_KEY_CAPACITY 16
-#endif
-
 // Constants
 #define STATUS_LINE_SIZE 128
 #define HEADERS_BUF_SIZE 1024
@@ -113,7 +103,6 @@
 // Make sure they fit in uint8_t and uint16_t
 static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
 static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
-static_assert(LOCALS_KEY_CAPACITY >= 4);
 
 static_assert(ARENA_CAPACITY > 4 * 1024, "ARENA_CAPACITY must be > 4KB");
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");

@@ -99,6 +99,115 @@ void pulsar_set_callback(PulsarCallback cb);
 // Returns true on success.
 bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func);
 
+#include <stddef.h>  // for size_t, NULL (C11)
+#include <stdlib.h>  // for malloc, NULL
+#include <string.h>  // for strlen, memcpy
+
+/**
+ * @brief Allocate memory of at least 'size' bytes that is managed by the server.
+ *
+ * The returned memory is valid only for the duration of the current request handler.
+ * It must not be freed by the caller and will become invalid once the handler returns
+ * (the underlying arena is reset after each request).
+ *
+ * @param conn  Connection handle (used to access the per-request arena).
+ * @param size  Minimum number of bytes to allocate.
+ * @return Pointer to the allocated memory, or NULL if allocation fails.
+ */
+void* pulsar_alloc(PulsarConn* conn, size_t size);
+
+/**
+ * @brief Duplicate a string using the request-scoped arena allocator.
+ *
+ * The returned string is valid only for the duration of the current request handler
+ * and must not be freed by the caller.
+ *
+ * @param conn Connection handle (required for arena allocation).
+ * @param str  NUL-terminated string to duplicate. May be NULL.
+ * @return Pointer to the duplicated string, or NULL if allocation fails or str is NULL.
+ */
+static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
+    if (str == NULL) {
+        return NULL;
+    }
+
+    size_t len = strlen(str);
+    char* dup  = pulsar_alloc(conn, len + 1);
+    if (dup != NULL) {
+        memcpy(dup, str, len + 1);  // includes terminating NUL
+    }
+    return dup;
+}
+
+/**
+ * @brief Allocate an array of 'nmemb' elements of 'size' bytes each using the request-scoped arena.
+ *
+ * Equivalent to calloc() semantics (zero-initialized memory), but backed by the per-request arena.
+ * The returned memory must not be freed by the caller.
+ *
+ * @param conn  Connection handle.
+ * @param nmemb Number of elements.
+ * @param size  Size of each element in bytes.
+ * @return Pointer to the allocated zero-initialized memory, or NULL on failure or overflow.
+ */
+static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
+    /* Guard against overflow in nmemb * size */
+    if (nmemb != 0 && size > SIZE_MAX / nmemb) {
+        return NULL;
+    }
+
+    size_t total = nmemb * size;
+    void* ptr    = pulsar_alloc(conn, total);
+    if (ptr != NULL) {
+        memset(ptr, 0, total);
+    }
+    return ptr;
+}
+
+/**
+ * @brief Re-allocate arena-backed memory to a new size, preserving existing content.
+ *
+ * This function allocates a new block with at least 'new_size' bytes, copies up to
+ * 'old_size' bytes from the old pointer (or all available if new_size is smaller),
+ * and returns the new pointer. The old pointer becomes invalid after this call.
+ *
+ * The returned memory follows the same rules as pulsar_alloc(): it must not be freed
+ * and is valid only until the end of the current request handler.
+ *
+ * @param conn     Connection handle.
+ * @param ptr      Previous pointer returned by pulsar_alloc(), pulsar_strdup(), etc.
+ *                 May be NULL (treated as allocation of new block).
+ * @param old_size Number of valid bytes currently pointed to by 'ptr'.
+ *                 Must be exact if ptr != NULL.
+ * @param new_size Desired minimum size in bytes for the new block.
+ * @return New pointer with at least 'new_size' bytes, containing the previous content
+ *         (truncated or unchanged as appropriate), or NULL on failure or overflow.
+ */
+static inline void* pulsar_realloc(PulsarConn* conn, void* ptr, size_t old_size, size_t new_size) {
+    /* Handle NULL ptr as pure allocation */
+    if (ptr == NULL) {
+        return pulsar_alloc(conn, new_size);
+    }
+
+    /* Guard against overflow when comparing sizes */
+    if (new_size > SIZE_MAX) {
+        return NULL;
+    }
+
+    void* new_ptr = pulsar_alloc(conn, new_size);
+    if (new_ptr == NULL) {
+        return NULL;
+    }
+
+    /* Determine how many bytes to copy: the minimum of old_size and new_size */
+    size_t copy_size = old_size < new_size ? old_size : new_size;
+
+    if (copy_size > 0) {
+        memcpy(new_ptr, ptr, copy_size);
+    }
+    return new_ptr;
+}
+
 // Get a context value stored with pulsar_set.
 void* pulsar_get(PulsarConn* conn, const char* key);
 

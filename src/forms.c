@@ -53,19 +53,16 @@ INLINE bool grow_fields_array(MultipartForm* form) {
     return true;
 }
 
-MultipartCode multipart_init(MultipartForm* form, size_t memory) {
+MultipartCode multipart_init(MultipartForm* form) {
     if (!form) {
         return MEMORY_ALLOC_ERROR;
     }
 
-    // Make sure we have minimum memory
-    static const size_t minMemory = 1024;
-    if (memory < minMemory) memory = minMemory;
+    // Zero the form.
+    memset(form, 0, sizeof(*form));
 
-    memset(form, 0, sizeof(MultipartForm));
-
-    // Create arena
-    form->arena = arena_create(memory);
+    // Create arena with default block size.
+    form->arena = arena_create(0);
     if (!form->arena) {
         return MEMORY_ALLOC_ERROR;
     }

@@ -204,11 +204,10 @@ INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     conn->last_activity = time(NULL);
     conn->response      = create_response(arena);
     conn->request       = create_request(arena);
-    conn->locals        = malloc(sizeof(Locals));
-    if (conn->locals) LocalsInit(conn->locals);
-    conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
-    conn->next     = NULL;
-    conn->prev     = NULL;
+    conn->locals        = LocalsInit(8, arena);
+    conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
+    conn->next          = NULL;
+    conn->prev          = NULL;
     return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
@@ -223,9 +222,17 @@ INLINE bool reset_connection(PulsarConn* conn) {
         free(conn->response->body.heap);
     }
 
-    // Reset locals
-    if (conn->locals) LocalsReset(conn->locals);
+    // Reset locals before the arena reset.
+    LocalsClear(conn->locals);
+
+    // Reset the arena.
     arena_reset(conn->arena);
+
+    // Reinitialize locals with fresh arena memory
+    if (!LocalsReinitAfterArenaReset(conn->locals)) {
+        return false;
+    }
+
     conn->request  = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
@@ -253,8 +260,7 @@ INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_
 
     free_request(conn->request);
     free_response(conn->response);
-    LocalsReset(conn->locals);
-    free(conn->locals);
+    LocalsDestroy(conn->locals);
 
     if (conn->arena) arena_destroy(conn->arena);
     free(conn);
@@ -1422,6 +1428,10 @@ bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc fr
     return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
+void* pulsar_alloc(PulsarConn* conn, size_t size) {
+    return arena_alloc(conn->arena, size);
+}
+
 void* pulsar_get(PulsarConn* conn, const char* key) {
     return LocalsGetValue(conn->locals, key);
 }
@@ -1846,14 +1856,6 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
         conn->closing = true;
         return;
     }
-}
-
-INLINE size_t MIN(size_t x, size_t y) {
-    return x < y ? x : y;
-}
-
-INLINE size_t MAX(size_t x, size_t y) {
-    return x > y ? x : y;
 }
 
 INLINE void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {

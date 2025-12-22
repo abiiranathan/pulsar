@@ -236,12 +236,12 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
 }
 
 void handle_form(PulsarCtx* ctx) {
-    PulsarConn* conn   = ctx->conn;
-    MultipartForm form = {0};
+    PulsarConn* conn = ctx->conn;
+    MultipartForm form;
     char boundary[128];
     MultipartCode code;
 
-    code = multipart_init(&form, 1 << 20);
+    code = multipart_init(&form);
     if (code != MULTIPART_OK) {
         conn_set_status(conn, StatusBadRequest);
         conn_write_string(conn, multipart_error(code));
@@ -368,14 +368,15 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
 
 void mw1(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    pulsar_set(conn, "name", "PULSAR", NULL);
+    char* name       = pulsar_strdup(conn, "PULSAR");
+    pulsar_set(conn, "name", name, NULL);
 }
 
 void mw2(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    // value retrieved from context.
-    char* value = pulsar_get(conn, "name");
-    printf("Context value: %s\n", value);
+
+    char* name = pulsar_get(conn, "name");
+    ASSERT(name && "name is NULL");
 }
 
 int main() {

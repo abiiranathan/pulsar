@@ -82,12 +82,10 @@ typedef enum {
 /**
  * @brief Initialize a multipart form parser
  * @param form Pointer to uninitialized MultipartForm structure
- * @param memory Size of memory arena to allocate (minimum 1024 bytes)
- * @return MpCode indicating success or failure
+ * @return MultipartCode indicating success or failure
  *
- * @note This must be called before any other functions on a MultipartForm
  */
-MultipartCode multipart_init(MultipartForm* form, size_t memory);
+MultipartCode multipart_init(MultipartForm* form);
 
 /**
  * @brief Parse multipart form data
