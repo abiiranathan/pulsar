@@ -3,11 +3,11 @@
 
 #define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
 
-static int server_fd                                        = -1;    // Server socket file descriptor
-volatile sig_atomic_t server_running                        = 1;     // Server running flag
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};   // Global middleware array
-static size_t global_mw_count                               = 0;     // Global middleware count
-static PulsarCallback LOGGER_CALLBACK                       = NULL;  // No logger callback by default.
+static int server_fd = -1;                                          // Server socket file descriptor
+volatile sig_atomic_t server_running = 1;                           // Server running flag
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global middleware array
+static size_t global_mw_count = 0;                                  // Global middleware count
+static PulsarCallback LOGGER_CALLBACK = NULL;                       // No logger callback by default.
 // Global userdata passed to every handler/middleware and logger callback.
 static void* GLOBAL_HANDLER_USERDATA = NULL;
 
@@ -21,13 +21,9 @@ typedef struct KeepAliveState {
 INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
 INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_state);
 
-INLINE int get_num_available_cores() {
-    return sysconf(_SC_NPROCESSORS_ONLN);
-}
+INLINE int get_num_available_cores() { return sysconf(_SC_NPROCESSORS_ONLN); }
 
-INLINE bool conn_timedout(time_t now, time_t last_activity) {
-    return (now - last_activity) > CONNECTION_TIMEOUT;
-}
+INLINE bool conn_timedout(time_t now, time_t last_activity) { return (now - last_activity) > CONNECTION_TIMEOUT; }
 
 INLINE void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     if (!conn->in_keep_alive) {
@@ -74,7 +70,7 @@ INLINE void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
 
 INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epoll_fd) {
     PulsarConn* current = state->head;
-    time_t now          = time(NULL);
+    time_t now = time(NULL);
     while (current) {
         PulsarConn* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
@@ -131,12 +127,12 @@ INLINE request_t* create_request(Arena* arena) {
         return NULL;
     }
 
-    req->method[0]      = '\0';          // Init method to empty string.
-    req->method_type    = HTTP_INVALID;  // Initial method is not valid
-    req->content_length = 0;             // No content length.
-    req->body           = NULL;          /* Init body to NULL */
-    req->query_params   = NULL;          // No query params initially
-    req->route          = NULL;          // No matching route.
+    req->method[0] = '\0';            // Init method to empty string.
+    req->method_type = HTTP_INVALID;  // Initial method is not valid
+    req->content_length = 0;          // No content length.
+    req->body = NULL;                 /* Init body to NULL */
+    req->query_params = NULL;         // No query params initially
+    req->route = NULL;                // No matching route.
     return req;
 }
 
@@ -144,26 +140,26 @@ static inline void response_init(response_t* resp) {
     if (!resp) return;
 
     // Core response fields - most frequently accessed
-    resp->status_code    = 0;                  // HTTP status code
-    resp->heap_allocated = false;              // Start with stack allocation
-    resp->body_len       = 0;                  // No body content initially
-    resp->body_capacity  = WRITE_BUFFER_SIZE;  // Default to write buffer capacity
+    resp->status_code = 0;                    // HTTP status code
+    resp->heap_allocated = false;             // Start with stack allocation
+    resp->body_len = 0;                       // No body content initially
+    resp->body_capacity = WRITE_BUFFER_SIZE;  // Default to write buffer capacity
 
     // Length tracking - initialize to 0
     resp->headers_len = 0;
-    resp->status_len  = 0;
-    resp->flags       = 0;
+    resp->status_len = 0;
+    resp->flags = 0;
 
     // Sending progress state - all start at 0
-    resp->status_sent  = 0;
+    resp->status_sent = 0;
     resp->headers_sent = 0;
-    resp->body_sent    = 0;
+    resp->body_sent = 0;
 
     // File response state - initialize to invalid/unused state
-    resp->file_size   = 0;
+    resp->file_size = 0;
     resp->file_offset = 0;
-    resp->max_range   = 0;
-    resp->file_fd     = -1;  // Invalid file descriptor
+    resp->max_range = 0;
+    resp->file_fd = -1;  // Invalid file descriptor
 
     // Note: We don't zero the buffers since they'll be written to before use
 }
@@ -194,27 +190,27 @@ INLINE void free_response(response_t* resp) {
 }
 
 INLINE bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int worker_id) {
-    conn->closing       = false;
-    conn->client_fd     = client_fd;
-    conn->worker_id     = worker_id;
-    conn->keep_alive    = true;
+    conn->closing = false;
+    conn->client_fd = client_fd;
+    conn->worker_id = worker_id;
+    conn->keep_alive = true;
     conn->in_keep_alive = false;
-    conn->abort         = false;
-    conn->arena         = arena;
+    conn->abort = false;
+    conn->arena = arena;
     conn->last_activity = time(NULL);
-    conn->response      = create_response(arena);
-    conn->request       = create_request(arena);
-    conn->locals        = LocalsInit(8, arena);
-    conn->read_buf      = arena_alloc(arena, READ_BUFFER_SIZE);
-    conn->next          = NULL;
-    conn->prev          = NULL;
+    conn->response = create_response(arena);
+    conn->request = create_request(arena);
+    conn->locals = LocalsInit(8, arena);
+    conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
+    conn->next = NULL;
+    conn->prev = NULL;
     return (conn->request && conn->response && conn->locals && conn->read_buf);
 }
 
 INLINE bool reset_connection(PulsarConn* conn) {
-    conn->closing    = false;
+    conn->closing = false;
     conn->keep_alive = true;    // Default to Keep-Alive
-    conn->abort      = false;   // Connection not aborted
+    conn->abort = false;        // Connection not aborted
     free(conn->request->body);  // Free request body.
 
     // Reset response buffer before resetting arena.
@@ -233,7 +229,7 @@ INLINE bool reset_connection(PulsarConn* conn) {
         return false;
     }
 
-    conn->request  = create_request(conn->arena);
+    conn->request = create_request(conn->arena);
     conn->response = create_response(conn->arena);
     conn->read_buf = arena_alloc(conn->arena, READ_BUFFER_SIZE);
 
@@ -282,15 +278,15 @@ INLINE void write_error(PulsarConn* conn, http_status status) {
 
 INLINE bool parse_request_headers(PulsarConn* restrict conn, HttpMethod method, size_t headers_len) {
     const char* restrict ptr = conn->read_buf;
-    const char* const end    = ptr + headers_len;
-    const bool is_safe       = SAFE_METHOD(method);
-    request_t* const req     = conn->request;
-    Arena* const arena       = conn->arena;
+    const char* const end = ptr + headers_len;
+    const bool is_safe = SAFE_METHOD(method);
+    request_t* const req = conn->request;
+    Arena* const arena = conn->arena;
     headers_t* const headers = req->headers;
 
     // Initialize connection defaults and pack flags into single byte
     conn->keep_alive = true;
-    uint8_t flags    = 0;  // bit 0: content_length_set, bit 1: connection_set
+    uint8_t flags = 0;  // bit 0: content_length_set, bit 1: connection_set
 
     while (ptr < end) {
         // Parse header name
@@ -301,8 +297,7 @@ INLINE bool parse_request_headers(PulsarConn* restrict conn, HttpMethod method, 
 
         // Move to header value (combine pointer arithmetic)
         const char* value_start = colon + 1;
-        while (value_start < end && *value_start == ' ')
-            value_start++;
+        while (value_start < end && *value_start == ' ') value_start++;
 
         // Parse header value
         const char* const eol = (const char*)memchr(value_start, '\r', (size_t)(end - value_start));
@@ -355,11 +350,11 @@ INLINE bool parse_request_headers(PulsarConn* restrict conn, HttpMethod method, 
 }
 
 INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
-    char* path  = conn->request->path;
+    char* path = conn->request->path;
     char* query = strchr(path, '?');
     if (!query) return true;
 
-    *query    = '\0';                    // Truncate Query string from path
+    *query = '\0';                       // Truncate Query string from path
     *path_len = (size_t)(query - path);  // Update path length after truncation
     query++;                             // Skip ?
 
@@ -368,10 +363,10 @@ INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
 
     char* save_ptr1 = NULL;
     char* save_ptr2 = NULL;
-    char* pair      = strtok_r(query, "&", &save_ptr1);
+    char* pair = strtok_r(query, "&", &save_ptr1);
 
     while (pair) {
-        char* key   = strtok_r(pair, "=", &save_ptr2);
+        char* key = strtok_r(pair, "=", &save_ptr2);
         char* value = strtok_r(NULL, "", &save_ptr2);
 
         if (key) {
@@ -386,7 +381,7 @@ INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
 INLINE bool parse_request_body(PulsarConn* conn, size_t headers_len, size_t read_bytes) {
     if (conn->request->content_length == 0) return true;
 
-    request_t* req        = conn->request;
+    request_t* req = conn->request;
     size_t content_length = req->content_length;
     size_t body_available = read_bytes - headers_len;
     ASSERT(body_available <= content_length);
@@ -409,7 +404,7 @@ INLINE bool parse_request_body(PulsarConn* conn, size_t headers_len, size_t read
     size_t body_received = body_available;
     while (body_received < content_length) {
         size_t remaining = content_length - body_received;
-        ssize_t count    = read(conn->client_fd, req->body + body_received, remaining);
+        ssize_t count = read(conn->client_fd, req->body + body_received, remaining);
         if (count == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 usleep(500);
@@ -431,17 +426,11 @@ Request getters.
 */
 
 // Returns request body or NULL if not available.
-const char* req_body(PulsarConn* conn) {
-    return conn->request->body;
-}
+const char* req_body(PulsarConn* conn) { return conn->request->body; }
 
-const char* req_method(PulsarConn* conn) {
-    return conn->request->method;
-}
+const char* req_method(PulsarConn* conn) { return conn->request->method; }
 
-const char* req_path(PulsarConn* conn) {
-    return conn->request->path;
-}
+const char* req_path(PulsarConn* conn) { return conn->request->path; }
 
 // Get value for a query parameter if present or NULL.
 const char* query_get(PulsarConn* conn, const char* name) {
@@ -449,18 +438,12 @@ const char* query_get(PulsarConn* conn, const char* name) {
     return headers_get(conn->request->query_params, name);
 }
 
-headers_t* query_params(PulsarConn* conn) {
-    return conn->request->query_params;
-}
+headers_t* query_params(PulsarConn* conn) { return conn->request->query_params; }
 
-const char* req_header_get(PulsarConn* conn, const char* name) {
-    return headers_get(conn->request->headers, name);
-}
+const char* req_header_get(PulsarConn* conn, const char* name) { return headers_get(conn->request->headers, name); }
 
 // Returns request body size. (Content-Length).
-size_t req_content_len(PulsarConn* conn) {
-    return conn->request->content_length;
-}
+size_t req_content_len(PulsarConn* conn) { return conn->request->content_length; }
 
 /* ================================================================
  * Response Handling Functions
@@ -476,8 +459,8 @@ static inline int format_status_code(char* restrict dest, int code) {
 
 const char* conn_set_status(PulsarConn* restrict conn, http_status code) {
     const status_info_t* status = get_http_status(code);
-    response_t* res             = conn->response;
-    res->status_code            = code;
+    response_t* res = conn->response;
+    res->status_code = code;
 
     int written = snprintf(res->status_buf, STATUS_LINE_SIZE, "HTTP/1.1 %hu %s\r\n", code, status->text);
 
@@ -491,11 +474,11 @@ const char* conn_set_status(PulsarConn* restrict conn, http_status code) {
 // If header does not exist or malloc fails.
 char* res_header_get(PulsarConn* conn, const char* name) {
     response_t* res = conn->response;
-    char* buf       = res->headers_buf;
+    char* buf = res->headers_buf;
 
     // Terminate so we can use strstr.
     buf[res->headers_len] = '\0';
-    char* ptr             = strstr(buf, name);
+    char* ptr = strstr(buf, name);
     if (!ptr) return NULL;  // Header not found
 
     // move past name, colon and space
@@ -506,7 +489,7 @@ char* res_header_get(PulsarConn* conn, const char* name) {
     if (!value_end) return NULL;  // Invalid header.
 
     size_t value_len = (size_t)(value_end - ptr);
-    char* header     = malloc(value_len + 1);
+    char* header = malloc(value_len + 1);
     if (!header) return NULL;
 
     memcpy(header, ptr, value_len);
@@ -518,11 +501,11 @@ char* res_header_get(PulsarConn* conn, const char* name) {
 // Returns true on success or false if buffer is very small or header not found.
 bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t dest_size) {
     response_t* res = conn->response;
-    char* buf       = res->headers_buf;
+    char* buf = res->headers_buf;
 
     // Terminate so we can use strstr.
     buf[res->headers_len] = '\0';
-    char* ptr             = strstr(buf, name);
+    char* ptr = strstr(buf, name);
     if (!ptr) return NULL;  // Header not found
 
     // move past name, colon and space
@@ -544,18 +527,16 @@ bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t d
     return dest;
 }
 
-http_status res_get_status(PulsarConn* conn) {
-    return conn->response->status_code;
-}
+http_status res_get_status(PulsarConn* conn) { return conn->response->status_code; }
 
 void conn_writeheader(PulsarConn* conn, const char* name, const char* value) {
     // Calculate lengths once
-    size_t name_len  = strlen(name);
+    size_t name_len = strlen(name);
     size_t value_len = strlen(value);
 
     // Check buffer space first
     response_t* resp = conn->response;
-    size_t required  = name_len + value_len + 4;                  // ": \r\n"
+    size_t required = name_len + value_len + 4;                   // ": \r\n"
     size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - 3;  // Reserve for final \r\n
 
     if (required > remaining) {
@@ -673,14 +654,13 @@ int conn_write(PulsarConn* conn, const void* data, size_t len) {
 
             // Now safe to switch to heap mode
             res->heap_allocated = true;
-            res->body_capacity  = heap_capacity;
-            res->body.heap      = heap_buffer;
+            res->body_capacity = heap_capacity;
+            res->body.heap = heap_buffer;
         }
     }
 
     // Heap path: ensure sufficient capacity
     if (required > res->body_capacity) {
-
         size_t new_capacity = res->body_capacity;
         while (new_capacity < required) {
             // Check for overflow before doubling
@@ -696,7 +676,7 @@ int conn_write(PulsarConn* conn, const void* data, size_t len) {
             perror("realloc failed");
             return -1;
         }
-        res->body.heap     = new_buffer;
+        res->body.heap = new_buffer;
         res->body_capacity = new_capacity;
     }
 
@@ -712,9 +692,7 @@ int conn_notfound(PulsarConn* conn) {
     return conn_write(conn, "404 Not Found", 13);
 }
 
-int conn_write_string(PulsarConn* conn, const char* str) {
-    return str ? conn_write(conn, str, strlen(str)) : 0;
-}
+int conn_write_string(PulsarConn* conn, const char* str) { return str ? conn_write(conn, str, strlen(str)) : 0; }
 
 __attribute__((format(printf, 2, 3))) int conn_writef(PulsarConn* conn, const char* restrict fmt, ...) {
     va_list args;
@@ -749,9 +727,7 @@ __attribute__((format(printf, 2, 3))) int conn_writef(PulsarConn* conn, const ch
     return result;
 }
 
-void conn_abort(PulsarConn* conn) {
-    conn->abort = true;
-}
+void conn_abort(PulsarConn* conn) { conn->abort = true; }
 
 void conn_send(PulsarConn* conn, http_status status, const void* data, size_t length) {
     conn_set_status(conn, status);
@@ -780,9 +756,9 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
     // Set status code
     conn_set_status(conn, permanent ? StatusMovedPermanently : StatusFound);
 
-    response_t* resp    = conn->response;
+    response_t* resp = conn->response;
     size_t location_len = strlen(location);
-    size_t required     = 10 + location_len + 2;  // "Location: " + location + "\r\n"
+    size_t required = 10 + location_len + 2;  // "Location: " + location + "\r\n"
     if (resp->headers_len + required >= HEADERS_BUF_SIZE - SAFETY_MARGIN) {
         conn->closing = true;
         return;
@@ -870,7 +846,7 @@ INLINE ssize_t writev_retry(int fd, struct iovec* iov, int iovcnt) {
 
         // Advance iov based on bytes written
         ssize_t remaining = written;
-        int i             = 0;
+        int i = 0;
         for (; i < iovcnt && remaining > 0; ++i) {
             if ((size_t)remaining < iov[i].iov_len) {
                 iov[i].iov_base = (char*)iov[i].iov_base + remaining;
@@ -917,12 +893,12 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
 
         // Add status line first
         iov[iovcnt].iov_base = conn->response->status_buf;
-        iov[iovcnt].iov_len  = conn->response->status_len;
+        iov[iovcnt].iov_len = conn->response->status_len;
         iovcnt++;
 
         // Then add headers
         iov[iovcnt].iov_base = conn->response->headers_buf;
-        iov[iovcnt].iov_len  = conn->response->headers_len;
+        iov[iovcnt].iov_len = conn->response->headers_len;
         iovcnt++;
 
         SET_HEADERS_WRITTEN(conn->response->flags);
@@ -931,17 +907,17 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
     // Final chunk?
     if (size == 0) {
         static const char final_chunk[] = "0\r\n\r\n";
-        iov[iovcnt].iov_base            = (void*)final_chunk;
-        iov[iovcnt].iov_len             = sizeof(final_chunk) - 1;
+        iov[iovcnt].iov_base = (void*)final_chunk;
+        iov[iovcnt].iov_len = sizeof(final_chunk) - 1;
         iovcnt++;
         return writev_retry(conn->client_fd, iov, iovcnt);
     }
 
     // Regular chunk
     int header_len = snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", size);
-    iov[iovcnt++]  = (struct iovec){.iov_base = chunk_header, .iov_len = (size_t)header_len};
-    iov[iovcnt++]  = (struct iovec){.iov_base = (void*)data, .iov_len = size};
-    iov[iovcnt++]  = (struct iovec){.iov_base = (void*)trailer, .iov_len = 2};
+    iov[iovcnt++] = (struct iovec){.iov_base = chunk_header, .iov_len = (size_t)header_len};
+    iov[iovcnt++] = (struct iovec){.iov_base = (void*)data, .iov_len = size};
+    iov[iovcnt++] = (struct iovec){.iov_base = (void*)trailer, .iov_len = 2};
 
     return writev_retry(conn->client_fd, iov, iovcnt);
 }
@@ -969,14 +945,14 @@ void conn_send_event(PulsarConn* conn, const sse_event_t* evt) {
     size_t batch_pos = 0;
 
 // Helper macro to flush buffer when needed
-#define FLUSH_IF_NEEDED(needed_space)                                                                                  \
-    do {                                                                                                               \
-        if (batch_pos + (needed_space) > BATCH_SIZE) {                                                                 \
-            if (batch_pos > 0) {                                                                                       \
-                conn_write_chunk(conn, batch_buf, batch_pos);                                                          \
-                batch_pos = 0;                                                                                         \
-            }                                                                                                          \
-        }                                                                                                              \
+#define FLUSH_IF_NEEDED(needed_space)                         \
+    do {                                                      \
+        if (batch_pos + (needed_space) > BATCH_SIZE) {        \
+            if (batch_pos > 0) {                              \
+                conn_write_chunk(conn, batch_buf, batch_pos); \
+                batch_pos = 0;                                \
+            }                                                 \
+        }                                                     \
     } while (0)
 
     // Send headers first if needed
@@ -987,7 +963,7 @@ void conn_send_event(PulsarConn* conn, const sse_event_t* evt) {
         iov[iovcnt++] = (struct iovec){.iov_base = conn->response->status_buf, .iov_len = conn->response->status_len};
         iov[iovcnt++] = (struct iovec){
             .iov_base = conn->response->headers_buf,
-            .iov_len  = conn->response->headers_len,
+            .iov_len = conn->response->headers_len,
         };
 
         writev_retry(conn->client_fd, iov, iovcnt);
@@ -1003,12 +979,12 @@ void conn_send_event(PulsarConn* conn, const sse_event_t* evt) {
     }
 
     // Build data field(s) - handle multiline data efficiently
-    const char* data_ptr  = evt->data;
+    const char* data_ptr = evt->data;
     size_t data_remaining = evt->data_len;
 
     while (data_remaining > 0) {
         const char* line_end = memchr(data_ptr, '\n', data_remaining);
-        size_t line_len      = line_end ? (size_t)(line_end - data_ptr) : data_remaining;
+        size_t line_len = line_end ? (size_t)(line_end - data_ptr) : data_remaining;
 
         // Conservative space check: "data: " + line + "\n" + some margin
         size_t needed = line_len + 8;
@@ -1065,13 +1041,9 @@ void conn_end_sse(PulsarConn* conn) {
 }
 
 // Returns true if connection is still open.
-bool conn_is_open(PulsarConn* conn) {
-    return conn && (conn->client_fd != -1 && !conn->closing);
-}
+bool conn_is_open(PulsarConn* conn) { return conn && (conn->client_fd != -1 && !conn->closing); }
 
-int conn_worker_id(PulsarConn* conn) {
-    return conn ? conn->worker_id : 0;
-}
+int conn_worker_id(PulsarConn* conn) { return conn ? conn->worker_id : 0; }
 
 // Parses the Range header and extracts start and end values
 INLINE
@@ -1101,8 +1073,8 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
         // Http range requests can be negative :) Wieird but true
         // I had to read the RFC to understand this, who would have thought?
         // https://datatracker.ietf.org/doc/html/rfc7233
-        start_byte = file_size + start_byte;   // subtract from the file size
-        end_byte   = start_byte + chunk_size;  // send the next chunk size (if not more than the file size)
+        start_byte = file_size + start_byte;  // subtract from the file size
+        end_byte = start_byte + chunk_size;   // send the next chunk size (if not more than the file size)
     } else if (end_byte < 0) {
         // Even the end range can be negative. Deal with it!
         end_byte = file_size + end_byte;
@@ -1119,7 +1091,7 @@ INLINE bool validate_range(bool has_end_range, ssize_t* start, ssize_t* end, off
     }
 
     *start = start_byte;
-    *end   = end_byte;
+    *end = end_byte;
     return true;
 }
 
@@ -1137,7 +1109,7 @@ INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off
     // enough for above range headers
     if (remaining > 164) {
         char* dest = resp->headers_buf + resp->headers_len;
-        int len    = snprintf(dest, remaining, header_fmt, end - start + 1, start, end, file_size);
+        int len = snprintf(dest, remaining, header_fmt, end - start + 1, start, end, file_size);
         if (len > 0 && (size_t)len < remaining) {
             resp->headers_len += len;
             return;
@@ -1174,8 +1146,8 @@ bool conn_servefile(PulsarConn* conn, const char* filename) {
         conn_set_content_type(conn, mimetype);
     }
 
-    conn->response->file_fd     = fd;
-    conn->response->file_size   = stat_buf.st_size;
+    conn->response->file_fd = fd;
+    conn->response->file_size = stat_buf.st_size;
     conn->response->file_offset = 0;
 
     const char* range_header = headers_get(conn->request->headers, "Range");
@@ -1202,8 +1174,8 @@ bool conn_servefile(PulsarConn* conn, const char* filename) {
 
         // Update file offset and size.
         conn->response->file_offset = start_offset;
-        conn->response->file_size   = stat_buf.st_size;
-        conn->response->max_range   = end_offset - start_offset + 1;
+        conn->response->file_size = stat_buf.st_size;
+        conn->response->max_range = end_offset - start_offset + 1;
         SET_RANGE_REQUEST(conn->response->flags);
     }
 
@@ -1250,14 +1222,14 @@ INLINE void finalize_response(PulsarConn* conn, HttpMethod method) {
 
 void static_file_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    route_t* route   = conn->request->route;
+    route_t* route = conn->request->route;
     ASSERT(route->route_type == ROUTE_TYPE_STATIC);
 
-    const char* path    = conn->request->path;
+    const char* path = conn->request->path;
     const char* dirname = route->state.static_.dirname;
     const char* pattern = route->pattern;
 
-    size_t dirlen      = route->state.static_.dirname_len;
+    size_t dirlen = route->state.static_.dirname_len;
     size_t pattern_len = route->pattern_len;
 
     // Early validation - single exit point for malicious paths
@@ -1265,7 +1237,7 @@ void static_file_handler(PulsarCtx* ctx) {
 
     // Calculate static path pointer and length
     const char* static_ptr = path + pattern_len;
-    size_t static_len      = strlen(static_ptr);
+    size_t static_len = strlen(static_ptr);
 
     // Skip leading slash if path is not / (root)
     if (strcmp(pattern, "/") != 0) {
@@ -1283,17 +1255,17 @@ void static_file_handler(PulsarCtx* ctx) {
     response_type = path_too_long ? RESP_TOO_LONG : response_type;
 
     // Pre-allocate buffers to improve cache locality
-    char filepath[PATH_MAX]   = {0};
+    char filepath[PATH_MAX] = {0};
     char index_file[PATH_MAX] = {0};
 
     // Process file path construction and serving
     bool file_served = false;
-    bool file_found  = false;
+    bool file_found = false;
 
     if (response_type == RESP_PROCESS) {
         // Build file path
         bool is_different_prefix = strncmp(static_ptr, route->pattern, pattern_len) != 0;
-        bool needs_slash         = (dirlen > 0) & (dirname[dirlen - 1] != '/');
+        bool needs_slash = (dirlen > 0) & (dirname[dirlen - 1] != '/');
 
         int pathLen = snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname,
                                (is_different_prefix & needs_slash) ? "/" : "", (int)static_len, static_ptr);
@@ -1312,9 +1284,9 @@ void static_file_handler(PulsarCtx* ctx) {
 
             if (!file_found) {
                 // Try index.html
-                int index_len    = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
+                int index_len = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
                 bool valid_index = (index_len >= 0) & (index_len < PATH_MAX);
-                file_found       = valid_index & is_file(index_file);
+                file_found = valid_index & is_file(index_file);
             }
         }
     }
@@ -1334,12 +1306,12 @@ void static_file_handler(PulsarCtx* ctx) {
         case RESP_PROCESS:
             if (file_found) {
                 // Determine which file to serve and content type
-                const char* serve_file   = filepath;
+                const char* serve_file = filepath;
                 const char* content_type = get_mimetype(filepath);
 
                 // Use index.html if original file wasn't found
                 if (!is_file(filepath)) {
-                    serve_file   = index_file;
+                    serve_file = index_file;
                     content_type = "text/html";
                 }
 
@@ -1376,17 +1348,17 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
 }
 
 INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
-#define EXECUTE_MIDDLEWARE(mw, count)                                                                                  \
-    do {                                                                                                               \
-        size_t index = 0;                                                                                              \
-        if (count > 0) {                                                                                               \
-            while (index < count) {                                                                                    \
-                mw[index++](ctx);                                                                                      \
-                if (ctx->conn->abort) {                                                                                \
-                    return;                                                                                            \
-                }                                                                                                      \
-            }                                                                                                          \
-        }                                                                                                              \
+#define EXECUTE_MIDDLEWARE(mw, count)   \
+    do {                                \
+        size_t index = 0;               \
+        if (count > 0) {                \
+            while (index < count) {     \
+                mw[index++](ctx);       \
+                if (ctx->conn->abort) { \
+                    return;             \
+                }                       \
+            }                           \
+        }                               \
     } while (0)
 
     EXECUTE_MIDDLEWARE(global_middleware, global_mw_count);
@@ -1412,33 +1384,21 @@ void use_route_middleware(route_t* route, HttpHandler* middleware, size_t count)
     }
 }
 
-void pulsar_set_handler_userdata(void* userdata) {
-    GLOBAL_HANDLER_USERDATA = userdata;
-}
+void pulsar_set_handler_userdata(void* userdata) { GLOBAL_HANDLER_USERDATA = userdata; }
 
-void* pulsar_get_handler_userdata(void) {
-    return GLOBAL_HANDLER_USERDATA;
-}
+void* pulsar_get_handler_userdata(void) { return GLOBAL_HANDLER_USERDATA; }
 
-void pulsar_set_callback(PulsarCallback cb) {
-    LOGGER_CALLBACK = cb;
-}
+void pulsar_set_callback(PulsarCallback cb) { LOGGER_CALLBACK = cb; }
 
 bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func) {
     return LocalsSetValue(conn->locals, key, value, free_func);
 }
 
-void* pulsar_alloc(PulsarConn* conn, size_t size) {
-    return arena_alloc(conn->arena, size);
-}
+void* pulsar_alloc(PulsarConn* conn, size_t size) { return arena_alloc(conn->arena, size); }
 
-void* pulsar_get(PulsarConn* conn, const char* key) {
-    return LocalsGetValue(conn->locals, key);
-}
+void* pulsar_get(PulsarConn* conn, const char* key) { return LocalsGetValue(conn->locals, key); }
 
-void pulsar_delete(PulsarConn* conn, const char* key) {
-    LocalsRemove(conn->locals, key);
-}
+void pulsar_delete(PulsarConn* conn, const char* key) { LocalsRemove(conn->locals, key); }
 
 INLINE void request_complete(PulsarConn* conn) {
 #if ENABLE_LOGGING
@@ -1446,13 +1406,13 @@ INLINE void request_complete(PulsarConn* conn) {
         struct timespec end;
         clock_gettime(CLOCK_MONOTONIC, &end);
 
-        uint64_t start_ns   = (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
-        uint64_t end_ns     = (uint64_t)end.tv_sec * 1000000000ULL + (size_t)end.tv_nsec;
+        uint64_t start_ns = (uint64_t)conn->start.tv_sec * 1000000000ULL + (size_t)conn->start.tv_nsec;
+        uint64_t end_ns = (uint64_t)end.tv_sec * 1000000000ULL + (size_t)end.tv_nsec;
         uint64_t latency_ns = end_ns - start_ns;
 
         LOGGER_CALLBACK(
             &(PulsarCtx){
-                .conn     = conn,
+                .conn = conn,
                 .userdata = GLOBAL_HANDLER_USERDATA,
             },
             latency_ns);
@@ -1494,7 +1454,7 @@ INLINE int parse_request_line(const char* input, size_t input_len, char* method,
 
     memcpy(method, method_start, m_len);
     method[m_len] = '\0';
-    *method_len   = m_len;
+    *method_len = m_len;
 
     // Skip spaces after method
     while (ptr < end && *ptr == ' ') {
@@ -1518,7 +1478,7 @@ INLINE int parse_request_line(const char* input, size_t input_len, char* method,
 
     memcpy(url, url_start, u_len);
     url[u_len] = '\0';
-    *url_len   = u_len;
+    *url_len = u_len;
 
     // Skip spaces after URL
     while (ptr < end && *ptr == ' ') {
@@ -1542,7 +1502,7 @@ INLINE int parse_request_line(const char* input, size_t input_len, char* method,
 
     memcpy(protocol, protocol_start, p_len);
     protocol[p_len] = '\0';
-    *protocol_len   = p_len;
+    *protocol_len = p_len;
 
     return 0;  // Success
 }
@@ -1560,14 +1520,14 @@ __attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* 
         return StatusBadRequest;
     }
 
-    request_t* req     = conn->request;
+    request_t* req = conn->request;
     size_t headers_len = (size_t)(end_of_headers - conn->read_buf) + 4;
 
     char url[MAX_PATH_LEN + 1];  // no-init
     char http_protocol[16] = {0};
-    size_t method_len      = 0;
-    size_t url_len         = 0;
-    size_t protocol_len    = 0;
+    size_t method_len = 0;
+    size_t url_len = 0;
+    size_t protocol_len = 0;
 
     if (parse_request_line(conn->read_buf, read_bytes, req->method, sizeof(req->method), &method_len, url, sizeof(url),
                            &url_len, http_protocol, sizeof(http_protocol), &protocol_len) != 0) {
@@ -1609,7 +1569,7 @@ __attribute_warn_unused_result__ INLINE http_status process_request(PulsarConn* 
     }
 
     PulsarCtx ctx = {
-        .conn     = conn,
+        .conn = conn,
         .userdata = GLOBAL_HANDLER_USERDATA,
     };
 
@@ -1661,17 +1621,17 @@ static int create_server_socket(const char* host, int port) {
     }
 
     int fd;
-    int opt               = 1;
+    int opt = 1;
     struct addrinfo hints = {0};
     struct addrinfo *result, *rp;
 
-    hints.ai_family    = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
-    hints.ai_socktype  = SOCK_STREAM;  // TCP
-    hints.ai_flags     = AI_PASSIVE;   // For wildcard IP address
-    hints.ai_protocol  = 0;            /* Any protocol */
+    hints.ai_family = AF_UNSPEC;      /* Allow IPv4 or IPv6 */
+    hints.ai_socktype = SOCK_STREAM;  // TCP
+    hints.ai_flags = AI_PASSIVE;      // For wildcard IP address
+    hints.ai_protocol = 0;            /* Any protocol */
     hints.ai_canonname = NULL;
-    hints.ai_addr      = NULL;
-    hints.ai_next      = NULL;
+    hints.ai_addr = NULL;
+    hints.ai_next = NULL;
 
     // Convert port to string for getaddrinfo
     char port_str[6];
@@ -1742,9 +1702,9 @@ INLINE int conn_accept(int worker_id) {
 #endif
 
     // Set socket timeouts - CRITICAL for preventing hanging connections
-    struct timeval read_timeout  = {.tv_sec  = 30,  // 30 second read timeout
-                                    .tv_usec = 0};
-    struct timeval write_timeout = {.tv_sec  = 30,  // 30 second write timeout
+    struct timeval read_timeout = {.tv_sec = 30,  // 30 second read timeout
+                                   .tv_usec = 0};
+    struct timeval write_timeout = {.tv_sec = 30,  // 30 second write timeout
                                     .tv_usec = 0};
 
     if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof(read_timeout)) < 0) {
@@ -1768,9 +1728,9 @@ INLINE int conn_accept(int worker_id) {
 
 #ifdef __linux__
     // Configure keepalive parameters
-    int keepalive_idle     = 120;  // Start probes after 2 minutes of inactivity
-    int keepalive_interval = 15;   // Send probe every 15 seconds
-    int keepalive_count    = 3;    // Close after 3 failed probes
+    int keepalive_idle = 120;     // Start probes after 2 minutes of inactivity
+    int keepalive_interval = 15;  // Send probe every 15 seconds
+    int keepalive_count = 3;      // Close after 3 failed probes
 
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_idle, sizeof(keepalive_idle));
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_interval, sizeof(keepalive_interval));
@@ -1836,7 +1796,7 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
         return;
     }
 
-    Arena* arena = arena_create(ARENA_CAPACITY);
+    Arena* arena = arena_create(1UL << 20);
     if (!arena) {
         fprintf(stderr, "arena_create failed\n");
         close(client_fd);
@@ -1888,12 +1848,12 @@ INLINE void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
 INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     __builtin_prefetch(conn->response, 0, 3);  // Read prefetch for response
 
-    response_t* res         = conn->response;
-    int client_fd           = conn->client_fd;
+    response_t* res = conn->response;
+    int client_fd = conn->client_fd;
     const bool sending_file = res->file_fd > 0 && res->file_size > 0;
 
     while (1) {
-        ssize_t sent  = 0;
+        ssize_t sent = 0;
         bool complete = false;
 
         if (sending_file) {
@@ -1901,9 +1861,9 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
                 // Send headers.
                 struct iovec iov[2];
                 iov[0].iov_base = res->status_buf + res->status_sent;
-                iov[0].iov_len  = res->status_len - res->status_sent;
+                iov[0].iov_len = res->status_len - res->status_sent;
                 iov[1].iov_base = res->headers_buf + res->headers_sent;
-                iov[1].iov_len  = res->headers_len - res->headers_sent;
+                iov[1].iov_len = res->headers_len - res->headers_sent;
 
                 sent = writev(client_fd, iov, 2);
                 if (unlikely(sent < 0)) goto handle_error;
@@ -1936,13 +1896,13 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
 #if defined(__linux__)
                 // Use zero-copy sendfile if available
                 off_t offset = res->file_offset;
-                sent         = sendfile(client_fd, res->file_fd, &offset, (size_t)chunk_size);
+                sent = sendfile(client_fd, res->file_fd, &offset, (size_t)chunk_size);
                 if (sent > 0) {
                     res->file_offset = offset;
                 }
 #elif defined(__APPLE__) || defined(__FreeBSD__)
                 // BSD-style sendfile
-                off_t len  = chunk_size;
+                off_t len = chunk_size;
                 int result = sendfile(res->file_fd, client_fd, res->file_offset, &len, NULL, 0);
                 if (result == 0 || (result == -1 && errno == EAGAIN)) {
                     sent = len;
@@ -1957,7 +1917,7 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
 
                 ssize_t read_bytes = pread(res->file_fd, file_buffer, chunk_size, res->file_offset);
                 if (read_bytes <= 0) {
-                    sent  = -1;
+                    sent = -1;
                     errno = EIO;
                 } else {
                     sent = write(client_fd, file_buffer, read_bytes);
@@ -1980,12 +1940,12 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
             // Normal buffer mode with optimized iovec setup
             struct iovec iov[3];
             iov[0].iov_base = res->status_buf + res->status_sent;
-            iov[0].iov_len  = res->status_len - res->status_sent;
+            iov[0].iov_len = res->status_len - res->status_sent;
             iov[1].iov_base = res->headers_buf + res->headers_sent;
-            iov[1].iov_len  = res->headers_len - res->headers_sent;
+            iov[1].iov_len = res->headers_len - res->headers_sent;
 
             iov[2].iov_base = (res->heap_allocated ? res->body.heap : res->body.stack) + res->body_sent;
-            iov[2].iov_len  = res->body_len - res->body_sent;
+            iov[2].iov_len = res->body_len - res->body_sent;
 
             sent = writev(client_fd, iov, 3);
             if (unlikely(sent < 0)) goto handle_error;
@@ -2107,7 +2067,7 @@ int pin_current_thread_to_core(int core_id) {
 
 #elif defined(__APPLE__)
     /* macOS-specific implementation using exact API signature */
-    thread_port_t thread                 = pthread_mach_thread_np(pthread_self());
+    thread_port_t thread = pthread_mach_thread_np(pthread_self());
     thread_affinity_policy_data_t policy = {core_id};
     kern_return_t ret =
         thread_policy_set(thread, THREAD_AFFINITY_POLICY, (thread_policy_t)&policy, THREAD_AFFINITY_POLICY_COUNT);
@@ -2125,10 +2085,10 @@ int pin_current_thread_to_core(int core_id) {
 }
 
 void* worker_thread(void* arg) {
-    WorkerData* worker       = (WorkerData*)arg;
-    int queue_fd             = worker->queue_fd;
-    int worker_id            = worker->id;
-    int cpu_core             = worker->designated_core;
+    WorkerData* worker = (WorkerData*)arg;
+    int queue_fd = worker->queue_fd;
+    int worker_id = worker->id;
+    int cpu_core = worker->designated_core;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
     pin_current_thread_to_core(cpu_core);
@@ -2139,7 +2099,7 @@ void* worker_thread(void* arg) {
     }
 
     event_t events[MAX_EVENTS] = {0};
-    long last_timeout_check    = 0;
+    long last_timeout_check = 0;
 
     while (server_running) {
         // Check for Keep-Alive timeouts every 5 seconds.
@@ -2201,8 +2161,8 @@ int pulsar_run(const char* addr, int port) {
     server_fd = create_server_socket(addr, port);
     set_nonblocking(server_fd);
 
-    pthread_t workers[NUM_WORKERS]                = {0};
-    WorkerData worker_data[NUM_WORKERS]           = {0};
+    pthread_t workers[NUM_WORKERS] = {0};
+    WorkerData worker_data[NUM_WORKERS] = {0};
     KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
 
     install_signal_handler();
@@ -2216,7 +2176,7 @@ int pulsar_run(const char* addr, int port) {
 #endif                                      /* PULSAR_H */
 
     // When creating worker threads
-    int num_cores      = get_num_available_cores();
+    int num_cores = get_num_available_cores();
     int reserved_cores = 1;  // Leave one core free
 
     // Initialize worker data and create workers
@@ -2227,9 +2187,9 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].queue_fd         = queue_fd;
-        worker_data[i].id               = i;
-        worker_data[i].designated_core  = i % ((size_t)(num_cores - reserved_cores));
+        worker_data[i].queue_fd = queue_fd;
+        worker_data[i].id = i;
+        worker_data[i].designated_core = i % ((size_t)(num_cores - reserved_cores));
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {

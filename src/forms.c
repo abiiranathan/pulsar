@@ -23,7 +23,7 @@ typedef enum {
 
 // Helper function to grow the files array
 INLINE bool grow_files_array(MultipartForm* form) {
-    size_t new_capacity    = form->files_capacity * 2;
+    size_t new_capacity = form->files_capacity * 2;
     FileHeader** new_files = (FileHeader**)arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
     if (!new_files) return false;
 
@@ -32,14 +32,14 @@ INLINE bool grow_files_array(MultipartForm* form) {
         memcpy(new_files, form->files, form->num_files * sizeof(FileHeader*));
     }
 
-    form->files          = new_files;
+    form->files = new_files;
     form->files_capacity = new_capacity;
     return true;
 }
 
 // Helper function to grow the fields array
 INLINE bool grow_fields_array(MultipartForm* form) {
-    size_t new_capacity   = form->fields_capacity * 2;
+    size_t new_capacity = form->fields_capacity * 2;
     FormField* new_fields = (FormField*)arena_alloc(form->arena, new_capacity * sizeof(FormField));
     if (!new_fields) return false;
 
@@ -48,7 +48,7 @@ INLINE bool grow_fields_array(MultipartForm* form) {
         memcpy(new_fields, form->fields, form->num_fields * sizeof(FormField));
     }
 
-    form->fields          = new_fields;
+    form->fields = new_fields;
     form->fields_capacity = new_capacity;
     return true;
 }
@@ -78,7 +78,7 @@ MultipartCode multipart_init(MultipartForm* form) {
         return ARENA_ALLOC_ERROR;
     }
 
-    form->files_capacity  = INITIAL_FILE_CAPACITY;
+    form->files_capacity = INITIAL_FILE_CAPACITY;
     form->fields_capacity = INITIAL_FIELD_CAPACITY;
 
     return MULTIPART_OK;
@@ -110,13 +110,13 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
     }
 
     size_t boundary_length = strlen(boundary);
-    const char* ptr        = data;
+    const char* ptr = data;
 
     // Temporary variables for parsing
-    const char* key_start   = NULL;
+    const char* key_start = NULL;
     const char* value_start = NULL;
 
-    State state        = STATE_BOUNDARY;
+    State state = STATE_BOUNDARY;
     MultipartCode code = MULTIPART_OK;
 
     // Current file header being built
@@ -146,7 +146,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     }
                     ptr += 6;  // Skip name=\"
                     key_start = ptr;
-                    state     = STATE_KEY;
+                    state = STATE_KEY;
                 } else {
                     ptr++;
                 }
@@ -171,11 +171,10 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         }
                         ptr += 13;  // Skip "; filename=\""
                         key_start = ptr;
-                        state     = STATE_FILENAME;
+                        state = STATE_FILENAME;
                     } else {
                         // Regular form field - move to value
-                        while (ptr < data + size && *ptr != '\n')
-                            ptr++;
+                        while (ptr < data + size && *ptr != '\n') ptr++;
                         if (ptr < data + size) ptr++;  // Skip newline
 
                         // Consume CRLF before value
@@ -184,7 +183,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         }
 
                         value_start = ptr;
-                        state       = STATE_VALUE;
+                        state = STATE_VALUE;
 
                         // Store the key for later use
                         if (form->num_fields >= form->fields_capacity) {
@@ -241,8 +240,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     }
 
                     // Move to end of line
-                    while (ptr < data + size && *ptr != '\n')
-                        ptr++;
+                    while (ptr < data + size && *ptr != '\n') ptr++;
                     if (ptr < data + size) ptr++;  // Skip newline
 
                     // Consume CRLF if present
@@ -283,8 +281,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                 }
 
                 // Move to end of line
-                while (ptr < data + size && *ptr != '\n')
-                    ptr++;
+                while (ptr < data + size && *ptr != '\n') ptr++;
                 if (ptr < data + size) ptr++;  // Skip newline
 
                 // Consume CRLF before file body
@@ -309,7 +306,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
 
             case STATE_FILE_BODY: {
                 current_header.offset = (size_t)(ptr - data);
-                size_t haystack_len   = size - current_header.offset;
+                size_t haystack_len = size - current_header.offset;
 
                 // Find end of file content
                 char* endptr = (char*)memmem(ptr, haystack_len, boundary, boundary_length);
@@ -318,7 +315,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     goto cleanup;
                 }
 
-                size_t endpos    = (size_t)(endptr - data);
+                size_t endpos = (size_t)(endptr - data);
                 size_t file_size = endpos - current_header.offset;
 
                 // Validate file size
@@ -348,7 +345,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                 memset(&current_header, 0, sizeof(FileHeader));
 
                 // Move pointer to boundary
-                ptr   = endptr;
+                ptr = endptr;
                 state = STATE_BOUNDARY;
             } break;
 
@@ -368,15 +365,15 @@ cleanup:
 bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     if (!content_type || !boundary) return false;
 
-    const char* prefix  = "--";
-    size_t prefix_len   = 2;
+    const char* prefix = "--";
+    size_t prefix_len = 2;
     size_t total_length = strlen(content_type);
 
     if (strncasecmp(content_type, "multipart/form-data", 19) != 0) {
         return false;
     }
 
-    char* start = strstr(content_type, "boundary=");
+    char* start = strstr((char*)content_type, "boundary=");
     if (!start) return false;
 
     // +9 for to move past "boundary="
@@ -399,11 +396,11 @@ void multipart_cleanup(MultipartForm* form) {
         form->arena = NULL;
     }
 
-    form->files           = NULL;
-    form->fields          = NULL;
-    form->num_files       = 0;
-    form->num_fields      = 0;
-    form->files_capacity  = 0;
+    form->files = NULL;
+    form->fields = NULL;
+    form->num_files = 0;
+    form->num_fields = 0;
+    form->files_capacity = 0;
     form->fields_capacity = 0;
 }
 

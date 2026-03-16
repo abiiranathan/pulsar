@@ -3,14 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-
-// Include helper macros
 #include "macros.h"
-
-// Per-connection arena memory.
-#ifndef ARENA_CAPACITY
-#define ARENA_CAPACITY 8 * 1024
-#endif
 
 // Enable logging callback.
 #ifndef ENABLE_LOGGING
@@ -90,7 +83,7 @@
 
 // Maximum number of headers in a request.
 #ifndef HEADERS_CAPACITY
-#define HEADERS_CAPACITY 32
+#define HEADERS_CAPACITY 64
 #endif
 
 // Constants
@@ -98,28 +91,17 @@
 #define HEADERS_BUF_SIZE 1024
 #define CACHE_LINE_SIZE  64
 
-// Assertions for all constants
-
-// Make sure they fit in uint8_t and uint16_t
 static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
 static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
-
-static_assert(ARENA_CAPACITY > 4 * 1024, "ARENA_CAPACITY must be > 4KB");
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
 static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
 static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
 static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
 static_assert(HEADERS_CAPACITY > 0, "HEADERS_CAPACITY must be > 0");
-
-// Ensure buffer sizes are reasonable
 static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
 static_assert(WRITE_BUFFER_SIZE >= 1024, "WRITE_BUFFER_SIZE must be at least 1KB");
-
-// Ensure timeouts are reasonable
 static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 seconds");
-
-// Ensure body size is reasonable
 static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
 static_assert(MAX_FILE_SIZE > 0, "MAX_FILE_SIZE must be > 0");
 static_assert(MAX_FILE_SIZE <= MAX_BODY_SIZE, "MAX_FILE_SIZE must be <= MAX_BODY_SIZE");

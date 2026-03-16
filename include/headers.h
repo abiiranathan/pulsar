@@ -41,7 +41,10 @@ INLINE bool headers_set(headers_t* headers, const char* name, const char* value)
     for (size_t i = 0; i < headers->count; i++) {
         if (strcasecmp(headers->entries[i].name, name) == 0) {
             char* new_value = arena_strdup(headers->arena, value);
-            if (!new_value) return false;
+            if (!new_value) {
+                fprintf(stderr, "headers_set: arena_strdup failed\n");
+                return false;
+            }
 
             headers->entries[i].value = new_value;
 
@@ -54,18 +57,18 @@ INLINE bool headers_set(headers_t* headers, const char* name, const char* value)
     }
 
 new_header:
-    bool state = false;
     // Add new header with copied strings
-    char* new_name  = arena_strdup(headers->arena, name);
+    char* new_name = arena_strdup(headers->arena, name);
     char* new_value = arena_strdup(headers->arena, value);
     if (new_name && new_value) {
-        headers->entries[headers->count].name  = new_name;
+        headers->entries[headers->count].name = new_name;
         headers->entries[headers->count].value = new_value;
         headers->count++;
-        state = true;
+        return true;
     }
 
-    return state;
+    fprintf(stderr, "headers_set: arena_strdup failed to add new header\n");
+    return false;
 }
 
 // Get a header (case-insensitive)
@@ -79,8 +82,8 @@ INLINE const char* headers_get(const headers_t* headers, const char* name) {
 }
 
 // Iterator
-#define headers_foreach(headers, item)                                                                                 \
-    if (headers)                                                                                                       \
+#define headers_foreach(headers, item) \
+    if (headers)                       \
         for (size_t _i = 0; _i < (headers)->count && ((item) = &(headers)->entries[_i], 1); _i++)
 
 #ifdef __cplusplus

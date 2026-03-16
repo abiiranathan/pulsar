@@ -20,13 +20,13 @@ __attribute__((always_inline)) static inline void* memmem_scalar(const void* hay
     if (needle_len == 0) return (void*)haystack;
     if (haystack_len < needle_len) return NULL;
 
-    const unsigned char* h   = (const unsigned char*)haystack;
-    const unsigned char* n   = (const unsigned char*)needle;
+    const unsigned char* h = (const unsigned char*)haystack;
+    const unsigned char* n = (const unsigned char*)needle;
     const unsigned char* end = h + haystack_len - needle_len;
 
     /* Single character needle - use optimized memchr */
     if (needle_len == 1) {
-        return memchr(haystack, n[0], haystack_len);
+        return memchr((char*)haystack, n[0], haystack_len);
     }
 
     /* Two character needle */
@@ -49,7 +49,7 @@ __attribute__((always_inline)) static inline void* memmem_scalar(const void* hay
     }
 
     const unsigned char first = n[0];
-    const unsigned char last  = n[needle_len - 1];
+    const unsigned char last = n[needle_len - 1];
 
     while (h <= end) {
         /* Quick check: compare last character first (often faster) */
@@ -82,7 +82,7 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
         return memmem_scalar(haystack, haystack_len, needle, needle_len);
     }
 
-    const size_t end_pos      = haystack_len - needle_len;
+    const size_t end_pos = haystack_len - needle_len;
     const unsigned char first = n[0];
 
     /* Create vector of first character */
@@ -93,7 +93,7 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
     /* SIMD search for first character with 4-byte verification */
     if (needle_len >= 4) {
         const unsigned char second = n[1];
-        const unsigned char third  = n[2];
+        const unsigned char third = n[2];
         const unsigned char fourth = n[3];
 
         while (pos + 32 <= end_pos + 1) {
@@ -104,7 +104,7 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
             __m256i block3 = _mm256_loadu_si256((const __m256i*)(h + pos + 3));
 
             /* Compare first character */
-            __m256i cmp0  = _mm256_cmpeq_epi8(block0, first_vec);
+            __m256i cmp0 = _mm256_cmpeq_epi8(block0, first_vec);
             uint32_t mask = (uint32_t)_mm256_movemask_epi8(cmp0);
 
             /* If matches found, verify next three bytes */
@@ -117,7 +117,7 @@ static void* memmem_avx2(const void* haystack, size_t haystack_len, const void* 
                 _mm256_storeu_si256((__m256i*)temp3, block3);
 
                 while (mask) {
-                    size_t offset        = (size_t)__builtin_ctz(mask);
+                    size_t offset = (size_t)__builtin_ctz(mask);
                     size_t candidate_pos = pos + offset;
 
                     /* Verify bytes 2,3,4 using pre-loaded blocks */
