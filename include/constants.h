@@ -81,11 +81,6 @@
 #define MAX_ROUTE_MIDDLEWARE 2
 #endif
 
-// Maximum number of headers in a request.
-#ifndef HEADERS_CAPACITY
-#define HEADERS_CAPACITY 64
-#endif
-
 // Constants
 #define STATUS_LINE_SIZE 128
 #define HEADERS_BUF_SIZE 1024
@@ -98,7 +93,6 @@ static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
 static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
 static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
 static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
-static_assert(HEADERS_CAPACITY > 0, "HEADERS_CAPACITY must be > 0");
 static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
 static_assert(WRITE_BUFFER_SIZE >= 1024, "WRITE_BUFFER_SIZE must be at least 1KB");
 static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 seconds");

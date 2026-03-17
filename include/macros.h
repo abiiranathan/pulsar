@@ -6,45 +6,45 @@
 #include <string.h>
 
 // Common assertion infrastructure
-#define ASSERT_BASE(cond, fmt, ...)                                                                                    \
-    do {                                                                                                               \
-        if (!(cond)) {                                                                                                 \
-            printf("%s:%d [%s]: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__);                              \
-            exit(EXIT_FAILURE);                                                                                        \
-        }                                                                                                              \
+#define ASSERT_BASE(cond, fmt, ...)                                                       \
+    do {                                                                                  \
+        if (!(cond)) {                                                                    \
+            printf("%s:%d [%s]: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+            exit(EXIT_FAILURE);                                                           \
+        }                                                                                 \
     } while (0)
 
 // Main assertion macro
 #define ASSERT(cond) ASSERT_BASE(cond, "Assertion '%s' failed", #cond)
 
 // Equality assertions
-#define ASSERT_EQ(a, b)                                                                                                \
-    do {                                                                                                               \
-        typeof(a) _a = (a);                                                                                            \
-        typeof(b) _b = (b);                                                                                            \
-        ASSERT_BASE(_a == _b, "Assertion '%s == %s' failed (%ld != %ld)", #a, #b, (long)_a, (long)_b);                 \
+#define ASSERT_EQ(a, b)                                                                                \
+    do {                                                                                               \
+        typeof(a) _a = (a);                                                                            \
+        typeof(b) _b = (b);                                                                            \
+        ASSERT_BASE(_a == _b, "Assertion '%s == %s' failed (%ld != %ld)", #a, #b, (long)_a, (long)_b); \
     } while (0)
 
-#define ASSERT_NE(a, b)                                                                                                \
-    do {                                                                                                               \
-        typeof(a) _a = (a);                                                                                            \
-        typeof(b) _b = (b);                                                                                            \
-        ASSERT_BASE(_a != _b, "Assertion '%s != %s' failed (both are %ld)", #a, #b, (long)_a);                         \
+#define ASSERT_NE(a, b)                                                                        \
+    do {                                                                                       \
+        typeof(a) _a = (a);                                                                    \
+        typeof(b) _b = (b);                                                                    \
+        ASSERT_BASE(_a != _b, "Assertion '%s != %s' failed (both are %ld)", #a, #b, (long)_a); \
     } while (0)
 
 // Boolean assertion
 #define ASSERT_TRUE(cond) ASSERT_BASE(cond, "Assertion '%s' is not true", #cond)
 
 // String comparison
-#define ASSERT_STR_EQ(a, b)                                                                                            \
-    do {                                                                                                               \
-        const char* _a = (a);                                                                                          \
-        const char* _b = (b);                                                                                          \
-        if (_a == NULL || _b == NULL) {                                                                                \
-            ASSERT_BASE(_a == _b, "Assertion '%s == %s' failed (one is NULL)", #a, #b);                                \
-        } else {                                                                                                       \
-            ASSERT_BASE(strcmp(_a, _b) == 0, "Assertion '%s == %s' failed (\"%s\" != \"%s\")", #a, #b, _a, _b);        \
-        }                                                                                                              \
+#define ASSERT_STR_EQ(a, b)                                                                                     \
+    do {                                                                                                        \
+        const char* _a = (a);                                                                                   \
+        const char* _b = (b);                                                                                   \
+        if (_a == NULL || _b == NULL) {                                                                         \
+            ASSERT_BASE(_a == _b, "Assertion '%s == %s' failed (one is NULL)", #a, #b);                         \
+        } else {                                                                                                \
+            ASSERT_BASE(strcmp(_a, _b) == 0, "Assertion '%s == %s' failed (\"%s\" != \"%s\")", #a, #b, _a, _b); \
+        }                                                                                                       \
     } while (0)
 
 #define IS_POWER_OF_2(n)     ((n) > 0 && ((n) & ((n) - 1)) == 0)
@@ -53,15 +53,37 @@
 #define UNUSED(var)          ((void)var)
 
 #if defined(__GNUC__) || defined(__clang__)
-#define likely(x)     __builtin_expect(!!(x), 1)
-#define unlikely(x)   __builtin_expect(!!(x), 0)
-#define INLINE        __attribute__((always_inline)) static inline
-#define STATIC_INLINE INLINE static
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
 #else
 #define likely(x)   (x)
 #define unlikely(x) (x)
-#define INLINE
-#define STATIC_INLINE
+#endif
+
+/* Compiler-specific intrinsics for bit manipulation */
+#if defined(_MSC_VER)
+#include <intrin.h>
+#pragma intrinsic(_BitScanForward)
+#pragma intrinsic(_BitScanForward64)
+
+static inline uint32_t ctz32(uint32_t x) {
+    unsigned long index;
+    _BitScanForward(&index, x);
+    return (uint32_t)index;
+}
+
+static inline uint32_t ctz64(uint64_t x) {
+    unsigned long index;
+    _BitScanForward64(&index, x);
+    return (uint32_t)index;
+}
+
+#define INLINE       __forceinline static inline
+#define __restrict__ __restrict
+#else
+#define ctz32(x) ((uint32_t)__builtin_ctz(x))
+#define ctz64(x) ((uint32_t)__builtin_ctzll(x))
+#define INLINE   __attribute__((always_inline)) static inline
 #endif
 
 #define ALIGN_UP(size, alignment) (((size) + (alignment) - 1) & ~((alignment) - 1))

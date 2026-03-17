@@ -18,35 +18,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include "macros.h"
 
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-/* Compiler-specific intrinsics for bit manipulation */
-#if defined(_MSC_VER)
-#include <intrin.h>
-#pragma intrinsic(_BitScanForward)
-#pragma intrinsic(_BitScanForward64)
-
-static inline uint32_t ctz32(uint32_t x) {
-    unsigned long index;
-    _BitScanForward(&index, x);
-    return (uint32_t)index;
-}
-
-static inline uint32_t ctz64(uint64_t x) {
-    unsigned long index;
-    _BitScanForward64(&index, x);
-    return (uint32_t)index;
-}
-
-#define INLINE       __forceinline
-#define __restrict__ __restrict
-#else
-#define ctz32(x) ((uint32_t)__builtin_ctz(x))
-#define ctz64(x) ((uint32_t)__builtin_ctzll(x))
-#define INLINE   __attribute__((always_inline))
 #endif
 
 /**
@@ -58,7 +33,7 @@ static inline uint32_t ctz64(uint64_t x) {
  * @param p Pointer to the memory to read.
  * @return A mathematically consistent 16-bit integer regardless of host endianness.
  */
-INLINE static inline uint16_t le_load_u16(const unsigned char* p) {
+INLINE uint16_t le_load_u16(const unsigned char* p) {
     /* Bitwise operations act on logical values, not physical memory layout.
        This safely avoids strict aliasing and unaligned access penalties. */
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -69,7 +44,7 @@ INLINE static inline uint16_t le_load_u16(const unsigned char* p) {
  * * Bypasses the overhead of setting up a `memcmp` function call for very
  * short inner strings (1 or 2 bytes). Falls back to `memcmp` for longer strings.
  */
-INLINE static inline int verify_inner(const unsigned char* candidate, const unsigned char* n_inner, size_t inner_len) {
+INLINE int verify_inner(const unsigned char* candidate, const unsigned char* n_inner, size_t inner_len) {
     /* Fast-path the most likely scenario first to minimize branch prediction misses */
     if (inner_len >= 3) return memcmp(candidate, n_inner, inner_len) == 0;
 
@@ -91,8 +66,8 @@ INLINE static inline int verify_inner(const unsigned char* candidate, const unsi
  * @param needle_len Size of the needle in bytes.
  * @return Pointer to the first occurrence of needle, or NULL if not found.
  */
-INLINE static inline void* memmem_scalar(const void* __restrict__ haystack, size_t haystack_len,
-                                         const void* __restrict__ needle, size_t needle_len) {
+INLINE void* memmem_scalar(const void* __restrict__ haystack, size_t haystack_len, const void* __restrict__ needle,
+                           size_t needle_len) {
     if (needle_len == 0) return (void*)haystack;
     if (haystack_len < needle_len) return NULL;
 

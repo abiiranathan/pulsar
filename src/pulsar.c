@@ -224,8 +224,10 @@ INLINE request_t* create_request(Arena* arena) {
     request_t* req = arena_alloc(arena, sizeof(request_t));
     if (!req) return NULL;
 
-    req->headers = headers_new(arena);
+    req->headers = arena_alloc(arena, sizeof(headers_t));
     if (!req->headers) return NULL;
+
+    headers_init(req->headers, arena);
 
     req->path = arena_alloc(arena, MAX_PATH_LEN + 1);
     if (!req->path) return NULL;
@@ -454,12 +456,13 @@ INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
     char* query = strchr(path, '?');
     if (!query) return true;
 
-    *query = '\0';
+    *query = '\0';  // Truncate to a clean path (minus query params)
     *path_len = (size_t)(query - path);
     query++;
 
-    conn->request->query_params = headers_new(conn->arena);
+    conn->request->query_params = arena_alloc(conn->arena, sizeof(headers_t));
     if (!conn->request->query_params) return false;
+    headers_init(conn->request->query_params, conn->arena);
 
     char* save1 = NULL;
     char* save2 = NULL;

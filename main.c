@@ -27,9 +27,9 @@ void echo_handler(PulsarCtx* ctx) {
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "text/plain");
 
-    const char* method    = req_method(conn);
-    const char* path      = req_path(conn);
-    const char* body      = req_body(conn);
+    const char* method = req_method(conn);
+    const char* path = req_path(conn);
+    const char* body = req_body(conn);
     size_t content_length = req_content_len(conn);
 
     // Echo request method and path
@@ -82,7 +82,7 @@ void chunked_handler(PulsarCtx* ctx) {
         // Test case 2: Multi-line text chunk (4KB)
         {
             char multi_line[4096];
-            char* pos        = multi_line;
+            char* pos = multi_line;
             size_t remaining = sizeof(multi_line) - 1;
 
             for (int i = 0; i < 20 && remaining > 100; i++) {
@@ -185,7 +185,7 @@ void chunked_handler(PulsarCtx* ctx) {
         {
             static char massive_chunk[16384];
 
-            char* pos        = massive_chunk;
+            char* pos = massive_chunk;
             size_t remaining = sizeof(massive_chunk) - 1;
 
             // Create structured content
@@ -213,9 +213,15 @@ void chunked_handler(PulsarCtx* ctx) {
     });
 }
 
+bool print_header_callback(const char* name, const char* value, void* userdata) {
+    (void)userdata;
+    printf("%s = %s\n", name, value);
+    return true;
+}
+
 void pathparams_query_params_handler(PulsarCtx* ctx) {
-    PulsarConn* conn     = ctx->conn;
-    const char* userId   = get_path_param(conn, "user_id");
+    PulsarConn* conn = ctx->conn;
+    const char* userId = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
     ASSERT(userId && username);
 
@@ -227,10 +233,7 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
     if (params) {
         // Check for query params.
         printf("Query Params: \n");
-        header_entry* entry = NULL;
-        headers_foreach(params, entry) {
-            printf("%s = %s\n", entry->name, entry->value);
-        }
+        headers_foreach(params, print_header_callback, NULL);
     }
     conn_writef(conn, "Your user_id is %s and username %s\n", userId, username);
 }
@@ -263,7 +266,7 @@ void handle_form(PulsarCtx* ctx) {
         return;
     }
 
-    const char* body      = req_body(conn);
+    const char* body = req_body(conn);
     size_t content_length = req_content_len(conn);
 
     code = multipart_parse(body, content_length, boundary, &form);
@@ -311,8 +314,8 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
     }
 
     const char* method = req_method(conn);
-    const char* path   = req_path(conn);
-    char* ua           = (char*)req_header_get(conn, "User-Agent");
+    const char* path = req_path(conn);
+    char* ua = (char*)req_header_get(conn, "User-Agent");
     if (!ua) {
         ua = "-";
     }
@@ -339,7 +342,7 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
     }
 
     // Build the log line in our buffer
-    char* ptr       = log_buffer;
+    char* ptr = log_buffer;
     const char* end = log_buffer + LOG_BUFFER_SIZE - 1;  // Leave room for null terminator
 
     // [Pulsar]
@@ -368,7 +371,7 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
 
 void mw1(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    char* name       = pulsar_strdup(conn, "PULSAR");
+    char* name = pulsar_strdup(conn, "PULSAR");
     pulsar_set(conn, "name", name, NULL);
 }
 
@@ -386,7 +389,7 @@ int main() {
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
 
-    route_t* hello   = route_get("/hello", hello_world_handler);
+    route_t* hello = route_get("/hello", hello_world_handler);
     Middleware mw[2] = {mw1, mw2};
     use_route_middleware(hello, mw, 2);
 
