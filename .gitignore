@@ -13,3 +13,5 @@ dist
 *.pdf
 scratch
 .cache
+tests/test_memmem
+tests/benchmark_memmem
