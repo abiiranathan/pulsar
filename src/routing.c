@@ -235,8 +235,7 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
 
             // Extract parameter name
             const char* name_start = pat;
-            while (*pat && *pat != '}')
-                pat++;
+            while (*pat && *pat != '}') pat++;
             if (*pat != '}') return false;  // Malformed pattern
 
             size_t name_len = (size_t)(pat - name_start);
@@ -262,10 +261,8 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
     }
 
     // Skip trailing slashes in both pattern and URL
-    while (*pat == '/')
-        pat++;
-    while (*url_ptr == '/')
-        url_ptr++;
+    while (*pat == '/') pat++;
+    while (*url_ptr == '/') url_ptr++;
 
     path_params->match_count = nparams;
 

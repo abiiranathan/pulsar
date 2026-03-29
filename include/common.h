@@ -42,8 +42,8 @@
 
 typedef enum {
     HTTP_CONTENT_TYPE_SET = (1 << 0),  // 0x01 (1)
-    HTTP_HEADERS_WRITTEN = (1 << 1),   // 0x02 (2)
-    HTTP_RANGE_REQUEST = (1 << 2),     // 0x04 (4)
+    HTTP_HEADERS_WRITTEN  = (1 << 1),  // 0x02 (2)
+    HTTP_RANGE_REQUEST    = (1 << 2),  // 0x04 (4)
     HTTP_CHUNKED_TRANSFER = (1 << 3),  // 0x08 (8)
 } bit_flags;
 

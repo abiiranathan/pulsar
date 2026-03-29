@@ -139,69 +139,69 @@ typedef struct {
 
 /* Static header name strings (shared, never duplicated) */
 static const char* const HEADER_NAMES[] = {
-    [HDR_CUSTOM] = NULL,
-    [HDR_HOST] = "Host",
-    [HDR_USER_AGENT] = "User-Agent",
-    [HDR_ACCEPT] = "Accept",
-    [HDR_ACCEPT_ENCODING] = "Accept-Encoding",
-    [HDR_ACCEPT_LANGUAGE] = "Accept-Language",
-    [HDR_ACCEPT_CHARSET] = "Accept-Charset",
-    [HDR_CONNECTION] = "Connection",
-    [HDR_CONTENT_TYPE] = "Content-Type",
-    [HDR_CONTENT_LENGTH] = "Content-Length",
-    [HDR_CONTENT_ENCODING] = "Content-Encoding",
-    [HDR_AUTHORIZATION] = "Authorization",
-    [HDR_COOKIE] = "Cookie",
-    [HDR_REFERER] = "Referer",
-    [HDR_ORIGIN] = "Origin",
-    [HDR_IF_MODIFIED_SINCE] = "If-Modified-Since",
-    [HDR_IF_NONE_MATCH] = "If-None-Match",
-    [HDR_IF_MATCH] = "If-Match",
-    [HDR_IF_UNMODIFIED_SINCE] = "If-Unmodified-Since",
-    [HDR_IF_RANGE] = "If-Range",
-    [HDR_RANGE] = "Range",
-    [HDR_CACHE_CONTROL] = "Cache-Control",
-    [HDR_PRAGMA] = "Pragma",
-    [HDR_TE] = "TE",
-    [HDR_UPGRADE] = "Upgrade",
-    [HDR_UPGRADE_INSECURE_REQUESTS] = "Upgrade-Insecure-Requests",
-    [HDR_SET_COOKIE] = "Set-Cookie",
-    [HDR_LOCATION] = "Location",
-    [HDR_SERVER] = "Server",
-    [HDR_DATE] = "Date",
-    [HDR_LAST_MODIFIED] = "Last-Modified",
-    [HDR_ETAG] = "ETag",
-    [HDR_EXPIRES] = "Expires",
-    [HDR_AGE] = "Age",
-    [HDR_VARY] = "Vary",
-    [HDR_TRANSFER_ENCODING] = "Transfer-Encoding",
-    [HDR_ALLOW] = "Allow",
-    [HDR_CONTENT_RANGE] = "Content-Range",
-    [HDR_ACCEPT_RANGES] = "Accept-Ranges",
-    [HDR_WWW_AUTHENTICATE] = "WWW-Authenticate",
-    [HDR_PROXY_AUTHENTICATE] = "Proxy-Authenticate",
-    [HDR_RETRY_AFTER] = "Retry-After",
-    [HDR_ACCESS_CONTROL_ALLOW_ORIGIN] = "Access-Control-Allow-Origin",
-    [HDR_ACCESS_CONTROL_ALLOW_METHODS] = "Access-Control-Allow-Methods",
-    [HDR_ACCESS_CONTROL_ALLOW_HEADERS] = "Access-Control-Allow-Headers",
-    [HDR_ACCESS_CONTROL_EXPOSE_HEADERS] = "Access-Control-Expose-Headers",
-    [HDR_ACCESS_CONTROL_MAX_AGE] = "Access-Control-Max-Age",
+    [HDR_CUSTOM]                           = NULL,
+    [HDR_HOST]                             = "Host",
+    [HDR_USER_AGENT]                       = "User-Agent",
+    [HDR_ACCEPT]                           = "Accept",
+    [HDR_ACCEPT_ENCODING]                  = "Accept-Encoding",
+    [HDR_ACCEPT_LANGUAGE]                  = "Accept-Language",
+    [HDR_ACCEPT_CHARSET]                   = "Accept-Charset",
+    [HDR_CONNECTION]                       = "Connection",
+    [HDR_CONTENT_TYPE]                     = "Content-Type",
+    [HDR_CONTENT_LENGTH]                   = "Content-Length",
+    [HDR_CONTENT_ENCODING]                 = "Content-Encoding",
+    [HDR_AUTHORIZATION]                    = "Authorization",
+    [HDR_COOKIE]                           = "Cookie",
+    [HDR_REFERER]                          = "Referer",
+    [HDR_ORIGIN]                           = "Origin",
+    [HDR_IF_MODIFIED_SINCE]                = "If-Modified-Since",
+    [HDR_IF_NONE_MATCH]                    = "If-None-Match",
+    [HDR_IF_MATCH]                         = "If-Match",
+    [HDR_IF_UNMODIFIED_SINCE]              = "If-Unmodified-Since",
+    [HDR_IF_RANGE]                         = "If-Range",
+    [HDR_RANGE]                            = "Range",
+    [HDR_CACHE_CONTROL]                    = "Cache-Control",
+    [HDR_PRAGMA]                           = "Pragma",
+    [HDR_TE]                               = "TE",
+    [HDR_UPGRADE]                          = "Upgrade",
+    [HDR_UPGRADE_INSECURE_REQUESTS]        = "Upgrade-Insecure-Requests",
+    [HDR_SET_COOKIE]                       = "Set-Cookie",
+    [HDR_LOCATION]                         = "Location",
+    [HDR_SERVER]                           = "Server",
+    [HDR_DATE]                             = "Date",
+    [HDR_LAST_MODIFIED]                    = "Last-Modified",
+    [HDR_ETAG]                             = "ETag",
+    [HDR_EXPIRES]                          = "Expires",
+    [HDR_AGE]                              = "Age",
+    [HDR_VARY]                             = "Vary",
+    [HDR_TRANSFER_ENCODING]                = "Transfer-Encoding",
+    [HDR_ALLOW]                            = "Allow",
+    [HDR_CONTENT_RANGE]                    = "Content-Range",
+    [HDR_ACCEPT_RANGES]                    = "Accept-Ranges",
+    [HDR_WWW_AUTHENTICATE]                 = "WWW-Authenticate",
+    [HDR_PROXY_AUTHENTICATE]               = "Proxy-Authenticate",
+    [HDR_RETRY_AFTER]                      = "Retry-After",
+    [HDR_ACCESS_CONTROL_ALLOW_ORIGIN]      = "Access-Control-Allow-Origin",
+    [HDR_ACCESS_CONTROL_ALLOW_METHODS]     = "Access-Control-Allow-Methods",
+    [HDR_ACCESS_CONTROL_ALLOW_HEADERS]     = "Access-Control-Allow-Headers",
+    [HDR_ACCESS_CONTROL_EXPOSE_HEADERS]    = "Access-Control-Expose-Headers",
+    [HDR_ACCESS_CONTROL_MAX_AGE]           = "Access-Control-Max-Age",
     [HDR_ACCESS_CONTROL_ALLOW_CREDENTIALS] = "Access-Control-Allow-Credentials",
-    [HDR_ACCESS_CONTROL_REQUEST_METHOD] = "Access-Control-Request-Method",
-    [HDR_ACCESS_CONTROL_REQUEST_HEADERS] = "Access-Control-Request-Headers",
-    [HDR_STRICT_TRANSPORT_SECURITY] = "Strict-Transport-Security",
-    [HDR_CONTENT_SECURITY_POLICY] = "Content-Security-Policy",
-    [HDR_X_FRAME_OPTIONS] = "X-Frame-Options",
-    [HDR_X_CONTENT_TYPE_OPTIONS] = "X-Content-Type-Options",
-    [HDR_X_XSS_PROTECTION] = "X-XSS-Protection",
-    [HDR_REFERRER_POLICY] = "Referrer-Policy",
-    [HDR_X_FORWARDED_FOR] = "X-Forwarded-For",
-    [HDR_X_FORWARDED_PROTO] = "X-Forwarded-Proto",
-    [HDR_X_FORWARDED_HOST] = "X-Forwarded-Host",
-    [HDR_X_REAL_IP] = "X-Real-IP",
-    [HDR_FORWARDED] = "Forwarded",
-    [HDR_VIA] = "Via",
-    [HDR_ALT_SVC] = "Alt-Svc",
+    [HDR_ACCESS_CONTROL_REQUEST_METHOD]    = "Access-Control-Request-Method",
+    [HDR_ACCESS_CONTROL_REQUEST_HEADERS]   = "Access-Control-Request-Headers",
+    [HDR_STRICT_TRANSPORT_SECURITY]        = "Strict-Transport-Security",
+    [HDR_CONTENT_SECURITY_POLICY]          = "Content-Security-Policy",
+    [HDR_X_FRAME_OPTIONS]                  = "X-Frame-Options",
+    [HDR_X_CONTENT_TYPE_OPTIONS]           = "X-Content-Type-Options",
+    [HDR_X_XSS_PROTECTION]                 = "X-XSS-Protection",
+    [HDR_REFERRER_POLICY]                  = "Referrer-Policy",
+    [HDR_X_FORWARDED_FOR]                  = "X-Forwarded-For",
+    [HDR_X_FORWARDED_PROTO]                = "X-Forwarded-Proto",
+    [HDR_X_FORWARDED_HOST]                 = "X-Forwarded-Host",
+    [HDR_X_REAL_IP]                        = "X-Real-IP",
+    [HDR_FORWARDED]                        = "Forwarded",
+    [HDR_VIA]                              = "Via",
+    [HDR_ALT_SVC]                          = "Alt-Svc",
 };
 
 /**
@@ -212,7 +212,7 @@ static const char* const HEADER_NAMES[] = {
  */
 static ARENA_INLINE header_id_t resolve_static_id(const char* name, uint32_t* out_hash) {
     // FNV-1a hash with case normalization
-    uint32_t h = 0x811c9dc5u;
+    uint32_t h    = 0x811c9dc5u;
     const char* p = name;
     while (*p) {
         char c = *p++;
@@ -361,7 +361,7 @@ static ARENA_INLINE header_id_t resolve_static_id(const char* name, uint32_t* ou
  */
 static ARENA_INLINE void headers_init(headers_t* h, Arena* arena) {
     h->arena = arena;
-    h->mask = 0;
+    h->mask  = 0;
     h->count = 0;
 }
 
@@ -402,10 +402,10 @@ static ARENA_INLINE bool headers_set(headers_t* h, const char* name, const char*
     if (ARENA_UNLIKELY(h->count >= HEADERS_CAPACITY)) return false;
 
     header_entry* e = &h->entries[h->count++];
-    e->hash = name_hash;
-    e->id = (uint8_t)id;
-    e->name = (id != HDR_CUSTOM) ? HEADER_NAMES[id] : arena_strdup(h->arena, name);
-    e->value = arena_strdup(h->arena, value);
+    e->hash         = name_hash;
+    e->id           = (uint8_t)id;
+    e->name         = (id != HDR_CUSTOM) ? HEADER_NAMES[id] : arena_strdup(h->arena, name);
+    e->value        = arena_strdup(h->arena, value);
 
     // Set the presence bit
     if (id != HDR_CUSTOM) h->mask |= (1ULL << id);

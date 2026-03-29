@@ -90,11 +90,11 @@ INLINE void* memmem_scalar(const void* __restrict__ haystack, size_t haystack_le
     }
 
     /* General case: needle length >= 3 */
-    const unsigned char first = n[0];
-    const unsigned char last = n[needle_len - 1];
+    const unsigned char first       = n[0];
+    const unsigned char last        = n[needle_len - 1];
     const size_t needle_len_minus_1 = needle_len - 1;
-    const size_t inner_len = needle_len - 2;
-    const unsigned char* end = h + haystack_len - needle_len;
+    const size_t inner_len          = needle_len - 2;
+    const unsigned char* end        = h + haystack_len - needle_len;
 
     while (h <= end) {
         /* Rapidly skip non-matching prefixes using libc's optimized memchr */
@@ -136,14 +136,14 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
         return memmem_scalar(haystack, haystack_len, needle, needle_len);
     }
 
-    const unsigned char* h = (const unsigned char*)haystack;
-    const unsigned char* n = (const unsigned char*)needle;
-    const size_t end_pos = haystack_len - needle_len;
+    const unsigned char* h          = (const unsigned char*)haystack;
+    const unsigned char* n          = (const unsigned char*)needle;
+    const size_t end_pos            = haystack_len - needle_len;
     const size_t needle_len_minus_1 = needle_len - 1;
-    const size_t inner_len = needle_len - 2;
+    const size_t inner_len          = needle_len - 2;
 
     const __m256i first_vec = _mm256_set1_epi8((char)n[0]);
-    const __m256i last_vec = _mm256_set1_epi8((char)n[needle_len_minus_1]);
+    const __m256i last_vec  = _mm256_set1_epi8((char)n[needle_len_minus_1]);
 
     size_t pos = 0;
 
@@ -152,20 +152,20 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
 
     while (pos <= simd_limit_64) {
         __m256i block_first0 = _mm256_loadu_si256((const __m256i*)(h + pos));
-        __m256i block_last0 = _mm256_loadu_si256((const __m256i*)(h + pos + needle_len_minus_1));
+        __m256i block_last0  = _mm256_loadu_si256((const __m256i*)(h + pos + needle_len_minus_1));
 
         __m256i block_first1 = _mm256_loadu_si256((const __m256i*)(h + pos + 32));
-        __m256i block_last1 = _mm256_loadu_si256((const __m256i*)(h + pos + 32 + needle_len_minus_1));
+        __m256i block_last1  = _mm256_loadu_si256((const __m256i*)(h + pos + 32 + needle_len_minus_1));
 
         __m256i cmp_first0 = _mm256_cmpeq_epi8(block_first0, first_vec);
-        __m256i cmp_last0 = _mm256_cmpeq_epi8(block_last0, last_vec);
-        __m256i matched0 = _mm256_and_si256(cmp_first0, cmp_last0);
-        uint32_t mask0 = (uint32_t)_mm256_movemask_epi8(matched0);
+        __m256i cmp_last0  = _mm256_cmpeq_epi8(block_last0, last_vec);
+        __m256i matched0   = _mm256_and_si256(cmp_first0, cmp_last0);
+        uint32_t mask0     = (uint32_t)_mm256_movemask_epi8(matched0);
 
         __m256i cmp_first1 = _mm256_cmpeq_epi8(block_first1, first_vec);
-        __m256i cmp_last1 = _mm256_cmpeq_epi8(block_last1, last_vec);
-        __m256i matched1 = _mm256_and_si256(cmp_first1, cmp_last1);
-        uint32_t mask1 = (uint32_t)_mm256_movemask_epi8(matched1);
+        __m256i cmp_last1  = _mm256_cmpeq_epi8(block_last1, last_vec);
+        __m256i matched1   = _mm256_and_si256(cmp_first1, cmp_last1);
+        uint32_t mask1     = (uint32_t)_mm256_movemask_epi8(matched1);
 
         while (mask0) {
             uint32_t offset = ctz32(mask0);
@@ -190,12 +190,12 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
 
     while (pos <= simd_limit_32) {
         __m256i block_first = _mm256_loadu_si256((const __m256i*)(h + pos));
-        __m256i block_last = _mm256_loadu_si256((const __m256i*)(h + pos + needle_len_minus_1));
+        __m256i block_last  = _mm256_loadu_si256((const __m256i*)(h + pos + needle_len_minus_1));
 
         __m256i cmp_first = _mm256_cmpeq_epi8(block_first, first_vec);
-        __m256i cmp_last = _mm256_cmpeq_epi8(block_last, last_vec);
-        __m256i matched = _mm256_and_si256(cmp_first, cmp_last);
-        uint32_t mask = (uint32_t)_mm256_movemask_epi8(matched);
+        __m256i cmp_last  = _mm256_cmpeq_epi8(block_last, last_vec);
+        __m256i matched   = _mm256_and_si256(cmp_first, cmp_last);
+        uint32_t mask     = (uint32_t)_mm256_movemask_epi8(matched);
 
         while (mask) {
             uint32_t offset = ctz32(mask);
@@ -236,14 +236,14 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
         return memmem_scalar(haystack, haystack_len, needle, needle_len);
     }
 
-    const unsigned char* h = (const unsigned char*)haystack;
-    const unsigned char* n = (const unsigned char*)needle;
-    const size_t end_pos = haystack_len - needle_len;
+    const unsigned char* h          = (const unsigned char*)haystack;
+    const unsigned char* n          = (const unsigned char*)needle;
+    const size_t end_pos            = haystack_len - needle_len;
     const size_t needle_len_minus_1 = needle_len - 1;
-    const size_t inner_len = needle_len - 2;
+    const size_t inner_len          = needle_len - 2;
 
     uint8x16_t first_vec = vdupq_n_u8(n[0]);
-    uint8x16_t last_vec = vdupq_n_u8(n[needle_len_minus_1]);
+    uint8x16_t last_vec  = vdupq_n_u8(n[needle_len_minus_1]);
 
     size_t pos = 0;
 
@@ -252,22 +252,22 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
 
     while (pos <= simd_limit_32) {
         uint8x16_t block_first0 = vld1q_u8(h + pos);
-        uint8x16_t block_last0 = vld1q_u8(h + pos + needle_len_minus_1);
+        uint8x16_t block_last0  = vld1q_u8(h + pos + needle_len_minus_1);
         uint8x16_t block_first1 = vld1q_u8(h + pos + 16);
-        uint8x16_t block_last1 = vld1q_u8(h + pos + 16 + needle_len_minus_1);
+        uint8x16_t block_last1  = vld1q_u8(h + pos + 16 + needle_len_minus_1);
 
         uint8x16_t cmp_first0 = vceqq_u8(block_first0, first_vec);
-        uint8x16_t cmp_last0 = vceqq_u8(block_last0, last_vec);
-        uint8x16_t matched0 = vandq_u8(cmp_first0, cmp_last0);
+        uint8x16_t cmp_last0  = vceqq_u8(block_last0, last_vec);
+        uint8x16_t matched0   = vandq_u8(cmp_first0, cmp_last0);
 
         uint8x16_t cmp_first1 = vceqq_u8(block_first1, first_vec);
-        uint8x16_t cmp_last1 = vceqq_u8(block_last1, last_vec);
-        uint8x16_t matched1 = vandq_u8(cmp_first1, cmp_last1);
+        uint8x16_t cmp_last1  = vceqq_u8(block_last1, last_vec);
+        uint8x16_t matched1   = vandq_u8(cmp_first1, cmp_last1);
 
         /* Process first 16 bytes */
         uint64x2_t matched64_0 = vreinterpretq_u64_u8(matched0);
-        uint64_t low0 = vgetq_lane_u64(matched64_0, 0);
-        uint64_t high0 = vgetq_lane_u64(matched64_0, 1);
+        uint64_t low0          = vgetq_lane_u64(matched64_0, 0);
+        uint64_t high0         = vgetq_lane_u64(matched64_0, 1);
 
         if (low0 != 0) {
             uint64_t temp = low0;
@@ -288,8 +288,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
 
         /* Process second 16 bytes */
         uint64x2_t matched64_1 = vreinterpretq_u64_u8(matched1);
-        uint64_t low1 = vgetq_lane_u64(matched64_1, 0);
-        uint64_t high1 = vgetq_lane_u64(matched64_1, 1);
+        uint64_t low1          = vgetq_lane_u64(matched64_1, 0);
+        uint64_t high1         = vgetq_lane_u64(matched64_1, 1);
 
         if (low1 != 0) {
             uint64_t temp = low1;
@@ -316,15 +316,15 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
 
     while (pos <= simd_limit_16) {
         uint8x16_t block_first = vld1q_u8(h + pos);
-        uint8x16_t block_last = vld1q_u8(h + pos + needle_len_minus_1);
+        uint8x16_t block_last  = vld1q_u8(h + pos + needle_len_minus_1);
 
         uint8x16_t cmp_first = vceqq_u8(block_first, first_vec);
-        uint8x16_t cmp_last = vceqq_u8(block_last, last_vec);
-        uint8x16_t matched = vandq_u8(cmp_first, cmp_last);
+        uint8x16_t cmp_last  = vceqq_u8(block_last, last_vec);
+        uint8x16_t matched   = vandq_u8(cmp_first, cmp_last);
 
         uint64x2_t matched64 = vreinterpretq_u64_u8(matched);
-        uint64_t low = vgetq_lane_u64(matched64, 0);
-        uint64_t high = vgetq_lane_u64(matched64, 1);
+        uint64_t low         = vgetq_lane_u64(matched64, 0);
+        uint64_t high        = vgetq_lane_u64(matched64, 1);
 
         if (low != 0) {
             uint64_t temp = low;

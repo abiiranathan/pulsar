@@ -166,9 +166,7 @@ INLINE_FUNC const status_info_t* get_http_status(http_status code) {
     return info->text ? info : &status_info[100];  // default to 200 OK if invalid.
 }
 
-INLINE_FUNC bool http_status_valid(http_status code) {
-    return (code >= STATUS_MIN || code <= STATUS_MAX);
-}
+INLINE_FUNC bool http_status_valid(http_status code) { return (code >= STATUS_MIN || code <= STATUS_MAX); }
 
 #ifdef __cplusplus
 }
