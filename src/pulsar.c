@@ -1067,22 +1067,29 @@ int conn_worker_id(PulsarConn* conn) {
 /* ================================================================
  * Range Request Helpers
  * ================================================================ */
+#define MAX_RANGE_HDR 64
 INLINE bool parse_range(StrSlice hdr, ssize_t* start, ssize_t* end, bool* has_end) {
     if (!ss_contains(hdr, SS_LIT("bytes="))) return false;
-    FILE* f = fmemopen((void*)hdr.data, hdr.len, "r");
-    defer {
-        fclose(f);
-    };
 
-    if (fscanf(f, "bytes=%ld-%ld", start, end) == 2) {
+    /* sscanf requires a null-terminated string; StrSlice is not guaranteed to
+     * be null-terminated, so we materialise a bounded copy on the stack.
+     * Range headers are short by spec (RFC 9110 §14.1), so a 64-byte buffer
+     * is more than sufficient. */
+    if (hdr.len >= MAX_RANGE_HDR) return false;
+
+    char buf[MAX_RANGE_HDR];
+    memcpy(buf, hdr.data, hdr.len);
+    buf[hdr.len] = '\0';
+    if (sscanf(buf, "bytes=%ld-%ld", start, end) == 2) {
         *has_end = true;
         return true;
     }
 
-    if (fscanf(f, "bytes=%ld-", start) == 1) {
+    if (sscanf(buf, "bytes=%ld-", start) == 1) {
         *has_end = false;
         return true;
     }
+
     return false;
 }
 
