@@ -1,79 +1,54 @@
-name: Pulsar CI
+steps:
+  - uses: actions/checkout@v4
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  - name: Install CMake and Ninja
+    uses: lukka/get-cmake@latest
+    with:
+      cmakeVersion: 3.30.x
 
-jobs:
-  build-and-test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-24.04, macos-14]
-        build_type: [Debug, Release]
-        include:
-          - os: ubuntu-24.04
-            cc: gcc
-            cxx: g++
-          - os: macos-14
-            cc: clang
-            cxx: clang++
-      fail-fast: false
+  - name: Install system dependencies
+    run: |
+      if [[ "$RUNNER_OS" == "Linux" ]]; then
+        sudo apt-get update
+        sudo apt-get install -y build-essential ninja-build
+      elif [[ "$RUNNER_OS" == "macOS" ]]; then
+        brew update
+        brew install ninja
+      fi
 
-    steps:
-      - uses: actions/checkout@v4
+  - name: Clone solidc
+    run: git clone https://github.com/abiiranathan/solidc solidc_dependency
 
-      - name: Install CMake and Ninja
-        uses: lukka/get-cmake@latest
-        with:
-          cmakeVersion: 3.30.x
+  - name: Build and install solidc
+    run: |
+      cmake -S solidc_dependency -B solidc_dependency/build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/solidc-install \
+        -DBUILD_TESTS=OFF \
+        -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+        -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
 
-      - name: Install system dependencies
-        run: |
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y build-essential ninja-build
-          elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            brew update
-            brew install ninja
-          fi
+      cmake --build solidc_dependency/build --parallel 4
+      cmake --install solidc_dependency/build
 
-      - name: Clone solidc
-        run: git clone https://github.com/abiiranathan/solidc solidc_dependency
+  - name: Configure pulsar
+    run: |
+      cmake -B build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+        -DCMAKE_PREFIX_PATH=${{ github.workspace }}/solidc-install \
+        -DBUILD_TESTS=ON \
+        -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+        -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
 
-      - name: Build and install solidc
-        run: |
-          cmake -S solidc_dependency -B solidc_dependency/build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/solidc-install \
-            -DBUILD_TESTS=OFF \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+  - name: Build pulsar
+    run: cmake --build build --parallel 4
 
-          cmake --build solidc_dependency/build --parallel 4
-          # No sudo needed — installing to workspace, not a system path.
-          cmake --install solidc_dependency/build
+  - name: Run tests
+    run: ctest --test-dir build --output-on-failure --parallel 4
 
-      - name: Configure pulsar
-        run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/solidc-install \
-            -DBUILD_TESTS=ON \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
-
-      - name: Build pulsar
-        run: cmake --build build --parallel 4
-
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure --parallel 4
-
-      - name: Verify installation
-        run: |
-          cmake --install build --prefix ./install
-          test -f install/lib/libpulsar.a
+  - name: Verify installation
+    run: |
+      cmake --install build --prefix ./install
+      test -f install/lib/libpulsar.a
