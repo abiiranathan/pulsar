@@ -1939,7 +1939,7 @@ int pulsar_run(const char* addr, int port) {
         }
     }
 
-    printf("\nStarting server with %d workers (%s)\n", NUM_WORKERS, USE_EPOLL ? "epoll" : "kqueue");
+    printf("\nStarting server with %d workers\n", NUM_WORKERS);
     printf("Listening on http://%s:%d\n", addr ? addr : "0.0.0.0", port);
 
     for (int i = 0; i < NUM_WORKERS; i++)

@@ -82,6 +82,17 @@ set(BASE_SOURCES
     src/routing.c
 )
 
+# Add platform-specific event sources
+if(PLATFORM_LINUX)
+    list(APPEND BASE_SOURCES src/events/epoll.c)
+elseif(PLATFORM_MACOS OR PLATFORM_FREEBSD OR PLATFORM_OPENBSD OR
+       PLATFORM_NETBSD OR PLATFORM_DRAGONFLY)
+    list(APPEND BASE_SOURCES src/events/kqueue.c)
+else()
+    message(FATAL_ERROR "Unsupported platform: kqueue and epoll are the only supported event backends.")
+endif()
+
+
 file(GLOB HEADERS "include/*.h")
 
 # Create object library

@@ -59,10 +59,10 @@ int main() {
 
         MultipartForm form;
         MultipartCode code = multipart_init(&form);
-        ASSERT(code == MULTIPART_OK && "Form initialization failed");
+        assert(code == MULTIPART_OK && "Form initialization failed");
 
         code = multipart_parse(test_form, strlen(test_form), "--boundary123", &form);
-        ASSERT(code == MULTIPART_OK && "Form parsing failed");
+        assert(code == MULTIPART_OK && "Form parsing failed");
 
         // Verify fields
         const char* username = multipart_field_value(&form, "username");
@@ -71,13 +71,13 @@ int main() {
         printf("Username: %s\n", username);
         printf("Email: %s\n", email);
 
-        ASSERT(username != NULL && "Username field is NULL");
-        ASSERT(strcmp(username, "john_doe") == 0 && "Username field value mismatch");
-        ASSERT(email != NULL && "Email field is NULL");
-        ASSERT(strcmp(email, "john@example.com") == 0 && "Email field value mismatch");
+        assert(username != NULL && "Username field is NULL");
+        assert(strcmp(username, "john_doe") == 0 && "Username field value mismatch");
+        assert(email != NULL && "Email field is NULL");
+        assert(strcmp(email, "john@example.com") == 0 && "Email field value mismatch");
 
         // Verify no files
-        ASSERT(form.num_files == 0 && "Unexpected files in form");
+        assert(form.num_files == 0 && "Unexpected files in form");
 
         multipart_cleanup(&form);
     }
@@ -99,37 +99,37 @@ int main() {
 
         MultipartForm form;
         MultipartCode code = multipart_init(&form);
-        ASSERT(code == MULTIPART_OK && "Form initialization failed");
+        assert(code == MULTIPART_OK && "Form initialization failed");
 
         code = multipart_parse(test_form, strlen(test_form), "--boundary123", &form);
-        ASSERT(code == MULTIPART_OK && "Form parsing failed");
+        assert(code == MULTIPART_OK && "Form parsing failed");
 
         // Verify fields
         const char* description = multipart_field_value(&form, "description");
         printf("Description: %s\n", description);
 
-        ASSERT(description != NULL && "Description field is NULL");
-        ASSERT(strcmp(description, "A sample text file") == 0 &&
+        assert(description != NULL && "Description field is NULL");
+        assert(strcmp(description, "A sample text file") == 0 &&
                "Description field value mismatch");
 
         // Verify file
-        ASSERT(form.num_files == 1 && "Incorrect number of files");
+        assert(form.num_files == 1 && "Incorrect number of files");
 
         FileHeader* file = multipart_file(&form, "document");
-        ASSERT(file != NULL && "File not found");
+        assert(file != NULL && "File not found");
 
         printf("File found: %s (type: %s, size: %zu bytes)\n", file->filename, file->mimetype,
                file->size);
 
         // Save the file
         bool save_result = multipart_save_file(file, test_form, "build/saved_test.txt");
-        ASSERT(save_result && "Failed to save file");
+        assert(save_result && "Failed to save file");
         printf("File saved successfully to build/saved_test.txt\n");
 
         // Verify file content
         size_t file_size   = 0;
         char* file_content = read_file("build/saved_test.txt", &file_size);
-        ASSERT(file_content != NULL && "Failed to read saved file");
+        assert(file_content != NULL && "Failed to read saved file");
         printf("File content:\n%.*s\n", (int)file_size, file_content);
         free(file_content);
 
@@ -144,10 +144,10 @@ int main() {
         char boundary[256];
 
         bool parse_result = parse_boundary(content_type, boundary, sizeof(boundary));
-        ASSERT(parse_result && "Failed to parse boundary from header");
+        assert(parse_result && "Failed to parse boundary from header");
 
         printf("Parsed boundary: %s\n", boundary);
-        ASSERT(strcmp(boundary, "--boundary123") == 0 && "Boundary parsing mismatch");
+        assert(strcmp(boundary, "--boundary123") == 0 && "Boundary parsing mismatch");
     }
     printf("Test 3 completed\n\n");
 

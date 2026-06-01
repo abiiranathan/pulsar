@@ -236,7 +236,7 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
     PulsarConn* conn     = ctx->conn;
     const char* userId   = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
-    ASSERT(userId && username);
+    assert(userId && username);
 
     // Should exist, otherwise our router is broken
     printf("Path Params: \n");
@@ -397,7 +397,7 @@ void mw2(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
 
     char* name = pulsar_get(conn, "name");
-    ASSERT(name && "name is NULL");
+    assert(name && "name is NULL");
 }
 
 int main() {
