@@ -48,21 +48,21 @@ jobs:
           cmake -S solidc_dependency -B solidc_dependency/build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/solidc-install \
             -DBUILD_TESTS=OFF \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
 
-          # --config is ignored by Ninja; build type was set at configure time.
           cmake --build solidc_dependency/build --parallel 4
-          sudo cmake --install solidc_dependency/build
+          # No sudo needed — installing to workspace, not a system path.
+          cmake --install solidc_dependency/build
 
       - name: Configure pulsar
         run: |
           cmake -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_PREFIX_PATH=/usr/local \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/solidc-install \
             -DBUILD_TESTS=ON \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
