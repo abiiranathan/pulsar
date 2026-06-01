@@ -1,5 +1,5 @@
-#ifndef COMMON_H
-#define COMMON_H
+#ifndef PULSAR_COMMON_H
+#define PULSAR_COMMON_H
 
 #define _FILE_OFFSET_BITS 64
 
@@ -59,14 +59,14 @@ typedef enum {
 
 // HTTP Response structure
 typedef struct response_t {
-    http_status status_code;             // HTTP status code.
-    char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line.
-    char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers.
-    bool heap_allocated;                 // If heap allocation is used.
+    http_status status_code;               // HTTP status code.
+    char status_buf[STATUS_LINE_SIZE];     // Null-terminated buffer for status line.
+    char headers_buf[HEADERS_BUF_SIZE];    // Null-terminated buffer for headers.
+    bool heap_allocated;                   // If heap allocation is used.
     union {
         uint8_t stack[STACK_BUFFER_SIZE];  // stack buffer for smaller responses
-        uint8_t* heap;                     // Dynamically allocated body buffer. (not null-terminated)
-    } body;                                // Response body.
+        uint8_t* heap;  // Dynamically allocated body buffer. (not null-terminated)
+    } body;             // Response body.
 
     // Pre-computed lengths of status line, headers, body.
     size_t body_len;       // Actual length of body
@@ -108,9 +108,9 @@ struct pulsar_conn {
     struct request_t* request;  // HTTP request data (arena allocated)
     Arena* arena;               // Memory arena for allocations
 #if ENABLE_LOGGING
-    struct timespec start;  // Timestamp of first request
+    struct timespec start;      // Timestamp of first request
 #endif
-    time_t last_activity;  // Timestamp of last I/O activity
+    time_t last_activity;       // Timestamp of last I/O activity
 
     // Linked List nodes.
     struct pulsar_conn* next;
@@ -122,4 +122,4 @@ struct pulsar_conn {
     int worker_id;       // ID of the current worker running the thread.
 };
 
-#endif /* COMMON_H */
+#endif /* PULSAR_COMMON_H */

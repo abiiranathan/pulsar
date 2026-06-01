@@ -29,8 +29,8 @@ extern "C" {
  * in the original request body. (It must not be mutated for that matter)
  */
 typedef struct FileHeader {
-    size_t offset;  ///< Byte offset in original request body
-    size_t size;    ///< File size in bytes
+    size_t offset;     ///< Byte offset in original request body
+    size_t size;       ///< File size in bytes
 
     char* filename;    ///< Original filename (arena-allocated)
     char* mimetype;    ///< MIME type (arena-allocated)
@@ -51,11 +51,11 @@ typedef struct FormField {
  * @brief Container for parsed form data
  */
 typedef struct MultipartForm {
-    Arena* arena;  ///< Memory arena for all allocations
+    Arena* arena;            ///< Memory arena for all allocations
 
-    FileHeader** files;     ///< Array of file pointers (arena-allocated)
-    size_t num_files;       ///< Number of valid files
-    size_t files_capacity;  ///< Current array capacity
+    FileHeader** files;      ///< Array of file pointers (arena-allocated)
+    size_t num_files;        ///< Number of valid files
+    size_t files_capacity;   ///< Current array capacity
 
     FormField* fields;       ///< Array of form fields (arena-allocated)
     size_t num_fields;       ///< Number of valid fields
@@ -97,7 +97,8 @@ MultipartCode multipart_init(MultipartForm* form);
  *
  * @note The boundary should match the Content-Type header value
  */
-MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form);
+MultipartCode multipart_parse(const char* data, size_t size, const char* boundary,
+                              MultipartForm* form);
 
 /**
  * @brief Free all resources associated with a form
@@ -129,7 +130,8 @@ FileHeader* multipart_file(const MultipartForm* form, const char* field_name);
  * @param max_indices Array size of out_indices.
  * @return size_t Number of matches in out_indices array.
  */
-size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices, size_t max_indices);
+size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices,
+                       size_t max_indices);
 
 /**
  * @brief Save file contents to disk

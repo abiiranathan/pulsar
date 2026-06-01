@@ -109,7 +109,8 @@ int main() {
         printf("Description: %s\n", description);
 
         ASSERT(description != NULL && "Description field is NULL");
-        ASSERT(strcmp(description, "A sample text file") == 0 && "Description field value mismatch");
+        ASSERT(strcmp(description, "A sample text file") == 0 &&
+               "Description field value mismatch");
 
         // Verify file
         ASSERT(form.num_files == 1 && "Incorrect number of files");
@@ -117,7 +118,8 @@ int main() {
         FileHeader* file = multipart_file(&form, "document");
         ASSERT(file != NULL && "File not found");
 
-        printf("File found: %s (type: %s, size: %zu bytes)\n", file->filename, file->mimetype, file->size);
+        printf("File found: %s (type: %s, size: %zu bytes)\n", file->filename, file->mimetype,
+               file->size);
 
         // Save the file
         bool save_result = multipart_save_file(file, test_form, "build/saved_test.txt");

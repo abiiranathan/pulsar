@@ -57,8 +57,8 @@ typedef Locals* (*LocalsCreateCallback)();
 int pulsar_run(const char* addr, int port);
 
 /** Returns the worker id of the current worker.
-Can be used as an index for per-thread objects because each worker runs in a seperate
-thread. The returned IDs are in the range 0 - NUM_WORKERS.
+Can be used as an index for per-thread objects because each worker runs in a
+seperate thread. The returned IDs are in the range 0 - NUM_WORKERS.
 */
 int conn_worker_id(PulsarConn* conn);
 
@@ -94,8 +94,8 @@ void* pulsar_get_handler_userdata(void);
  */
 void pulsar_set_callback(PulsarCallback cb);
 
-// Set a user-owned value pointer to the context with a callback function to free the value.
-// The function may be NULL if the value is not to be freed.
+// Set a user-owned value pointer to the context with a callback function to
+// free the value. The function may be NULL if the value is not to be freed.
 // Returns true on success.
 bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func);
 
@@ -104,11 +104,12 @@ bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc fr
 #include <string.h>  // for strlen, memcpy
 
 /**
- * @brief Allocate memory of at least 'size' bytes that is managed by the server.
+ * @brief Allocate memory of at least 'size' bytes that is managed by the
+ * server.
  *
- * The returned memory is valid only for the duration of the current request handler.
- * It must not be freed by the caller and will become invalid once the handler returns
- * (the underlying arena is reset after each request).
+ * The returned memory is valid only for the duration of the current request
+ * handler. It must not be freed by the caller and will become invalid once the
+ * handler returns (the underlying arena is reset after each request).
  *
  * @param conn  Connection handle (used to access the per-request arena).
  * @param size  Minimum number of bytes to allocate.
@@ -119,12 +120,13 @@ void* pulsar_alloc(PulsarConn* conn, size_t size);
 /**
  * @brief Duplicate a string using the request-scoped arena allocator.
  *
- * The returned string is valid only for the duration of the current request handler
- * and must not be freed by the caller.
+ * The returned string is valid only for the duration of the current request
+ * handler and must not be freed by the caller.
  *
  * @param conn Connection handle (required for arena allocation).
  * @param str  NUL-terminated string to duplicate. May be NULL.
- * @return Pointer to the duplicated string, or NULL if allocation fails or str is NULL.
+ * @return Pointer to the duplicated string, or NULL if allocation fails or str
+ * is NULL.
  */
 static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
     if (str == NULL) {
@@ -140,15 +142,17 @@ static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
 }
 
 /**
- * @brief Allocate an array of 'nmemb' elements of 'size' bytes each using the request-scoped arena.
+ * @brief Allocate an array of 'nmemb' elements of 'size' bytes each using the
+ * request-scoped arena.
  *
- * Equivalent to calloc() semantics (zero-initialized memory), but backed by the per-request arena.
- * The returned memory must not be freed by the caller.
+ * Equivalent to calloc() semantics (zero-initialized memory), but backed by the
+ * per-request arena. The returned memory must not be freed by the caller.
  *
  * @param conn  Connection handle.
  * @param nmemb Number of elements.
  * @param size  Size of each element in bytes.
- * @return Pointer to the allocated zero-initialized memory, or NULL on failure or overflow.
+ * @return Pointer to the allocated zero-initialized memory, or NULL on failure
+ * or overflow.
  */
 static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
     /* Guard against overflow in nmemb * size */
@@ -165,23 +169,26 @@ static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
 }
 
 /**
- * @brief Re-allocate arena-backed memory to a new size, preserving existing content.
+ * @brief Re-allocate arena-backed memory to a new size, preserving existing
+ * content.
  *
- * This function allocates a new block with at least 'new_size' bytes, copies up to
- * 'old_size' bytes from the old pointer (or all available if new_size is smaller),
- * and returns the new pointer. The old pointer becomes invalid after this call.
+ * This function allocates a new block with at least 'new_size' bytes, copies up
+ * to 'old_size' bytes from the old pointer (or all available if new_size is
+ * smaller), and returns the new pointer. The old pointer becomes invalid after
+ * this call.
  *
- * The returned memory follows the same rules as pulsar_alloc(): it must not be freed
- * and is valid only until the end of the current request handler.
+ * The returned memory follows the same rules as pulsar_alloc(): it must not be
+ * freed and is valid only until the end of the current request handler.
  *
  * @param conn     Connection handle.
- * @param ptr      Previous pointer returned by pulsar_alloc(), pulsar_strdup(), etc.
- *                 May be NULL (treated as allocation of new block).
+ * @param ptr      Previous pointer returned by pulsar_alloc(), pulsar_strdup(),
+ * etc. May be NULL (treated as allocation of new block).
  * @param old_size Number of valid bytes currently pointed to by 'ptr'.
  *                 Must be exact if ptr != NULL.
  * @param new_size Desired minimum size in bytes for the new block.
- * @return New pointer with at least 'new_size' bytes, containing the previous content
- *         (truncated or unchanged as appropriate), or NULL on failure or overflow.
+ * @return New pointer with at least 'new_size' bytes, containing the previous
+ * content (truncated or unchanged as appropriate), or NULL on failure or
+ * overflow.
  */
 static inline void* pulsar_realloc(PulsarConn* conn, void* ptr, size_t old_size, size_t new_size) {
     /* Handle NULL ptr as pure allocation */
@@ -252,8 +259,8 @@ int conn_notfound(PulsarConn* conn);
 int conn_write(PulsarConn* conn, const void* data, size_t len);
 
 /**
- * @brief Writes formatted string to response body. If the data is below 1024 bytes
- * uses a stack buffer, otherwise dynamically allocates.
+ * @brief Writes formatted string to response body. If the data is below 1024
+ * bytes uses a stack buffer, otherwise dynamically allocates.
  * @param conn The connection object
  * @param fmt printf-style format string
  * @param ... Format arguments
@@ -340,10 +347,11 @@ void conn_send_css(PulsarConn* conn, http_status status, const char* css);
 void conn_start_chunked_transfer(PulsarConn* conn, int max_age_seconds);
 
 // Write a chunk into response after calling 'conn_start_chunked_transfer'.
-// Returns the number of bytes written into the socket. (including chunk headers)
+// Returns the number of bytes written into the socket. (including chunk
+// headers)
 ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size);
 
-// End SSE or chunked transfer.
+// End chunked transfer.
 void conn_end_chunked_transfer(PulsarConn* conn);
 
 #define WITH_SSE_CONNECTION(conn, block)            \
@@ -361,21 +369,15 @@ void conn_end_chunked_transfer(PulsarConn* conn);
     } while (0)
 
 typedef struct {
-    const char* data;
-    size_t data_len;
-    const char* event;
-    size_t event_len;
-    const char* id;
-    size_t id_len;
-} sse_event_t;
+    StrSlice data;
+    StrSlice event;
+    StrSlice id;
+} SSEvent;
 
-#define SSE_EVENT_INIT(data_, event_, id_)                            \
-    (sse_event_t){.data      = (data_),                               \
-                  .data_len  = (data_ != NULL) ? strlen(data_) : 0,   \
-                  .event     = (event_),                              \
-                  .event_len = (event_ != NULL) ? strlen(event_) : 0, \
-                  .id        = (id_),                                 \
-                  .id_len    = (id_ != NULL) ? strlen(id_) : 0}
+#define SSE_EVENT_INIT(data_, event_, id_)              \
+    (SSEvent) {                                         \
+        .data = (data_), .event = (event_), .id = (id_) \
+    }
 
 // Start SSE event.
 void conn_start_sse(PulsarConn* conn);
@@ -385,7 +387,7 @@ void conn_start_sse(PulsarConn* conn);
  * @param conn The connection object
  * @param evt Pointer to sse_event_t struct.
  */
-void conn_send_event(PulsarConn* conn, const sse_event_t* evt);
+void conn_send_event(PulsarConn* conn, const SSEvent* evt);
 
 // End SSE event.
 void conn_end_sse(PulsarConn* conn);
@@ -442,7 +444,7 @@ const char* conn_set_status(PulsarConn* conn, http_status code);
  * @param name Parameter name
  * @return const char* Parameter value or NULL if not found
  */
-const char* query_get(PulsarConn* conn, const char* name);
+StrSlice query_get(PulsarConn* conn, const char* name);
 
 /**
  * @brief Gets all query parameters
@@ -453,20 +455,29 @@ const char* query_get(PulsarConn* conn, const char* name);
 headers_t* query_params(PulsarConn* conn);
 
 /**
+ * @brief Gets the request headers
+ *
+ * @param conn The connection object
+ * @return The headers fixed-size array.
+ */
+const headers_t* req_headers(PulsarConn* conn);
+
+/**
  * @brief Gets a request header value
  *
  * @param conn The connection object
  * @param name Header name
  * @return const char* Header value or NULL if not found
  */
-const char* req_header_get(PulsarConn* conn, const char* name);
+StrSlice req_header_get(PulsarConn* conn, const char* name);
 
 /**
  * @brief Gets a response header value
  *
  * @param conn The connection object
  * @param name Header name
- * @return A dynamically allocated header value (char *) if it exists or NULL otherwise.
+ * @return A dynamically allocated header value (char *) if it exists or NULL
+ * otherwise.
  */
 char* res_header_get(PulsarConn* conn, const char* name);
 

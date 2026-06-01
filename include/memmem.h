@@ -44,7 +44,8 @@ INLINE uint16_t le_load_u16(const unsigned char* p) {
  * * Bypasses the overhead of setting up a `memcmp` function call for very
  * short inner strings (1 or 2 bytes). Falls back to `memcmp` for longer strings.
  */
-INLINE int verify_inner(const unsigned char* candidate, const unsigned char* n_inner, size_t inner_len) {
+INLINE int verify_inner(const unsigned char* candidate, const unsigned char* n_inner,
+                        size_t inner_len) {
     /* Fast-path the most likely scenario first to minimize branch prediction misses */
     if (inner_len >= 3) return memcmp(candidate, n_inner, inner_len) == 0;
 
@@ -66,8 +67,8 @@ INLINE int verify_inner(const unsigned char* candidate, const unsigned char* n_i
  * @param needle_len Size of the needle in bytes.
  * @return Pointer to the first occurrence of needle, or NULL if not found.
  */
-INLINE void* memmem_scalar(const void* __restrict__ haystack, size_t haystack_len, const void* __restrict__ needle,
-                           size_t needle_len) {
+INLINE void* memmem_scalar(const void* __restrict__ haystack, size_t haystack_len,
+                           const void* __restrict__ needle, size_t needle_len) {
     if (needle_len == 0) return (void*)haystack;
     if (haystack_len < needle_len) return NULL;
 
@@ -129,8 +130,8 @@ INLINE void* memmem_scalar(const void* __restrict__ haystack, size_t haystack_le
  * @param needle_len Size of the needle in bytes.
  * @return Pointer to the first occurrence of needle, or NULL if not found.
  */
-static inline void* memmem_simd(const void* __restrict__ haystack, size_t haystack_len, const void* __restrict__ needle,
-                                size_t needle_len) {
+static inline void* memmem_simd(const void* __restrict__ haystack, size_t haystack_len,
+                                const void* __restrict__ needle, size_t needle_len) {
     /* Use scalar for short needles or haystacks where SIMD overhead isn't worth it */
     if (needle_len < 3 || haystack_len < needle_len + 32) {
         return memmem_scalar(haystack, haystack_len, needle, needle_len);
@@ -148,14 +149,16 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
     size_t pos = 0;
 
     /* 64-byte Unrolled Loop: Maximize throughput by processing two 32-byte blocks */
-    const size_t simd_limit_64 = haystack_len >= needle_len + 63 ? haystack_len - needle_len - 63 : 0;
+    const size_t simd_limit_64 =
+        haystack_len >= needle_len + 63 ? haystack_len - needle_len - 63 : 0;
 
     while (pos <= simd_limit_64) {
         __m256i block_first0 = _mm256_loadu_si256((const __m256i*)(h + pos));
         __m256i block_last0  = _mm256_loadu_si256((const __m256i*)(h + pos + needle_len_minus_1));
 
         __m256i block_first1 = _mm256_loadu_si256((const __m256i*)(h + pos + 32));
-        __m256i block_last1  = _mm256_loadu_si256((const __m256i*)(h + pos + 32 + needle_len_minus_1));
+        __m256i block_last1 =
+            _mm256_loadu_si256((const __m256i*)(h + pos + 32 + needle_len_minus_1));
 
         __m256i cmp_first0 = _mm256_cmpeq_epi8(block_first0, first_vec);
         __m256i cmp_last0  = _mm256_cmpeq_epi8(block_last0, last_vec);
@@ -186,7 +189,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
     }
 
     /* 32-byte Loop: Catch the remaining large chunks before scalar fallback */
-    const size_t simd_limit_32 = haystack_len >= needle_len + 31 ? haystack_len - needle_len - 31 : 0;
+    const size_t simd_limit_32 =
+        haystack_len >= needle_len + 31 ? haystack_len - needle_len - 31 : 0;
 
     while (pos <= simd_limit_32) {
         __m256i block_first = _mm256_loadu_si256((const __m256i*)(h + pos));
@@ -230,8 +234,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
  * @param needle_len Size of the needle in bytes.
  * @return Pointer to the first occurrence of needle, or NULL if not found.
  */
-static inline void* memmem_simd(const void* __restrict__ haystack, size_t haystack_len, const void* __restrict__ needle,
-                                size_t needle_len) {
+static inline void* memmem_simd(const void* __restrict__ haystack, size_t haystack_len,
+                                const void* __restrict__ needle, size_t needle_len) {
     if (needle_len < 3 || haystack_len < needle_len + 16) {
         return memmem_scalar(haystack, haystack_len, needle, needle_len);
     }
@@ -248,7 +252,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
     size_t pos = 0;
 
     /* 32-byte Unrolled Loop: Maximize pipeline efficiency on ARM */
-    const size_t simd_limit_32 = haystack_len >= needle_len + 31 ? haystack_len - needle_len - 31 : 0;
+    const size_t simd_limit_32 =
+        haystack_len >= needle_len + 31 ? haystack_len - needle_len - 31 : 0;
 
     while (pos <= simd_limit_32) {
         uint8x16_t block_first0 = vld1q_u8(h + pos);
@@ -273,7 +278,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
             uint64_t temp = low0;
             while (temp != 0) {
                 uint32_t offset = ctz64(temp) >> 3;
-                if (verify_inner(h + pos + offset + 1, n + 1, inner_len)) return (void*)(h + pos + offset);
+                if (verify_inner(h + pos + offset + 1, n + 1, inner_len))
+                    return (void*)(h + pos + offset);
                 temp &= ~(0xFFULL << (offset * 8));
             }
         }
@@ -281,7 +287,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
             uint64_t temp = high0;
             while (temp != 0) {
                 uint32_t offset = ctz64(temp) >> 3;
-                if (verify_inner(h + pos + offset + 8 + 1, n + 1, inner_len)) return (void*)(h + pos + offset + 8);
+                if (verify_inner(h + pos + offset + 8 + 1, n + 1, inner_len))
+                    return (void*)(h + pos + offset + 8);
                 temp &= ~(0xFFULL << (offset * 8));
             }
         }
@@ -295,7 +302,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
             uint64_t temp = low1;
             while (temp != 0) {
                 uint32_t offset = ctz64(temp) >> 3;
-                if (verify_inner(h + pos + 16 + offset + 1, n + 1, inner_len)) return (void*)(h + pos + 16 + offset);
+                if (verify_inner(h + pos + 16 + offset + 1, n + 1, inner_len))
+                    return (void*)(h + pos + 16 + offset);
                 temp &= ~(0xFFULL << (offset * 8));
             }
         }
@@ -312,7 +320,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
     }
 
     /* 16-byte Loop for remainder */
-    const size_t simd_limit_16 = haystack_len >= needle_len + 15 ? haystack_len - needle_len - 15 : 0;
+    const size_t simd_limit_16 =
+        haystack_len >= needle_len + 15 ? haystack_len - needle_len - 15 : 0;
 
     while (pos <= simd_limit_16) {
         uint8x16_t block_first = vld1q_u8(h + pos);
@@ -330,7 +339,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
             uint64_t temp = low;
             while (temp != 0) {
                 uint32_t offset = ctz64(temp) >> 3;
-                if (verify_inner(h + pos + offset + 1, n + 1, inner_len)) return (void*)(h + pos + offset);
+                if (verify_inner(h + pos + offset + 1, n + 1, inner_len))
+                    return (void*)(h + pos + offset);
                 temp &= ~(0xFFULL << (offset * 8));
             }
         }
@@ -339,7 +349,8 @@ static inline void* memmem_simd(const void* __restrict__ haystack, size_t haysta
             uint64_t temp = high;
             while (temp != 0) {
                 uint32_t offset = ctz64(temp) >> 3;
-                if (verify_inner(h + pos + offset + 8 + 1, n + 1, inner_len)) return (void*)(h + pos + offset + 8);
+                if (verify_inner(h + pos + offset + 8 + 1, n + 1, inner_len))
+                    return (void*)(h + pos + offset + 8);
                 temp &= ~(0xFFULL << (offset * 8));
             }
         }

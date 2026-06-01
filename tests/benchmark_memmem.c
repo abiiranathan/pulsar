@@ -28,7 +28,7 @@ void benchmark_case(const char* name, const void* haystack, size_t hay_len, cons
     (void)result; /* Silence unused variable warning */
 
     double elapsed = get_time_ms() - start;
-    double per_op = (elapsed * 1000000.0) / iterations; /* nanoseconds */
+    double per_op  = (elapsed * 1000000.0) / iterations; /* nanoseconds */
 
     printf("%-40s: %8.2f ms total, %8.1f ns/op\n", name, elapsed, per_op);
 }
@@ -39,50 +39,49 @@ int main() {
     /* Benchmark 1: Short needle in short haystack */
     {
         const char* haystack = "The quick brown fox jumps over the lazy dog";
-        const char* needle = "fox";
-        benchmark_case("Short needle in short haystack", haystack, strlen(haystack), needle, strlen(needle),
-                       ITERATIONS);
+        const char* needle   = "fox";
+        benchmark_case("Short needle in short haystack", haystack, strlen(haystack), needle, strlen(needle), ITERATIONS);
     }
 
     /* Benchmark 2: Single byte search */
     {
         const char* haystack = "abcdefghijklmnopqrstuvwxyz";
-        const char* needle = "z";
+        const char* needle   = "z";
         benchmark_case("Single byte search", haystack, strlen(haystack), needle, 1, ITERATIONS);
     }
 
     /* Benchmark 3: Two byte search */
     {
         const char* haystack = "The quick brown fox jumps over the lazy dog";
-        const char* needle = "ov";
+        const char* needle   = "ov";
         benchmark_case("Two byte search", haystack, strlen(haystack), needle, 2, ITERATIONS);
     }
 
     /* Benchmark 4: Match at beginning */
     {
         const char* haystack = "The quick brown fox jumps over the lazy dog";
-        const char* needle = "The";
+        const char* needle   = "The";
         benchmark_case("Match at beginning", haystack, strlen(haystack), needle, strlen(needle), ITERATIONS);
     }
 
     /* Benchmark 5: Match at end */
     {
         const char* haystack = "The quick brown fox jumps over the lazy dog";
-        const char* needle = "dog";
+        const char* needle   = "dog";
         benchmark_case("Match at end", haystack, strlen(haystack), needle, strlen(needle), ITERATIONS);
     }
 
     /* Benchmark 6: No match */
     {
         const char* haystack = "The quick brown fox jumps over the lazy dog";
-        const char* needle = "cat";
+        const char* needle   = "cat";
         benchmark_case("No match (worst case)", haystack, strlen(haystack), needle, strlen(needle), ITERATIONS);
     }
 
     /* Benchmark 7: Large haystack (triggers SIMD) */
     {
-        size_t size = 10000;
-        char* haystack = malloc(size);
+        size_t size     = 10000;
+        char*  haystack = malloc(size);
         memset(haystack, 'a', size);
         const char* needle = "needle";
         memcpy(haystack + 5000, needle, strlen(needle));
@@ -111,15 +110,16 @@ int main() {
     /* Benchmark 10: Binary data */
     {
         unsigned char haystack[256];
-        for (int i = 0; i < 256; i++) haystack[i] = i;
+        for (int i = 0; i < 256; i++)
+            haystack[i] = i;
         unsigned char needle[] = {0xAA, 0xBB, 0xCC};
         benchmark_case("Binary data search", haystack, 256, needle, 3, ITERATIONS);
     }
 
     /* Benchmark 11: Very large haystack (1MB) */
     {
-        size_t size = 1024 * 1024;
-        char* haystack = malloc(size);
+        size_t size     = 1024 * 1024;
+        char*  haystack = malloc(size);
         memset(haystack, 'x', size);
         const char* needle = "target";
         memcpy(haystack + size - 100, needle, strlen(needle));

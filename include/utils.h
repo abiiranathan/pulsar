@@ -85,6 +85,7 @@ INLINE size_t url_percent_decode(const char* src, char* dst, size_t src_len, siz
             } else if (*src == '%' && src[1] && src[2]) {
                 unsigned char h1 = (unsigned char)src[1];
                 unsigned char h2 = (unsigned char)src[2];
+
                 if (hex_valid_table[h1] & hex_valid_table[h2]) {
                     *dst++ = (hex_decode_table[h1] << 4) | hex_decode_table[h2];
                     src += 3;

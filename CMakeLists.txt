@@ -1,10 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-
-project(pulsar
-    VERSION 1.0.0
-    DESCRIPTION "Pulsar web server library"
-    LANGUAGES C
-)
+project(pulsar VERSION 1.0.0 DESCRIPTION "Pulsar web server library" LANGUAGES C)
 
 # Set C standard
 set(CMAKE_C_STANDARD 23)
@@ -252,8 +247,8 @@ endif()
 set(CPACK_PACKAGE_NAME "pulsar")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Pulsar web server library")
-set(CPACK_PACKAGE_VENDOR "Your Organization")
-set(CPACK_PACKAGE_CONTACT "your-email@example.com")
+set(CPACK_PACKAGE_VENDOR "Yo Medical Files (U) Ltd")
+set(CPACK_PACKAGE_CONTACT "nabiira2by2@gmail.com")
 
 if(PLATFORM_LINUX)
     set(CPACK_GENERATOR "DEB;RPM;TGZ")

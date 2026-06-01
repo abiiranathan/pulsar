@@ -45,8 +45,10 @@ static MimeEntry mime_entries[] = {
     // Documents
     {.ext = "pdf", .mimetype = "application/pdf"},
     {.ext = "doc", .mimetype = "application/msword"},
-    {.ext = "docx", .mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-    {.ext = "pptx", .mimetype = "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+    {.ext      = "docx",
+     .mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    {.ext      = "pptx",
+     .mimetype = "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
     {.ext = "xls", .mimetype = "application/vnd.ms-excel"},
     {.ext = "xlsx", .mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
     {.ext = "odt", .mimetype = "application/vnd.oasis.opendocument.text"},
@@ -265,8 +267,9 @@ static MimeEntry* hash_table[HASH_TABLE_SIZE] = {0};
 static unsigned int hash_func(const char* str) {
     unsigned long hash = 5381;
     int c;
-    while ((c = *str++)) hash = ((hash << 5) + hash) + (unsigned)c; /* hash * 33 + c */
-    return hash & HASH_TABLE_MASK;                                  // Fast alternative to modulo
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + (unsigned)c; /* hash * 33 + c */
+    return hash & HASH_TABLE_MASK;                 // Fast alternative to modulo
 }
 
 // Initialize hashes for mime types. Must be called before calling

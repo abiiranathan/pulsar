@@ -16,8 +16,9 @@ extern "C" {
 
 /** Path parameter extracted from URL. */
 typedef struct {
-    char* name;   // Parameter name (arena-allocated)
-    char* value;  // Parameter value (arena-allocated)
+    char* name;       // Parameter name (arena-allocated)
+    size_t name_len;  // Length of the name
+    char* value;      // Parameter value (arena-allocated)
 } PathParam;
 
 /** Array structure for path parameters. */
@@ -62,15 +63,14 @@ typedef union {
  */
 typedef struct route_t {
     // HOT: Fields accessed during route matching (first cache line)
-    const char* pattern;   // Route pattern (dynamically allocated)
-    HttpHandler handler;   // Handler function pointer
-    uint16_t pattern_len;  // Length of the pattern
-    HttpMethod method;     // HTTP method (HttpMethod)
-    uint8_t route_type;    // 0=exact, 1=static, 2=param
-    uint8_t mw_count;      // Number of middleware
-    uint8_t _padding[3];   // Align to 8 bytes
+    const char* pattern;                          // Route pattern (dynamically allocated)
+    HttpHandler handler;                          // Handler function pointer
+    uint16_t pattern_len;                         // Length of the pattern
+    HttpMethod method;                            // HTTP method (HttpMethod)
+    uint8_t route_type;                           // 0=exact, 1=static, 2=param
+    uint8_t mw_count;                             // Number of middleware
+    uint8_t _padding[3];                          // Align to 8 bytes
 
-    // WARM: Fields accessed less frequently
     route_state_t state;                          // Route-specific state
     Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Middleware array
 } route_t;

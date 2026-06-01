@@ -1,16 +1,31 @@
+#include <solidc/defer.h>
 #include "include/forms.h"
 #include "include/pulsar.h"
 
+static bool print_header_callback(StrSlice name, StrSlice value, void* userdata) {
+    (void)userdata;
+    printf("%.*s = %.*s\n", (int)name.len, name.data, (int)value.len, value.data);
+    return true;
+}
+
 void hello_world_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    static const char headers[] =
+    StrSlice headers = SS_LIT(
         "Set-Cookie: sessionId=12345; Path=/; HttpOnly\r\n"
         "Set-Cookie: theme=dark; Path=/; Secure\r\n"
-        "Content-Type: text/plain\r\n";
+        "Content-Type: text/html\r\n");
 
     conn_set_status(conn, StatusOK);
-    conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
-    conn_write(conn, "Hello World", 11);
+    conn_writeheader_raw(conn, headers.data, headers.len);
+    conn_write(conn, "<h1>Hello World</h1>", 20);
+
+    // // Log all headers
+    // const headers_t* h = req_headers(conn);
+    // // headers_foreach(h, print_header_callback, NULL);
+    // for (size_t i = 0; i < h->count; ++i) {
+    //     printf("%.*s: %.*s\n", (int)h->entries[i].name.len, h->entries[i].name.data,
+    //            (int)h->entries[i].value.len, h->entries[i].value.data);
+    // }
 }
 
 void json_handler(PulsarCtx* ctx) {
@@ -18,8 +33,8 @@ void json_handler(PulsarCtx* ctx) {
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "application/json");
 
-    const char* json = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
-    conn_write(conn, json, strlen(json));
+    char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
+    conn_write(conn, json, sizeof(json) - 1);
 }
 
 void echo_handler(PulsarCtx* ctx) {
@@ -27,9 +42,9 @@ void echo_handler(PulsarCtx* ctx) {
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, "text/plain");
 
-    const char* method = req_method(conn);
-    const char* path = req_path(conn);
-    const char* body = req_body(conn);
+    const char* method    = req_method(conn);
+    const char* path      = req_path(conn);
+    const char* body      = req_body(conn);
     size_t content_length = req_content_len(conn);
 
     // Echo request method and path
@@ -58,7 +73,10 @@ void sse_handler(PulsarCtx* ctx) {
             snprintf(msg, sizeof(msg), "Message: %lu", total);
             snprintf(msg_id, sizeof(msg_id), "%lu", total);
 
-            sse_event_t evt = SSE_EVENT_INIT(msg, "message", msg_id);
+            StrSlice data  = ss_from_cstr(msg);
+            StrSlice event = SS_LIT("message");
+            StrSlice id    = ss_from_cstr(msg_id);
+            SSEvent evt    = SSE_EVENT_INIT(data, event, id);
             conn_send_event(conn, &evt);
             total--;
             usleep(1000);
@@ -82,16 +100,18 @@ void chunked_handler(PulsarCtx* ctx) {
         // Test case 2: Multi-line text chunk (4KB)
         {
             char multi_line[4096];
-            char* pos = multi_line;
+            char* pos        = multi_line;
             size_t remaining = sizeof(multi_line) - 1;
 
             for (int i = 0; i < 20 && remaining > 100; i++) {
-                int written = snprintf(pos, remaining,
-                                       "Line %d: This is a very long line of text that exceeds normal sizes. "
-                                       "It contains repeated information to make it longer and test large "
-                                       "chunk handling. "
-                                       "Data data data data data data data data data data data data.\n",
-                                       i);
+                int written =
+                    snprintf(pos, remaining,
+                             "Line %d: This is a very long line of text that exceeds normal "
+                             "sizes. "
+                             "It contains repeated information to make it longer and test large "
+                             "chunk handling. "
+                             "Data data data data data data data data data data data data.\n",
+                             i);
                 if (written >= (int)remaining) break;
                 pos += written;
                 remaining -= (size_t)written;
@@ -116,7 +136,8 @@ void chunked_handler(PulsarCtx* ctx) {
             // Add many user objects
             for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
                 len += snprintf(json_data + len, sizeof(json_data) - (size_t)len,
-                                "      {\"id\": %d, \"name\": \"User%d\", \"email\": \"user%d@example.com\", "
+                                "      {\"id\": %d, \"name\": \"User%d\", \"email\": "
+                                "\"user%d@example.com\", "
                                 "\"active\": %s}%s\n",
                                 i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
             }
@@ -155,12 +176,10 @@ void chunked_handler(PulsarCtx* ctx) {
             if (fp) {
                 char file_chunk[4096];
                 size_t bytes_read;
-
                 while ((bytes_read = fread(file_chunk, 1, sizeof(file_chunk), fp)) > 0) {
                     conn_write_chunk(conn, file_chunk, bytes_read);
                     usleep(50000);  // 50ms between file chunks
                 }
-
                 fclose(fp);
             }
         }
@@ -184,8 +203,7 @@ void chunked_handler(PulsarCtx* ctx) {
         // Test case 7: Single massive chunk (16KB)
         {
             static char massive_chunk[16384];
-
-            char* pos = massive_chunk;
+            char* pos        = massive_chunk;
             size_t remaining = sizeof(massive_chunk) - 1;
 
             // Create structured content
@@ -194,9 +212,10 @@ void chunked_handler(PulsarCtx* ctx) {
             remaining -= (size_t)written;
 
             for (int i = 0; i < 200 && remaining > 80; i++) {
-                written =
-                    snprintf(pos, remaining, "Entry %03d: Long detailed entry with timestamp %ld and data payload.\n",
-                             i, time(NULL) + i);
+                written = snprintf(pos, remaining,
+                                   "Entry %03d: Long detailed entry with timestamp %ld and data "
+                                   "payload.\n",
+                                   i, time(NULL) + i);
                 if (written >= (int)remaining) break;
                 pos += written;
                 remaining -= (size_t)written;
@@ -213,15 +232,9 @@ void chunked_handler(PulsarCtx* ctx) {
     });
 }
 
-bool print_header_callback(const char* name, const char* value, void* userdata) {
-    (void)userdata;
-    printf("%s = %s\n", name, value);
-    return true;
-}
-
 void pathparams_query_params_handler(PulsarCtx* ctx) {
-    PulsarConn* conn = ctx->conn;
-    const char* userId = get_path_param(conn, "user_id");
+    PulsarConn* conn     = ctx->conn;
+    const char* userId   = get_path_param(conn, "user_id");
     const char* username = get_path_param(conn, "username");
     ASSERT(userId && username);
 
@@ -251,29 +264,38 @@ void handle_form(PulsarCtx* ctx) {
         return;
     }
 
-    const char* content_type = req_header_get(conn, "Content-Type");
-    if (!content_type) {
+    defer {
+        multipart_cleanup(&form);
+    };
+
+    StrSlice ctype = req_header_get(conn, "Content-Type");
+    if (!ss_is_valid(ctype)) {
         conn_set_status(conn, StatusBadRequest);
         conn_write_string(conn, "Invalid content type header");
-        multipart_cleanup(&form);
+        return;
+    }
+
+    char* content_type = ss_to_owned_cstr(ctype);
+    if (!content_type) {
+        conn_set_status(conn, StatusInternalServerError);
+        conn_write_string(conn, "Out of memory");
         return;
     }
 
     if (!parse_boundary(content_type, boundary, sizeof(boundary))) {
         conn_set_status(conn, StatusBadRequest);
         conn_write_string(conn, "Invalid content type header");
-        multipart_cleanup(&form);
         return;
     }
+    free(content_type);
 
-    const char* body = req_body(conn);
+    const char* body      = req_body(conn);
     size_t content_length = req_content_len(conn);
 
     code = multipart_parse(body, content_length, boundary, &form);
     if (code != MULTIPART_OK) {
         conn_set_status(conn, StatusBadRequest);
         conn_write_string(conn, multipart_error(code));
-        multipart_cleanup(&form);
         return;
     }
 
@@ -281,13 +303,11 @@ void handle_form(PulsarCtx* ctx) {
     if (file) {
         char dest[1024] = {0};
         strlcat(dest, "./test_output/", sizeof(dest));
-        strlcat(dest, file->filename, sizeof(dest) - 15);  // ignore potential truncation
+        strlcat(dest, file->filename, sizeof(dest) - 15);
         if (multipart_save_file(file, body, dest)) {
             conn_write_string(conn, "File uploaded successfully\n");
         }
     }
-
-    multipart_cleanup(&form);
 }
 
 void serve_movie(PulsarCtx* ctx) {
@@ -307,20 +327,18 @@ void serve_movie(PulsarCtx* ctx) {
 static __thread char log_buffer[LOG_BUFFER_SIZE];
 
 void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
-    PulsarConn* conn = ctx->conn;
-
     if (!LOGGING_ON) {
         return;
     }
 
-    const char* method = req_method(conn);
-    const char* path = req_path(conn);
-    char* ua = (char*)req_header_get(conn, "User-Agent");
-    if (!ua) {
-        ua = "-";
-    }
-
+    PulsarConn* conn        = ctx->conn;
+    const char* method      = req_method(conn);
+    const char* path        = req_path(conn);
     http_status status_code = res_get_status(conn);
+    StrSlice user_agent     = req_header_get(conn, "User-Agent");
+    if (!ss_is_valid(user_agent)) {
+        user_agent = SS_LIT("-");
+    }
 
     // Format latency with appropriate unit
     char latency_str[32];
@@ -342,7 +360,7 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
     }
 
     // Build the log line in our buffer
-    char* ptr = log_buffer;
+    char* ptr       = log_buffer;
     const char* end = log_buffer + LOG_BUFFER_SIZE - 1;  // Leave room for null terminator
 
     // [Pulsar]
@@ -361,7 +379,7 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
     ptr += snprintf(ptr, (size_t)(end - ptr), "%8s ", latency_str);
 
     // User-Agent
-    ptr += snprintf(ptr, (size_t)(end - ptr), "%s\n", ua);
+    ptr += snprintf(ptr, (size_t)(end - ptr), "%.*s\n", (int)user_agent.len, user_agent.data);
 
     // Single write to stdout
     if (write(STDOUT_FILENO, log_buffer, (size_t)(ptr - log_buffer)) == -1) {
@@ -371,7 +389,7 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
 
 void mw1(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    char* name = pulsar_strdup(conn, "PULSAR");
+    char* name       = pulsar_strdup(conn, "PULSAR");
     pulsar_set(conn, "name", name, NULL);
 }
 
@@ -389,7 +407,7 @@ int main() {
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
 
-    route_t* hello = route_get("/hello", hello_world_handler);
+    route_t* hello   = route_get("/hello", hello_world_handler);
     Middleware mw[2] = {mw1, mw2};
     use_route_middleware(hello, mw, 2);
 
