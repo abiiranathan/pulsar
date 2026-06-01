@@ -240,7 +240,7 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
 
     // Should exist, otherwise our router is broken
     printf("Path Params: \n");
-    printf("User ID: %s and username: %s\n", userId, username);
+    printf("User ID= %s and username= %s\n", userId, username);
 
     headers_t* params = query_params(conn);
     if (params) {
