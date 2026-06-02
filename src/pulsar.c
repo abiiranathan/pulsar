@@ -1093,7 +1093,7 @@ INLINE bool parse_range(StrSlice hdr, ssize_t* start, ssize_t* end, bool* has_en
     return false;
 }
 
-INLINE bool validate_range(bool has_end, ssize_t* start, ssize_t* end, off64_t file_size) {
+INLINE bool validate_range(bool has_end, ssize_t* start, ssize_t* end, off_t file_size) {
     if (!start || !end) return false;
     ssize_t sb = *start, eb = *end;
     ssize_t chunk = (4 * 1024 * 1024) - 1;
@@ -1113,7 +1113,7 @@ INLINE bool validate_range(bool has_end, ssize_t* start, ssize_t* end, off64_t f
     return true;
 }
 
-INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off64_t file_size) {
+INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off_t file_size) {
     static const char hfmt[] =
         "Accept-Ranges: bytes\r\n"
         "Content-Length: %ld\r\n"

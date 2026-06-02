@@ -69,7 +69,7 @@ add_compile_options(
 )
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-Wno-gnu-zero-variadic-macro-arguments)
+    add_compile_options(-Wno-gnu-zero-variadic-macro-arguments -fblocks)
 endif()
 
 # ------------------------------------------------------------------------------
@@ -96,6 +96,11 @@ file(GLOB PULSAR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 # ------------------------------------------------------------------------------
 
 add_library(pulsar_objects OBJECT ${PULSAR_SOURCES})
+
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # Link with libBlocksRuntime for block support
+    target_link_libraries(pulsar_objects PUBLIC "-lBlocksRuntime")
+endif()
 
 target_include_directories(pulsar_objects
     PUBLIC

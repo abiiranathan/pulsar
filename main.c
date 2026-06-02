@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <solidc/defer.h>
 #include "include/forms.h"
 #include "include/pulsar.h"
@@ -252,10 +253,10 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
 }
 
 void handle_form(PulsarCtx* ctx) {
-    PulsarConn* conn = ctx->conn;
-    MultipartForm form;
-    char boundary[128];
-    MultipartCode code;
+    PulsarConn* conn   = ctx->conn;
+    char boundary[128] = {0};
+    MultipartCode code = {0};
+    MultipartForm form = {0};
 
     code = multipart_init(&form);
     if (code != MULTIPART_OK) {
@@ -265,7 +266,7 @@ void handle_form(PulsarCtx* ctx) {
     }
 
     defer {
-        multipart_cleanup(&form);
+        multipart_cleanup((MultipartForm*)&form);
     };
 
     StrSlice ctype = req_header_get(conn, "Content-Type");
@@ -343,20 +344,21 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
     // Format latency with appropriate unit
     char latency_str[32];
     if (total_ns < 1000) {
-        // nano seconds
-        snprintf(latency_str, sizeof(latency_str), "%3luns", total_ns);
+        // Nanoseconds
+        snprintf(latency_str, sizeof(latency_str), "%3" PRIu64 "ns", total_ns);
     } else if (total_ns < 1000000) {
         // Microseconds
-        snprintf(latency_str, sizeof(latency_str), "%5luµs", total_ns / 1000);
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "µs", total_ns / 1000);
     } else if (total_ns < 1000000000) {
         // Milliseconds
-        snprintf(latency_str, sizeof(latency_str), "%5lums", total_ns / 1000000);
-    } else if (total_ns < 60000000000) {
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "ms", total_ns / 1000000);
+    } else if (total_ns < UINT64_C(60000000000)) {
         // Seconds
-        snprintf(latency_str, sizeof(latency_str), "%5lus", total_ns / 1000000000);
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "s", total_ns / 1000000000);
     } else {
         // Minutes
-        snprintf(latency_str, sizeof(latency_str), "%5lum", total_ns / 60000000000);
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "m",
+                 total_ns / UINT64_C(60000000000));
     }
 
     // Build the log line in our buffer
@@ -398,6 +400,7 @@ void mw2(PulsarCtx* ctx) {
 
     char* name = pulsar_get(conn, "name");
     assert(name && "name is NULL");
+    (void)name;
 }
 
 int main() {
