@@ -13,88 +13,6 @@ static void* GLOBAL_HANDLER_USERDATA  = NULL;  // Global userdata for handlers
 #define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
 
 /* ================================================================
- * Per-Worker Connection Pool (lock-free, no false sharing)
- * ================================================================ */
-#define WORKER_POOL_SIZE 1024
-
-typedef struct {
-    PulsarConn* conns[WORKER_POOL_SIZE];  // Pre-allocated connection objects
-    Arena* arenas[WORKER_POOL_SIZE];      // Pre-allocated arenas for request-scoped allocations
-    int top;  // index of the next available slot; 0 means empty, WORKER_POOL_SIZE means full
-} WorkerPool;
-
-// Align each pool to its own cache line to eliminate false sharing.
-static WorkerPool worker_pools[NUM_WORKERS] __attribute__((aligned(CACHE_LINE_SIZE)));
-
-// Called once at worker-thread startup — fills the pool for this worker.
-static void worker_pool_init(int worker_id) {
-    WorkerPool* wp = &worker_pools[worker_id];
-    wp->top        = 0;
-    for (int i = 0; i < WORKER_POOL_SIZE; i++) {
-        wp->conns[i]  = malloc(sizeof(PulsarConn));
-        wp->arenas[i] = arena_create(2UL << 20);  // 2 MB per arena
-        if (!wp->conns[i] || !wp->arenas[i]) {
-            fprintf(stderr, "worker_pool_init: alloc failed worker=%d slot=%d\n", worker_id, i);
-
-            if (wp->conns[i]) {
-                free(wp->conns[i]);
-                wp->conns[i] = NULL;
-            }
-
-            if (wp->arenas[i]) {
-                arena_destroy(wp->arenas[i]);
-                wp->arenas[i] = NULL;
-            }
-            break;
-        }
-        wp->top++;
-    }
-}
-
-// Acquire a conn+arena pair from this worker's private pool.
-// Falls back to malloc/arena_create if pool is empty (rare).
-// Must only be called by the owning worker thread.
-static PulsarConn* worker_pool_acquire(int worker_id, Arena** out_arena) {
-    WorkerPool* wp = &worker_pools[worker_id];
-    if (wp->top == 0) {
-        *out_arena = arena_create(2UL << 20);  // 2 MB fallback arena
-        return malloc(sizeof(PulsarConn));     // fallback conn
-    }
-
-    int i      = --wp->top;
-    *out_arena = wp->arenas[i];
-    return wp->conns[i];
-}
-
-// Return a conn+arena pair to this worker's private pool.
-// arena_reset is called here so the memory is clean for the next use.
-// Must only be called by the owning worker thread.
-static void worker_pool_release(int worker_id, PulsarConn* c, Arena* a) {
-    arena_reset(a);
-    WorkerPool* wp = &worker_pools[worker_id];
-    if (wp->top < WORKER_POOL_SIZE) {
-        wp->conns[wp->top]  = c;
-        wp->arenas[wp->top] = a;
-        wp->top++;
-        return;
-    }
-
-    // Pool full — this shouldn't happen under normal load.
-    arena_destroy(a);
-    free(c);
-}
-
-// Release all pool entries at worker-thread exit.
-static void worker_pool_cleanup(int worker_id) {
-    WorkerPool* wp = &worker_pools[worker_id];
-    for (int i = 0; i < wp->top; i++) {
-        if (wp->arenas[i]) arena_destroy(wp->arenas[i]);
-        if (wp->conns[i]) free(wp->conns[i]);
-    }
-    wp->top = 0;
-}
-
-/* ================================================================
  * Cached Date Header
  *
  * strftime + gmtime costs ~300 ns.  The HTTP Date header only needs
@@ -138,10 +56,6 @@ INLINE int u64_to_dec(char* buf, uint64_t v) {
     for (int i = 0; i < len; i++)
         buf[i] = tmp[len - 1 - i];
     return len;
-}
-
-INLINE int get_num_available_cores(void) {
-    return sysconf(_SC_NPROCESSORS_ONLN);
 }
 
 INLINE bool conn_timedout(time_t now, time_t last_activity) {
@@ -319,10 +233,6 @@ INLINE bool reset_connection(PulsarConn* conn) {
     // Free heap-owned data BEFORE wiping the arena.
     free_request(conn->request);
     free_response(conn->response);
-
-    // LocalsClear frees managed values but keeps the Locals* struct
-    // (heap-allocated by LocalsInit) alive — the arena-owned entries
-    // array will be re-allocated after arena_reset.
     LocalsClear(conn->locals);
 
     arena_reset(conn->arena);
@@ -349,6 +259,8 @@ INLINE bool reset_connection(PulsarConn* conn) {
  * ================================================================ */
 INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_state,
                              int worker_id) {
+    (void)worker_id;
+
     if (!conn || conn->client_fd == -1) return;
 
     event_delete(queue_fd, conn->client_fd);
@@ -359,20 +271,10 @@ INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_
 
     free_request(conn->request);
     free_response(conn->response);
-
-    // LocalsDestroy frees the heap-allocated Locals* struct and all
-    // stored values.  The arena-owned entries array is freed by
-    // arena_reset inside worker_pool_release.
     LocalsDestroy(conn->locals);
     conn->locals = NULL;
-
-    // Cache arena locally before passing conn to the pool — do NOT touch
-    // conn after worker_pool_release() returns.
-    Arena* arena = conn->arena;
-    conn->arena  = NULL;
-
-    worker_pool_release(worker_id, conn, arena);
-    // conn is now potentially reused — never dereference it again.
+    arena_destroy(conn->arena);
+    free(conn);
 }
 
 /* ================================================================
@@ -1608,11 +1510,18 @@ INLINE int conn_accept(int worker_id) {
  * Event Loop: Add / Read / Write
  * ================================================================ */
 INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id) {
-    Arena* arena     = NULL;
-    PulsarConn* conn = worker_pool_acquire(worker_id, &arena);
-    if (!conn || !arena) {
-        fprintf(stderr, "worker_pool_acquire failed\n");
+    Arena* arena = arena_create(1 << 20);
+    if (!arena) {
+        fprintf(stderr, "add_connection_to_worker->arena_create failed\n");
         close(client_fd);
+        return;
+    }
+
+    PulsarConn* conn = malloc(sizeof(*conn));
+    if (!conn || !arena) {
+        fprintf(stderr, "add_connection_to_worker malloc failed\n");
+        close(client_fd);
+        arena_destroy(arena);
         return;
     }
 
@@ -1622,9 +1531,8 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
         // free_request/free_response not needed — just init'd, no heap allocs yet.
         LocalsDestroy(conn->locals);
         conn->locals = NULL;
-        Arena* a     = conn->arena;
-        conn->arena  = NULL;
-        worker_pool_release(worker_id, conn, a);
+        arena_destroy(arena);
+        free(conn);
         return;
     }
 
@@ -1636,9 +1544,8 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
         free_response(conn->response);
         LocalsDestroy(conn->locals);
         conn->locals = NULL;
-        Arena* a     = conn->arena;
-        conn->arena  = NULL;
-        worker_pool_release(worker_id, conn, a);
+        arena_destroy(arena);
+        free(conn);
     }
 }
 
@@ -1793,45 +1700,8 @@ handle_error:
 typedef struct {
     int queue_fd;
     int id;
-    int designated_core;
     KeepAliveState* keep_alive_state;
 } WorkerData;
-
-int pin_current_thread_to_core(int core_id) {
-    long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (num_cores <= 0) num_cores = 1;
-    if (core_id < 0 || core_id >= (int)num_cores) {
-        fprintf(stderr, "Invalid core_id %d (available: 0-%ld)\n", core_id, num_cores - 1);
-        return -1;
-    }
-
-#if defined(__linux__) || defined(__FreeBSD__)
-#if defined(__linux__)
-    cpu_set_t cpuset;
-#else
-    cpuset_t cpuset;
-#endif
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) != 0) {
-        perror("pthread_setaffinity_np");
-        return -1;
-    }
-#elif defined(__APPLE__)
-    thread_port_t thread                 = pthread_mach_thread_np(pthread_self());
-    thread_affinity_policy_data_t policy = {core_id};
-    kern_return_t r = thread_policy_set(thread, THREAD_AFFINITY_POLICY, (thread_policy_t)&policy,
-                                        THREAD_AFFINITY_POLICY_COUNT);
-    if (r != KERN_SUCCESS) {
-        mach_error("thread_policy_set:", r);
-        return -1;
-    }
-#else
-#pragma message("CPU affinity not supported on this platform")
-    return -1;
-#endif
-    return 0;
-}
 
 void* worker_thread(void* arg) {
     WorkerData* worker       = (WorkerData*)arg;
@@ -1839,14 +1709,8 @@ void* worker_thread(void* arg) {
     int worker_id            = worker->id;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
-    pin_current_thread_to_core(worker->designated_core);
-
-    // Each worker initialises its own private pool.
-    worker_pool_init(worker_id);
-
     if (event_add_server(queue_fd, server_fd) < 0) {
         perror("event_add_server");
-        worker_pool_cleanup(worker_id);
         return NULL;
     }
 
@@ -1894,7 +1758,6 @@ void* worker_thread(void* arg) {
 
     event_delete(queue_fd, server_fd);
     close(queue_fd);
-    worker_pool_cleanup(worker_id);
     return NULL;
 }
 
@@ -1918,9 +1781,6 @@ int pulsar_run(const char* addr, int port) {
     WorkerData worker_data[NUM_WORKERS]           = {0};
     KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
 
-    int num_cores      = get_num_available_cores();
-    int reserved_cores = 1;
-
     for (int i = 0; i < NUM_WORKERS; i++) {
         int queue_fd = event_queue_create();
         if (queue_fd == -1) {
@@ -1930,7 +1790,6 @@ int pulsar_run(const char* addr, int port) {
 
         worker_data[i].queue_fd         = queue_fd;
         worker_data[i].id               = i;
-        worker_data[i].designated_core  = i % (num_cores - reserved_cores);
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i])) {
