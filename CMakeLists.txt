@@ -97,9 +97,11 @@ file(GLOB PULSAR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 
 add_library(pulsar_objects OBJECT ${PULSAR_SOURCES})
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    # Link with libBlocksRuntime for block support
-    target_link_libraries(pulsar_objects PUBLIC "-lBlocksRuntime")
+if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
+    find_library(BLOCKSRUNTIME_LIB BlocksRuntime)
+    if(BLOCKSRUNTIME_LIB)
+        target_link_libraries(pulsar_objects PUBLIC ${BLOCKSRUNTIME_LIB})
+    endif()
 endif()
 
 target_include_directories(pulsar_objects
