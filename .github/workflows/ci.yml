@@ -9,7 +9,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ${{ matrix.os }}
+
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14]
         build_type: [Debug, Release]
@@ -20,59 +22,104 @@ jobs:
           - os: macos-14
             cc: clang
             cxx: clang++
-      fail-fast: false
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CMake and Ninja
+      - name: Install CMake
         uses: lukka/get-cmake@latest
         with:
           cmakeVersion: 3.30.x
 
-      - name: Install system dependencies
+      - name: Install dependencies
+        shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             sudo apt-get update
             sudo apt-get install -y build-essential ninja-build
-          elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            brew update
+          else
             brew install ninja
           fi
 
       - name: Clone solidc
-        run: git clone https://github.com/abiiranathan/solidc solidc_dependency
+        run: |
+          git clone --depth 1 https://github.com/abiiranathan/solidc solidc_dependency
 
       - name: Build and install solidc
         run: |
-          cmake -S solidc_dependency -B solidc_dependency/build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/solidc-install \
-            -DBUILD_TESTS=OFF \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          cmake -S solidc_dependency \
+                -B solidc_dependency/build \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/solidc-install" \
+                -DBUILD_TESTS=OFF \
+                -DBUILD_BENCHMARKS=OFF \
+                -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+                -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
 
-          cmake --build solidc_dependency/build --parallel 4
+          cmake --build solidc_dependency/build --parallel
+
           cmake --install solidc_dependency/build
+
+      - name: Verify solidc installation
+        shell: bash
+        run: |
+          echo "=== Install tree ==="
+          find "$GITHUB_WORKSPACE/solidc-install" | sort
+
+          test -f "$GITHUB_WORKSPACE/solidc-install/include/solidc/arena.h"
+
+          test -f "$GITHUB_WORKSPACE/solidc-install/lib/cmake/solidc/solidcConfig.cmake"
+
+      - name: Verify solidc package
+        shell: bash
+        run: |
+          mkdir verify
+
+          cat > verify/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.30)
+          project(verify C)
+
+          find_package(solidc CONFIG REQUIRED)
+
+          get_target_property(
+            INC
+            solidc::solidc
+            INTERFACE_INCLUDE_DIRECTORIES
+          )
+
+          message(STATUS "SOLIDC_INC=${INC}")
+          EOF
+
+          cmake -S verify \
+                -B verify/build \
+                -Dsolidc_DIR="$GITHUB_WORKSPACE/solidc-install/lib/cmake/solidc"
 
       - name: Configure pulsar
         run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/solidc-install \
-            -DBUILD_TESTS=ON \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          cmake -S . \
+                -B build \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -Dsolidc_DIR="$GITHUB_WORKSPACE/solidc-install/lib/cmake/solidc" \
+                -DBUILD_TESTS=ON \
+                -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+                -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
 
       - name: Build pulsar
-        run: cmake --build build --parallel 4
+        run: |
+          cmake --build build --parallel
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure --parallel 4
+        run: |
+          ctest --test-dir build \
+                --output-on-failure \
+                --parallel
 
       - name: Verify installation
+        shell: bash
         run: |
-          cmake --install build --prefix ./install
-          test -f install/lib/libpulsar.a
+          cmake --install build --prefix install
+
+          test -f install/lib/libpulsar.a || \
+          test -f install/lib64/libpulsar.a
