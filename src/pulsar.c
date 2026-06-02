@@ -1117,12 +1117,12 @@ INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off
     static const char hfmt[] =
         "Accept-Ranges: bytes\r\n"
         "Content-Length: %ld\r\n"
-        "Content-Range: bytes %ld-%ld/%ld\r\n";
+        "Content-Range: bytes %ld-%ld/%lld\r\n";
     response_t* resp = conn->response;
     size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
     if (remaining > 164) {
         int len = snprintf(resp->headers_buf + resp->headers_len, remaining, hfmt, end - start + 1,
-                           start, end, file_size);
+                           start, end, (long long)file_size);
         if (len > 0 && (size_t)len < remaining) {
             resp->headers_len += (uint16_t)len;
             return;
