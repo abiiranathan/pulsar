@@ -258,8 +258,7 @@ static MimeEntry mime_entries[] = {
 
 #define DEFAULT_CONTENT_TYPE "application/octet-stream"
 #define HASH_TABLE_SIZE      NEXT_POWER_OF_TWO(MIME_MAPPING_SIZE)
-CHECK_POWER_OF_2(HASH_TABLE_SIZE);
-#define HASH_TABLE_MASK (HASH_TABLE_SIZE - 1)
+#define HASH_TABLE_MASK      (HASH_TABLE_SIZE - 1)
 
 static MimeEntry* hash_table[HASH_TABLE_SIZE] = {0};
 

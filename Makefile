@@ -12,15 +12,20 @@ BUILD ?= release
 # === Platform Detection ===
 
 UNAME := $(shell uname -s)
+EVENT_BACKEND := src/events/epoll.c
 
 ifeq ($(UNAME), Darwin)
     LIBEXT := dylib
     SONAME_FLAG := -install_name
     SHARED_FLAG := -dynamiclib
+
+	# On BSD systems, use kqueue instead of epoll
+	EVENT_BACKEND := src/events/kqueue.c
 else
     LIBEXT := so
     SONAME_FLAG := -soname
     SHARED_FLAG := -shared
+	# On Linux, use epoll (default)
 endif
 
 # === Compiler Flags ===
@@ -50,7 +55,8 @@ TEST_DIR := tests
 BASE_SRC := $(SRC_DIR)/routing.c \
             $(SRC_DIR)/locals.c \
             $(SRC_DIR)/pulsar.c \
-            $(SRC_DIR)/forms.c
+            $(SRC_DIR)/forms.c \
+			$(EVENT_BACKEND)
 
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(BASE_SRC))

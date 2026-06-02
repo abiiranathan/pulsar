@@ -29,7 +29,7 @@ option(BUILD_SHARED_LIBS          "Build shared library"              ON)
 option(BUILD_STATIC_LIBS          "Build static library"              ON)
 option(BUILD_TESTS                "Build tests"                       ON)
 option(INSTALL_HEADERS            "Install public headers"            ON)
-option(ENABLE_NATIVE_OPTIMIZATION "Enable CPU-specific optimizations" OFF)
+option(ENABLE_NATIVE_OPTIMIZATION "Enable CPU-specific optimizations" ON)
 option(ENABLE_UNIVERSAL_BINARY    "Build universal macOS binaries"    ON)
 
 # ------------------------------------------------------------------------------
@@ -63,14 +63,10 @@ message(STATUS "SOLIDC_INCLUDE_DIRS=${SOLIDC_INCLUDE_DIRS}")
 # ------------------------------------------------------------------------------
 
 add_compile_options(
-    -Wall -Wextra -Werror -fPIC
+    -Wall -Wextra -Werror
     -Wno-unused-function
     -Wno-unused-result
 )
-
-if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-Wno-gnu-zero-variadic-macro-arguments -fblocks)
-endif()
 
 # ------------------------------------------------------------------------------
 # Sources
@@ -96,13 +92,6 @@ file(GLOB PULSAR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 # ------------------------------------------------------------------------------
 
 add_library(pulsar_objects OBJECT ${PULSAR_SOURCES})
-
-if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
-    find_library(BLOCKSRUNTIME_LIB BlocksRuntime)
-    if(BLOCKSRUNTIME_LIB)
-        target_link_libraries(pulsar_objects PUBLIC ${BLOCKSRUNTIME_LIB})
-    endif()
-endif()
 
 target_include_directories(pulsar_objects
     PUBLIC
@@ -149,6 +138,7 @@ endif()
 
 if(BUILD_SHARED_LIBS)
     add_library(pulsar_shared SHARED $<TARGET_OBJECTS:pulsar_objects>)
+    target_compile_options(pulsar_shared PRIVATE -fPIC -Wl,-z,defs)
 
     set_target_properties(pulsar_shared PROPERTIES
         OUTPUT_NAME              pulsar
