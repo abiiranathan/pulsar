@@ -18,7 +18,7 @@
 
 // Number of workers. Should be ideally == ncpus.
 #ifndef NUM_WORKERS
-#define NUM_WORKERS 8
+#define NUM_WORKERS 4
 #endif
 
 // maximum path length
@@ -44,7 +44,7 @@
 // Default buffer size for response body above which allocation happens, allocating
 // WRITE_BUFFER_SIZE.
 #ifndef STACK_BUFFER_SIZE
-#define STACK_BUFFER_SIZE 1024
+#define STACK_BUFFER_SIZE 512
 #endif
 
 // Keep-Alive connection timeout in seconds.
@@ -82,12 +82,10 @@
 #endif
 
 // Constants
-#define STATUS_LINE_SIZE 128
+#define STATUS_LINE_SIZE 48
 #define HEADERS_BUF_SIZE 1024
 #define CACHE_LINE_SIZE  64
 
-static_assert(STATUS_LINE_SIZE <= UINT8_MAX);
-static_assert(HEADERS_BUF_SIZE <= UINT16_MAX);
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
 static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");

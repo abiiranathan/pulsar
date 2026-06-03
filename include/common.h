@@ -16,16 +16,13 @@
 
 // Platform-specific includes
 #if defined(__linux__)
-#include <malloc.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #elif defined(__FreeBSD__)
-#include <sys/cpuset.h>
 #include <sys/event.h>
 #include <sys/param.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
-#include <mach/thread_policy.h>
 #include <sys/event.h>
 #include <sys/param.h>
 #endif
@@ -59,32 +56,43 @@ typedef enum {
 
 // HTTP Response structure
 typedef struct response_t {
-    http_status status_code;               // HTTP status code.
-    char status_buf[STATUS_LINE_SIZE];     // Null-terminated buffer for status line.
-    char headers_buf[HEADERS_BUF_SIZE];    // Null-terminated buffer for headers.
-    bool heap_allocated;                   // If heap allocation is used.
-    union {
-        uint8_t stack[STACK_BUFFER_SIZE];  // stack buffer for smaller responses
-        uint8_t* heap;  // Dynamically allocated body buffer. (not null-terminated)
-    } body;             // Response body.
+    // =========================================================================
+    // CACHE LINE 1: HOT CONTROL METADATA (Fits entirely in 64 bytes)
+    // =========================================================================
 
-    // Pre-computed lengths of status line, headers, body.
+    // 8-Byte Fields
     size_t body_len;       // Actual length of body
-    size_t body_capacity;  // Capacity of body buffer.
-    uint16_t headers_len;  // Actual length of headers
-    uint8_t status_len;    // Actual length of status line
-    uint8_t flags;         // 4 bytes for all flags.
+    size_t body_capacity;  // Capacity of body buffer
+    size_t body_sent;      // Bytes of body sent
 
-    // Event retry state.
-    uint8_t status_sent;    // Bytes of status line sent
-    uint16_t headers_sent;  // Bytes of headers sent
-    size_t body_sent;       // Bytes of body sent
+    // 4-Byte Fields
+    http_status status_code;  // HTTP status code (enum)
+    int file_fd;              // File descriptor for file to send
+    uint32_t file_size;       // Size of file to send
+    uint32_t file_offset;     // Offset in file for sendfile
+    uint32_t max_range;       // Maximum range of requested bytes
 
-    // File response state.
-    uint32_t file_size;    // Size of file to send (if applicable)
-    uint32_t file_offset;  // Offset in file for sendfile
-    uint32_t max_range;    // Maximum range of requested bytes in range request.
-    int file_fd;           // File descriptor for file to send (if applicable)
+    // 2-Byte Fields
+    size_t headers_len;   // Actual length of headers
+    size_t headers_sent;  // Bytes of headers sent
+
+    // 1-Byte Fields (Packed tightly together with zero alignment padding)
+    bool heap_allocated;  // If heap allocation is used
+    uint8_t status_len;   // Actual length of status line
+    uint8_t flags;        // 4 bytes for all flags
+    uint8_t status_sent;  // Bytes of status line sent
+
+    // =========================================================================
+    // CACHE LINE 2 & BEYOND: LARGE DATA BUFFERS
+    // =========================================================================
+
+    char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line
+    char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers
+
+    union {
+        uint8_t stack[STACK_BUFFER_SIZE];  // Stack buffer for smaller responses
+        uint8_t* heap;                     // Dynamically allocated body buffer (aligned)
+    } body;                                // Response body
 } response_t;
 
 // HTTP Request structure

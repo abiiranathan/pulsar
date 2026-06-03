@@ -1,4 +1,5 @@
 #include "../include/routing.h"
+#include <stdalign.h>
 #include <string.h>
 #include "../include/common.h"
 #include "../include/method.h"
@@ -10,21 +11,63 @@ extern void static_file_handler(PulsarCtx* ctx);
 static route_t global_routes[MAX_ROUTES] = {0};
 static size_t global_route_count         = 0;
 
-/**
- * Method-specific route arrays for O(1) method dispatch.
- * Each array contains pointers to routes sorted by specificity.
- * Index = HttpMethod enum value.
+/*
+ * Compact per-route metadata stored contiguously for cache-friendly linear
+ * scan. Only the fields that drive the initial match decision are kept here;
+ * the full route_t is reached via `target` only on a confirmed match.
+ *
+ * Layout (on LP64):
+ *   pattern    8 B   pointer into the permanent pattern string
+ *   target     8 B   pointer to the full route_t (cold path)
+ *   pattern_len 2 B
+ *   route_type  1 B
+ *   first_char  1 B  pre-extracted pattern[0] — saves one indirection per iter
+ *   _pad        4 B  explicit padding to 24 B / natural alignment
  */
 typedef struct {
-    route_t** routes; /**< Array of route pointers for this method. */
-    uint16_t count;   /**< Number of routes registered for this method. */
-    uint16_t _pad;    /**< Explicit padding; aligns struct to 8 bytes. */
+    const char* pattern;  /**< Pointer to pattern string (permanent lifetime). */
+    route_t* target;      /**< Pointer to the full route_t (used on match). */
+    uint16_t pattern_len; /**< Byte length of pattern. */
+    uint8_t route_type;   /**< ROUTE_TYPE_{EXACT,STATIC,PARAM}. */
+    char first_char;      /**< pattern[0], pre-extracted to avoid a pointer chase. */
+    uint8_t _pad[4];      /**< Pad to exactly 24 B (LP64 natural alignment). */
+} RouteMetadata;
+
+/*
+ * Method-specific pointer directory.
+ *
+ * Struct is exactly 16 bytes (a power of two). This allows the compiler to index 
+ * into `method_routes[method]` using a single shift instruction (e.g. `shl rax, 4`) 
+ * instead of generating an expensive `imul` integer multiplication.
+ *
+ * All directories fit within two 64-byte cache lines. Both `routes` and `count` 
+ * are guaranteed to reside in the same cache line.
+ */
+typedef struct {
+    RouteMetadata* routes; /**< Pointer to flat backing storage. */
+    uint16_t count;        /**< Number of active entries. */
+    uint16_t _pad[3];      /**< Explicit padding to align to exactly 16 B. */
 } MethodRoutes;
 
 static MethodRoutes method_routes[HTTP_METHOD_COUNT] = {0};
 
-/** Pre-allocated backing storage for per-method route pointer arrays. */
-static route_t* method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
+/* Flat, contiguous backing storage allocated once statically. */
+static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
+
+/*
+ * Portable __builtin_memcmp shim.
+ *
+ * GCC and Clang expand __builtin_memcmp to inline scalar/SIMD comparisons
+ * for sizes known at compile time, and to a direct call (no PLT) otherwise.
+ * The PLT call to bcmp@plt that appeared in the profiling report is the
+ * symptom this shim addresses. On compilers that don't provide the builtin
+ * the macro falls back to the standard memcmp, which is correct if slower.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define ROUTE_MEMCMP(a, b, n) __builtin_memcmp((a), (b), (n))
+#else
+#define ROUTE_MEMCMP(a, b, n) memcmp((a), (b), (n))
+#endif
 
 /**
  * Counts path parameters in a pattern and validates its syntax.
@@ -74,7 +117,7 @@ static size_t count_path_params(const char* pattern, bool* valid) {
  * @param nparams   Output: number of path parameters found.
  * @return ROUTE_TYPE_STATIC, ROUTE_TYPE_EXACT, or ROUTE_TYPE_PARAM.
  */
-static inline uint8_t classify_route(const char* pattern, bool is_static, uint8_t* nparams) {
+INLINE uint8_t classify_route(const char* pattern, bool is_static, uint8_t* nparams) {
     if (is_static) return ROUTE_TYPE_STATIC;
 
     bool valid;
@@ -115,7 +158,7 @@ static void populate_param_names(const char* pattern, PathParams* path_params) {
 
         /*
          * Names are stored as interior pointers into the (static, permanent)
-         * pattern string.  No allocation is needed; lifetime matches the route.
+         * pattern string. No allocation is needed; lifetime matches the route.
          * We cast away const to satisfy the non-const field, but the pointer
          * will never be written through in the matcher.
          */
@@ -227,46 +270,40 @@ void sort_routes(void) {
 
     qsort(global_routes, global_route_count, sizeof(route_t), compare_routes);
 
-    /* Build per-method pointer arrays from the now-sorted global table. */
+    /* Reset directory counts and map their contiguous backing storage */
     for (size_t i = 0; i < HTTP_METHOD_COUNT; i++) {
         method_routes[i].routes = method_route_storage[i];
         method_routes[i].count  = 0;
     }
 
+    /*
+     * Build flat contiguous RouteMetadata arrays from the sorted global table.
+     *
+     * Copying the hot fields (pattern, pattern_len, route_type, first_char)
+     * into the metadata array means the inner scan loop in match_method_routes
+     * never dereferences route_t* to read those fields — every byte it needs
+     * lives in the same cache line as the metadata entry itself.
+     */
     for (size_t i = 0; i < global_route_count; i++) {
         route_t* r              = &global_routes[i];
         const HttpMethod method = r->method;
 
         ASSERT(method < HTTP_METHOD_COUNT && "Invalid method during sort");
-        ASSERT(method_routes[method].count < MAX_ROUTES && "Too many routes for method");
 
-        method_routes[method].routes[method_routes[method].count++] = r;
+        uint16_t idx = method_routes[method].count;
+        ASSERT(idx < MAX_ROUTES && "Too many routes for method");
+
+        method_routes[method].routes[idx] = (RouteMetadata){
+            .pattern     = r->pattern,
+            .target      = r,
+            .pattern_len = r->pattern_len,
+            .route_type  = r->route_type,
+            .first_char  = r->pattern[0],
+        };
+        method_routes[method].count++;
     }
 
     sorted = 1;
-}
-
-/**
- * Fast exact string comparison for route matching.
- *
- * Checks length, then the first character (cheap divergence filter), then
- * delegates to memcmp for the remainder.
- */
-static inline bool str_exact_match(const char* pattern, uint16_t pat_len, const char* url,
-                                   size_t url_len) {
-    return (pat_len == (uint16_t)url_len) && (pattern[0] == url[0]) &&
-           (memcmp(pattern, url, url_len) == 0);
-}
-
-/**
- * Fast prefix match for static file routes.
- *
- * Returns true if url begins with pattern.
- */
-static inline bool str_prefix_match(const char* pattern, uint16_t pat_len, const char* url,
-                                    size_t url_len) {
-    return (pat_len <= (uint16_t)url_len) && (pattern[0] == url[0]) &&
-           (memcmp(pattern, url, pat_len) == 0);
 }
 
 /**
@@ -274,11 +311,11 @@ static inline bool str_prefix_match(const char* pattern, uint16_t pat_len, const
  *
  * Param names are pre-populated at registration time (see populate_param_names),
  * so this function only allocates arena memory for extracted values — never for
- * names.  This is the primary hot-path optimisation over the naive approach.
+ * names. This is the primary hot-path optimisation over the naive approach.
  *
- * Single-pass over both strings simultaneously.  The literal-character path
+ * Single-pass over both strings simultaneously. The literal-character path
  * (overwhelmingly the common case) costs one compare and two pointer increments
- * per character.  The bitwise-AND loop condition tests both pointers for
+ * per character. The bitwise-AND loop condition tests both pointers for
  * non-NUL in a single branch.
  *
  * @param pattern     Route pattern with {param} placeholders.
@@ -319,7 +356,7 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
         pat++;                         /* skip '}' */
 
         /* Extract value: stop at '/', the next literal pattern character,
-         * or end-of-string.  Hoist *pat to avoid re-dereferencing each iter. */
+         * or end-of-string. Hoist *pat to avoid re-dereferencing each iter. */
         const char* val_start = url_ptr;
         const char stop_pat   = *pat; /* next pattern char after '}' */
 
@@ -350,33 +387,13 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
 }
 
 /**
- * Dispatches to the correct match strategy based on route type.
+ * Searches the per-method RouteMetadata array for the first matching route.
  *
- * Marked inline to eliminate call overhead in the search loop; the compiler
- * can also propagate the constant route_type into the switch arms.
- */
-static inline bool route_matches(route_t* route, const char* url, size_t url_length, Arena* arena) {
-    switch (route->route_type) {
-        case ROUTE_TYPE_EXACT:
-            return str_exact_match(route->pattern, route->pattern_len, url, url_length);
-
-        case ROUTE_TYPE_STATIC:
-            return str_prefix_match(route->pattern, route->pattern_len, url, url_length);
-
-        case ROUTE_TYPE_PARAM:
-            return match_path_parameters(route->pattern, url, route->state.path_params, arena);
-
-        default:
-            return false;
-    }
-}
-
-/**
- * Searches the per-method route array for the first match.
+ * Fast bitwise shifts (shl rax, 4) determine directory offsets, replacing 
+ * the high-latency integer multiplication (imul) instructions.
  *
- * Linear search is optimal for the small arrays typical of a single HTTP
- * method (< 64 routes).  Routes are sorted by specificity so the first
- * match is always the most specific.
+ * If no routes exist for a method, this function exits instantly, sparing 
+ * the L1 data cache from pulling in unnecessary storage partitions.
  *
  * @param method     HTTP method to search.
  * @param path       Request path.
@@ -384,17 +401,52 @@ static inline bool route_matches(route_t* route, const char* url, size_t url_len
  * @param arena      Arena passed through to param matchers.
  * @return Matched route pointer, or NULL if none found.
  */
-static inline route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length,
-                                           Arena* arena) {
+INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length,
+                                    Arena* arena) {
     if (method >= HTTP_METHOD_COUNT) return NULL;
 
     const MethodRoutes* mr = &method_routes[method];
-    route_t** const routes = mr->routes;
     const uint16_t count   = mr->count;
 
+    /* Exit immediately if no routes exist for this method */
+    if (count == 0) return NULL;
+
+    const RouteMetadata* routes = mr->routes;
+    const char first_url_ch     = path[0]; /* hoist: avoids re-read each iteration */
+
     for (uint16_t i = 0; i < count; i++) {
-        if (route_matches(routes[i], path, url_length, arena)) {
-            return routes[i];
+        const RouteMetadata* meta = &routes[i];
+
+        switch (meta->route_type) {
+            case ROUTE_TYPE_EXACT:
+                if (meta->pattern_len == (uint16_t)url_length && meta->first_char == first_url_ch &&
+                    ROUTE_MEMCMP(meta->pattern, path, url_length) == 0) {
+                    return meta->target;
+                }
+                break;
+
+            case ROUTE_TYPE_STATIC:
+                if (meta->pattern_len <= (uint16_t)url_length && meta->first_char == first_url_ch &&
+                    ROUTE_MEMCMP(meta->pattern, path, meta->pattern_len) == 0) {
+                    return meta->target;
+                }
+                break;
+
+            case ROUTE_TYPE_PARAM:
+                /*
+                 * Parameterised matching is inherently variable-length; delegate
+                 * to match_path_parameters. The first_char pre-check is omitted
+                 * here because param patterns virtually always start with '/' and
+                 * so do all URL paths — the check would never filter anything.
+                 */
+                if (match_path_parameters(meta->pattern, path, meta->target->state.path_params,
+                                          arena)) {
+                    return meta->target;
+                }
+                break;
+
+            default:
+                break;
         }
     }
 
@@ -407,7 +459,7 @@ static inline route_t* match_method_routes(HttpMethod method, const char* path, 
  * Used by OPTIONS handling to find any route on the requested path
  * regardless of the registered method.
  */
-static inline route_t* match_any_method(const char* path, size_t url_length, Arena* arena) {
+INLINE route_t* match_any_method(const char* path, size_t url_length, Arena* arena) {
     for (size_t method = 0; method < HTTP_METHOD_COUNT; method++) {
         route_t* found = match_method_routes((HttpMethod)method, path, url_length, arena);
         if (found) return found;

@@ -329,8 +329,11 @@ void serve_movie(PulsarCtx* ctx) {
  * Callback — hot path, no syscalls
  * ---------------------------------------------------------------------- */
 static PlogState g_log;  // Lives for the duration of the process
+static int enable_logging = 0;
 
 void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
+    if (!enable_logging) return;
+
     PulsarConn* conn        = ctx->conn;
     const char* method      = req_method(conn);
     const char* path        = req_path(conn);
@@ -388,7 +391,7 @@ int main() {
     }
 
     // Set post-request callback handler.
-    pulsar_set_callback(pulsar_callback);
+    // pulsar_set_callback(pulsar_callback);
 
     // Register routes using the new API
     route_register("/", HTTP_GET, hello_world_handler);
@@ -415,6 +418,5 @@ int main() {
     if (drops > 0) {
         fprintf(stderr, "[plog] warning: %" PRIu64 " log entries dropped under load\n", drops);
     }
-    // close(fd);
     return rc;
 }

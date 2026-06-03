@@ -433,9 +433,9 @@ void conn_writeheaders_vec(PulsarConn* conn, const struct iovec* headers, size_t
  *
  * @param conn The connection object
  * @param code HTTP status code
- * @return const char* Status text or NULL if invalid status code.
+ * @return void
  */
-const char* conn_set_status(PulsarConn* conn, http_status code);
+void conn_set_status(PulsarConn* conn, http_status code);
 
 /**
  * @brief Gets a query parameter value

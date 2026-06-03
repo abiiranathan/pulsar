@@ -27,10 +27,11 @@ typedef struct {
  * structure. LocalsClear() only frees values, not arena memory.
  */
 typedef struct {
-    KeyValue* entries;  // Arena-allocated array of entries
-    size_t size;        // Number of occupied entries
-    size_t capacity;    // Total allocated capacity
-    Arena* arena;       // External arena (NOT owned by Locals)
+    KeyValue* entries;     // Arena-allocated array of entries
+    size_t size;           // Number of occupied entries
+    size_t capacity;       // Total allocated capacity
+    size_t managed_count;  // Number of entries with non-NULL free_func.
+    Arena* arena;          // External arena (NOT owned by Locals)
 } Locals;
 
 /**

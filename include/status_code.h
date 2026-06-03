@@ -1,9 +1,11 @@
 #ifndef STATUS_CODE_H
 #define STATUS_CODE_H
 
+#include <solidc/str_slice.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "macros.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,95 +81,88 @@ typedef enum : uint32_t {
     StatusNetworkAuthenticationRequired = 511
 } http_status;
 
-typedef struct {
-    const char* text;
-    uint8_t length;
-} status_info_t;
-
 // Lookup table indexed by status code (offset from 100)
-#define STATUS_MIN        StatusContinue
-#define STATUS_MAX        StatusNetworkAuthenticationRequired
-#define STATUS_TABLE_SIZE (STATUS_MAX - STATUS_MIN + 1)
+#define STATUS_MIN StatusContinue
+#define STATUS_MAX StatusNetworkAuthenticationRequired
 
-static const status_info_t status_info[STATUS_TABLE_SIZE] = {
-    [0]   = {"Continue", 8},                          // 100
-    [1]   = {"Switching Protocols", 19},              // 101
-    [2]   = {"Processing", 10},                       // 102
-    [3]   = {"Early Hints", 11},                      // 103
-    [100] = {"OK", 2},                                // 200
-    [101] = {"Created", 7},                           // 201
-    [102] = {"Accepted", 8},                          // 202
-    [103] = {"Non-Authoritative Information", 29},    // 203
-    [104] = {"No Content", 10},                       // 204
-    [105] = {"Reset Content", 13},                    // 205
-    [106] = {"Partial Content", 15},                  // 206
-    [107] = {"Multi-Status", 12},                     // 207
-    [108] = {"Already Reported", 16},                 // 208
-    [126] = {"IM Used", 7},                           // 226
-    [200] = {"Multiple Choices", 16},                 // 300
-    [201] = {"Moved Permanently", 17},                // 301
-    [202] = {"Found", 5},                             // 302
-    [203] = {"See Other", 9},                         // 303
-    [204] = {"Not Modified", 12},                     // 304
-    [205] = {"Use Proxy", 9},                         // 305
-    [206] = {"Unused", 6},                            // 306
-    [207] = {"Temporary Redirect", 18},               // 307
-    [208] = {"Permanent Redirect", 18},               // 308
-    [300] = {"Bad Request", 11},                      // 400
-    [301] = {"Unauthorized", 12},                     // 401
-    [302] = {"Payment Required", 16},                 // 402
-    [303] = {"Forbidden", 9},                         // 403
-    [304] = {"Not Found", 9},                         // 404
-    [305] = {"Method Not Allowed", 18},               // 405
-    [306] = {"Not Acceptable", 14},                   // 406
-    [307] = {"Proxy Authentication Required", 29},    // 407
-    [308] = {"Request Timeout", 15},                  // 408
-    [309] = {"Conflict", 8},                          // 409
-    [310] = {"Gone", 4},                              // 410
-    [311] = {"Length Required", 15},                  // 411
-    [312] = {"Precondition Failed", 19},              // 412
-    [313] = {"Request Entity Too Large", 24},         // 413
-    [314] = {"Request URI Too Long", 20},             // 414
-    [315] = {"Unsupported Media Type", 22},           // 415
-    [316] = {"Requested Range Not Satisfiable", 31},  // 416
-    [317] = {"Expectation Failed", 18},               // 417
-    [318] = {"I'm a teapot", 12},                     // 418
-    [321] = {"Misdirected Request", 19},              // 421
-    [322] = {"Unprocessable Entity", 20},             // 422
-    [323] = {"Locked", 6},                            // 423
-    [324] = {"Failed Dependency", 17},                // 424
-    [325] = {"Too Early", 9},                         // 425
-    [326] = {"Upgrade Required", 16},                 // 426
-    [328] = {"Precondition Required", 21},            // 428
-    [329] = {"Too Many Requests", 17},                // 429
-    [331] = {"Request Header Fields Too Large", 31},  // 431
-    [351] = {"Unavailable For Legal Reasons", 29},    // 451
-    [400] = {"Internal Server Error", 21},            // 500
-    [401] = {"Not Implemented", 15},                  // 501
-    [402] = {"Bad Gateway", 11},                      // 502
-    [403] = {"Service Unavailable", 19},              // 503
-    [404] = {"Gateway Timeout", 15},                  // 504
-    [405] = {"HTTP Version Not Supported", 26},       // 505
-    [406] = {"Variant Also Negotiates", 23},          // 506
-    [407] = {"Insufficient Storage", 20},             // 507
-    [408] = {"Loop Detected", 13},                    // 508
-    [410] = {"Not Extended", 12},                     // 510
-    [411] = {"Network Authentication Required", 31},  // 511
+// Predefined status lines for common HTTP status codes. Indexed by status code.
+// Format:
+static const StrSlice status_info[512] = {
+    [100] = SS_LIT("HTTP/1.1 100 Continue\r\n"),  // 100
+    [101] = SS_LIT("HTTP/1.1 101 Switching Protocols\r\n"),
+    [102] = SS_LIT("HTTP/1.1 102 Processing\r\n"),
+    [103] = SS_LIT("HTTP/1.1 103 Early Hints\r\n"),
+    [200] = SS_LIT("HTTP/1.1 200 OK\r\n"),
+    [201] = SS_LIT("HTTP/1.1 201 Created\r\n"),
+    [202] = SS_LIT("HTTP/1.1 202 Accepted\r\n"),
+    [203] = SS_LIT("HTTP/1.1 203 Non-Authoritative Information\r\n"),
+    [204] = SS_LIT("HTTP/1.1 204 No Content\r\n"),
+    [205] = SS_LIT("HTTP/1.1 205 Reset Content\r\n"),
+    [206] = SS_LIT("HTTP/1.1 206 Partial Content\r\n"),
+    [207] = SS_LIT("HTTP/1.1 207 Multi-Status\r\n"),
+    [208] = SS_LIT("HTTP/1.1 208 Already Reported\r\n"),
+    [226] = SS_LIT("HTTP/1.1 226 IM Used\r\n"),
+    [300] = SS_LIT("HTTP/1.1 300 Multiple Choices\r\n"),
+    [301] = SS_LIT("HTTP/1.1 301 Moved Permanently\r\n"),
+    [302] = SS_LIT("HTTP/1.1 302 Found\r\n"),
+    [303] = SS_LIT("HTTP/1.1 303 See Other\r\n"),
+    [304] = SS_LIT("HTTP/1.1 304 Not Modified\r\n"),
+    [305] = SS_LIT("HTTP/1.1 305 Use Proxy\r\n"),
+    [306] = SS_LIT("HTTP/1.1 306 Unused\r\n"),
+    [307] = SS_LIT("HTTP/1.1 307 Temporary Redirect\r\n"),
+    [308] = SS_LIT("HTTP/1.1 308 Permanent Redirect\r\n"),
+    [400] = SS_LIT("HTTP/1.1 400 Bad Request\r\n"),
+    [401] = SS_LIT("HTTP/1.1 401 Unauthorized\r\n"),
+    [402] = SS_LIT("HTTP/1.1 402 Payment Required\r\n"),
+    [403] = SS_LIT("HTTP/1.1 403 Forbidden\r\n"),
+    [404] = SS_LIT("HTTP/1.1 404 Not Found\r\n"),
+    [405] = SS_LIT("HTTP/1.1 405 Method Not Allowed\r\n"),
+    [406] = SS_LIT("HTTP/1.1 406 Not Acceptable\r\n"),
+    [407] = SS_LIT("HTTP/1.1 407 Proxy Authentication Required\r\n"),
+    [408] = SS_LIT("HTTP/1.1 408 Request Timeout\r\n"),
+    [409] = SS_LIT("HTTP/1.1 409 Conflict\r\n"),
+    [410] = SS_LIT("HTTP/1.1 410 Gone\r\n"),
+    [411] = SS_LIT("HTTP/1.1 411 Length Required\r\n"),
+    [412] = SS_LIT("HTTP/1.1 412 Precondition Failed\r\n"),
+    [413] = SS_LIT("HTTP/1.1 413 Request Entity Too Large\r\n"),
+    [414] = SS_LIT("HTTP/1.1 414 Request URI Too Long\r\n"),
+    [415] = SS_LIT("HTTP/1.1 415 Unsupported Media Type\r\n"),
+    [416] = SS_LIT("HTTP/1.1 416 Requested Range Not Satisfiable\r\n"),
+    [417] = SS_LIT("HTTP/1.1 417 Expectation Failed\r\n"),
+    [418] = SS_LIT("HTTP/1.1 418 I'm a teapot\r\n"),
+    [421] = SS_LIT("HTTP/1.1 421 Misdirected Request\r\n"),
+    [422] = SS_LIT("HTTP/1.1 422 Unprocessable Entity\r\n"),
+    [423] = SS_LIT("HTTP/1.1 423 Locked\r\n"),
+    [424] = SS_LIT("HTTP/1.1 424 Failed Dependency\r\n"),
+    [425] = SS_LIT("HTTP/1.1 425 Too Early\r\n"),
+    [426] = SS_LIT("HTTP/1.1 426 Upgrade Required\r\n"),
+    [428] = SS_LIT("HTTP/1.1 428 Precondition Required\r\n"),
+    [429] = SS_LIT("HTTP/1.1 429 Too Many Requests\r\n"),
+    [431] = SS_LIT("HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+    [451] = SS_LIT("HTTP/1.1 451 Unavailable For Legal Reasons\r\n"),
+    [500] = SS_LIT("HTTP/1.1 500 Internal Server Error\r\n"),
+    [501] = SS_LIT("HTTP/1.1 501 Not Implemented\r\n"),
+    [502] = SS_LIT("HTTP/1.1 502 Bad Gateway\r\n"),
+    [503] = SS_LIT("HTTP/1.1 503 Service Unavailable\r\n"),
+    [504] = SS_LIT("HTTP/1.1 504 Gateway Timeout\r\n"),
+    [505] = SS_LIT("HTTP/1.1 505 HTTP Version Not Supported\r\n"),
+    [506] = SS_LIT("HTTP/1.1 506 Variant Also Negotiates\r\n"),
+    [507] = SS_LIT("HTTP/1.1 507 Insufficient Storage\r\n"),
+    [508] = SS_LIT("HTTP/1.1 508 Loop Detected\r\n"),
+    [510] = SS_LIT("HTTP/1.1 510 Not Extended\r\n"),
+    [511] = SS_LIT("HTTP/1.1 511 Network Authentication Required\r\n"),
 };
 
-#define INLINE_FUNC __attribute__((always_inline)) static inline
-
-// Direct lookup using status code as index
-INLINE_FUNC const status_info_t* get_http_status(http_status code) {
-    if (code < STATUS_MIN || code > STATUS_MAX) {
-        return NULL;
-    }
-    const status_info_t* info = &status_info[code - STATUS_MIN];
-    return info->text ? info : &status_info[100];  // default to 200 OK if invalid.
+INLINE bool http_status_valid(http_status code) {
+    return (code >= STATUS_MIN && code <= STATUS_MAX);
 }
 
-INLINE_FUNC bool http_status_valid(http_status code) {
-    return (code >= STATUS_MIN || code <= STATUS_MAX);
+// Direct lookup using status code as index
+INLINE StrSlice get_http_status(http_status code) {
+    if (!http_status_valid(code)) {
+        return SS_LIT("HTTP/1.1 200 OK\r\n");
+    }
+    return status_info[code];
 }
 
 #ifdef __cplusplus

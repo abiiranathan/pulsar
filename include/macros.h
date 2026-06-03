@@ -1,6 +1,8 @@
 #ifndef __PULSAR_MACROS_H__
 #define __PULSAR_MACROS_H__
 
+#include <solidc/align.h>
+#include <solidc/macros.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -55,9 +55,10 @@ Locals* LocalsInit(size_t initial_capacity, Arena* arena) {
         return NULL;
     }
 
-    locals->size     = 0;
-    locals->capacity = capacity;
-    locals->arena    = arena;
+    locals->size          = 0;
+    locals->capacity      = capacity;
+    locals->managed_count = 0;
+    locals->arena         = arena;
     return locals;
 }
 
@@ -78,6 +79,9 @@ bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc 
             // Key remains the same (arena-allocated, no need to duplicate again)
             locals->entries[i].value     = value;
             locals->entries[i].free_func = free_func;
+            if (free_func != NULL) {
+                locals->managed_count++;
+            }
             return true;
         }
     }
@@ -130,6 +134,7 @@ bool LocalsRemove(Locals* locals, const char* key) {
         if (strcmp(locals->entries[i].key, key) == 0) {
             // Free the value if it has a free function
             if (locals->entries[i].free_func != NULL) {
+                locals->managed_count--;
                 locals->entries[i].free_func(locals->entries[i].value);
             }
 
@@ -153,15 +158,19 @@ void LocalsClear(Locals* locals) {
         return;
     }
 
-    // Free all values that have free functions
-    for (size_t i = 0; i < locals->size; ++i) {
-        if (locals->entries[i].free_func != NULL) {
-            locals->entries[i].free_func(locals->entries[i].value);
+    // Checking for managed count avoids cache misses on entries when there are no free functions, which is common.
+    if (locals->managed_count > 0) {
+        // Free all values that have free functions
+        for (size_t i = 0; i < locals->size; ++i) {
+            if (locals->entries[i].free_func != NULL) {
+                locals->entries[i].free_func(locals->entries[i].value);
+            }
         }
     }
 
     // Reset size to 0 (reuse existing entries array)
-    locals->size = 0;
+    locals->size          = 0;
+    locals->managed_count = 0;
 }
 
 bool LocalsReinitAfterArenaReset(Locals* locals) {

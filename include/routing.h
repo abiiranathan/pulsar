@@ -16,25 +16,25 @@ extern "C" {
 
 /** Path parameter extracted from URL. */
 typedef struct {
-    char* name;       // Parameter name (arena-allocated)
-    size_t name_len;  // Length of the name
-    char* value;      // Parameter value (arena-allocated)
+    char* name;      /**< Parameter name (interior pointer into pattern; never freed). */
+    size_t name_len; /**< Length of the name. */
+    char* value;     /**< Parameter value (arena-allocated). */
 } PathParam;
 
 /** Array structure for path parameters. */
 typedef struct PathParams {
-    PathParam* items;      // Array of matched parameters
-    uint8_t match_count;   // Number of matched parameters from request path
-    uint8_t total_params;  // Total parameters counted at startup
+    PathParam* items;     /**< Array of matched parameters. */
+    uint8_t match_count;  /**< Number of matched parameters from request path. */
+    uint8_t total_params; /**< Total parameters counted at startup. */
 } PathParams;
 
 /** Forward declaration for main connection structure. */
 struct pulsar_conn;
 
-// The context object, a pointer of which is passed to every handler function.
+/** The context object, a pointer of which is passed to every handler function. */
 typedef struct {
-    struct pulsar_conn* conn;  // The connection object
-    void* userdata;            // Global user data set via pulsar_set_handler_userdata
+    struct pulsar_conn* conn; /**< The connection object. */
+    void* userdata;           /**< Global user data set via pulsar_set_handler_userdata. */
 } PulsarCtx;
 
 /**
@@ -52,27 +52,27 @@ struct route_t;
 /** Route state union to save space. */
 typedef union {
     struct {
-        const char* dirname;  // Directory name (for static routes)
-        uint8_t dirname_len;  // Length of the dirname
+        const char* dirname; /**< Directory name (for static routes). */
+        uint8_t dirname_len; /**< Length of the dirname. */
     } static_;
-    PathParams* path_params;  // Path parameters (for param routes)
+    PathParams* path_params; /**< Path parameters (for param routes). */
 } route_state_t;
 
 /**
  * Route structure optimized for cache locality.
  */
 typedef struct route_t {
-    // HOT: Fields accessed during route matching (first cache line)
-    const char* pattern;                          // Route pattern (dynamically allocated)
-    HttpHandler handler;                          // Handler function pointer
-    uint16_t pattern_len;                         // Length of the pattern
-    HttpMethod method;                            // HTTP method (HttpMethod)
-    uint8_t route_type;                           // 0=exact, 1=static, 2=param
-    uint8_t mw_count;                             // Number of middleware
-    uint8_t _padding[3];                          // Align to 8 bytes
+    /* HOT: Fields accessed during route matching (first cache line). */
+    const char* pattern;                         /**< Route pattern (dynamically allocated). */
+    HttpHandler handler;                         /**< Handler function pointer. */
+    uint16_t pattern_len;                        /**< Length of the pattern. */
+    HttpMethod method;                           /**< HTTP method. */
+    uint8_t route_type;                          /**< 0=exact, 1=static, 2=param. */
+    uint8_t mw_count;                            /**< Number of middleware. */
+    uint8_t _padding[3];                         /**< Align to 8 bytes. */
 
-    route_state_t state;                          // Route-specific state
-    Middleware middleware[MAX_ROUTE_MIDDLEWARE];  // Middleware array
+    route_state_t state;                         /**< Route-specific state. */
+    Middleware middleware[MAX_ROUTE_MIDDLEWARE]; /**< Middleware array. */
 } route_t;
 
 /**
@@ -83,10 +83,10 @@ void sort_routes(void);
 
 /**
  * Registers a new route with the given pattern, method, and handler.
- * @param pattern URL pattern (may contain {param} placeholders)
- * @param method HTTP method
- * @param handler Function to handle requests matching this route
- * @return Pointer to the registered route structure
+ * @param pattern URL pattern (may contain {param} placeholders).
+ * @param method HTTP method.
+ * @param handler Function to handle requests matching this route.
+ * @return Pointer to the registered route structure.
  */
 route_t* route_register(const char* pattern, HttpMethod method, HttpHandler handler);
 
@@ -127,22 +127,22 @@ static inline route_t* route_delete(const char* pattern, HttpHandler handler) {
 
 /**
  * Registers a static file serving route.
- * @param pattern URL prefix pattern
- * @param dir Directory path (must exist and be resolved)
- * @return Pointer to the registered route structure
- * @note Handles index.html serving and prevents directory traversal
+ * @param pattern URL prefix pattern.
+ * @param dir Directory path (must exist and be resolved).
+ * @return Pointer to the registered route structure.
+ * @note Handles index.html serving and prevents directory traversal.
  */
 route_t* route_static(const char* pattern, const char* dir);
 
 /**
  * Matches an incoming request to a registered route.
- * @param path URL path to match
- * @param url_length Length of the path
- * @param method HTTP method
- * @param arena Arena for allocating path parameter strings
- * @return Matched route or NULL if no match found
- * @note For HEAD requests, falls back to GET routes if no HEAD route matches
- * @note For OPTIONS requests, matches any route regardless of method
+ * @param path URL path to match.
+ * @param url_length Length of the path.
+ * @param method HTTP method.
+ * @param arena Arena for allocating path parameter strings.
+ * @return Matched route or NULL if no match found.
+ * @note For HEAD requests, falls back to GET routes if no HEAD route matches.
+ * @note For OPTIONS requests, matches any route regardless of method.
  */
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena);
 

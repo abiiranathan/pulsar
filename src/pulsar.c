@@ -110,9 +110,6 @@ INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, int worker_id, int epo
         }
         current = next;
     }
-#if defined(__linux__)
-    malloc_trim(0);
-#endif
 }
 
 /* ================================================================
@@ -281,11 +278,10 @@ INLINE void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_
  * Error Response Helper
  * ================================================================ */
 INLINE void write_error(PulsarConn* conn, http_status status) {
-    const char* status_text = conn_set_status(conn, status);
+    conn_set_status(conn, status);
     conn_set_content_type(conn, PLAINTEXT_TYPE);
-    conn_write_string(conn, status_text);
+    conn_write_string(conn, "Something went wrong");
     finalize_response(conn, conn->request->method_type);
-    conn->last_activity = time(NULL);
 }
 
 /* ================================================================
@@ -494,15 +490,12 @@ StrSlice req_header_get(PulsarConn* conn, const char* name) {
 /* ================================================================
  * Response Status
  * ================================================================ */
-const char* conn_set_status(PulsarConn* restrict conn, http_status code) {
-    const status_info_t* status = get_http_status(code);
-    response_t* res             = conn->response;
-    res->status_code            = code;
-    int written =
-        snprintf(res->status_buf, STATUS_LINE_SIZE, "HTTP/1.1 %hu %s\r\n", code, status->text);
-    assert(written > 0 && written < STATUS_LINE_SIZE);
-    res->status_len = (uint8_t)written;
-    return status->text;
+void conn_set_status(PulsarConn* restrict conn, http_status code) {
+    StrSlice status  = get_http_status(code);
+    response_t* res  = conn->response;
+    res->status_code = code;
+    res->status_len  = status.len;
+    memcpy(res->status_buf, status.data, status.len);
 }
 
 http_status res_get_status(PulsarConn* conn) {
@@ -1263,11 +1256,14 @@ void pulsar_delete(PulsarConn* conn, const char* k) {
 /* ================================================================
  * Logging / Latency
  * ================================================================ */
+/** Minimum nanoseconds between logger callbacks to avoid excessive overhead. */
+#define LOG_MIN_INTERVAL_NS 1000000ULL /* 1ms — tune to taste */
+
 INLINE void request_complete(PulsarConn* conn) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
         struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC, &end);
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &end);
         uint64_t s_ns = (uint64_t)conn->start.tv_sec * 1000000000ULL + (uint64_t)conn->start.tv_nsec;
         uint64_t e_ns = (uint64_t)end.tv_sec * 1000000000ULL + (uint64_t)end.tv_nsec;
         PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
@@ -1361,7 +1357,6 @@ INLINE http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
     if (HAS_CHUNKED_TRANSFER(conn->response->flags)) {
         request_complete(conn);
         if (conn->keep_alive) {
-            conn->last_activity = time(NULL);
             AddKeepAliveConnection(conn, state);
             conn->closing = true;
             if (reset_connection(conn))
@@ -1369,7 +1364,6 @@ INLINE http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
         }
     } else {
         finalize_response(conn, req->method_type);
-        conn->last_activity = time(NULL);
     }
     return StatusOK;
 }
@@ -1550,16 +1544,17 @@ INLINE void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
 }
 
 INLINE void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
+    // Record the start time as early as possible to capture the entire request processing latency.
+#if ENABLE_LOGGING
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &conn->start);
+#endif
+
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
     if (bytes_read <= 0) {
         conn->closing = true;
         return;
     }
     conn->read_buf[bytes_read] = '\0';
-
-#if ENABLE_LOGGING
-    clock_gettime(CLOCK_MONOTONIC, &conn->start);
-#endif
 
     http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
     if (status != StatusOK) write_error(conn, status);
@@ -1658,8 +1653,6 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
                        (res->headers_sent == res->headers_len) && (res->body_sent == res->body_len);
         }
 
-        conn->last_activity = time(NULL);
-
         if (complete) {
             request_complete(conn);
             if (sending_file) {
@@ -1668,7 +1661,6 @@ INLINE void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
             }
 
             if (conn->keep_alive) {
-                conn->last_activity = time(NULL);
                 AddKeepAliveConnection(conn, state);
                 if (reset_connection(conn)) {
                     if (event_mod_read(queue_fd, conn->client_fd, conn) < 0) conn->closing = true;
@@ -1719,7 +1711,7 @@ void* worker_thread(void* arg) {
 
     while (server_running) {
         struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
         if (now.tv_sec - last_timeout_check >= 5) {
             CheckKeepAliveTimeouts(ka_state, worker_id, queue_fd);
             last_timeout_check = now.tv_sec;
@@ -1772,11 +1764,6 @@ int pulsar_run(const char* addr, int port) {
     sort_routes();
     init_mimetypes();
 
-#if defined(__linux__)
-    mallopt(M_MMAP_THRESHOLD, 128 * 1024);
-    mallopt(M_TRIM_THRESHOLD, 128 * 1024);
-#endif
-
     pthread_t workers[NUM_WORKERS]                = {0};
     WorkerData worker_data[NUM_WORKERS]           = {0};
     KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
@@ -1801,9 +1788,9 @@ int pulsar_run(const char* addr, int port) {
     printf("\nStarting server with %d workers\n", NUM_WORKERS);
     printf("Listening on http://%s:%d\n", addr ? addr : "0.0.0.0", port);
 
-    for (int i = 0; i < NUM_WORKERS; i++)
+    for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
-
+    }
     close(server_fd);
     return 0;
 }
