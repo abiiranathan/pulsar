@@ -381,9 +381,9 @@ void mw2(PulsarCtx* ctx) {
 }
 
 int main() {
-    int fd = open("pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    // int fd = open("pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     // Initialiaze logger bg thread
-    if (!plog_init(&g_log, fd)) {
+    if (!plog_init(&g_log, STDOUT_FILENO)) {
         return -1;
     }
 
@@ -415,6 +415,6 @@ int main() {
     if (drops > 0) {
         fprintf(stderr, "[plog] warning: %" PRIu64 " log entries dropped under load\n", drops);
     }
-    close(fd);
+    // close(fd);
     return rc;
 }

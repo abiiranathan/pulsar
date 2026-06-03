@@ -13,23 +13,23 @@
  * producers.
  *
  * Hot-path cost per request (uncontended ring):
- *   1. Fullness pre-check — two relaxed loads             (~2 ns)
- *   2. atomic fetch-add on prod_seq                       (~3 ns)
- *   3. CAS FREE → READY on the slot                       (~4 ns)
- *   4. __builtin_memcpy into the slot                     (~8 ns)
- *   5. atomic fetch-add on pending + cond_signal          (~5 ns)
+ *   1. Atomic CAS on prod_seq (claims slot + checks fullness) (~3 ns)
+ *   2. __builtin_memcpy into the slot                     (~8 ns)
+ *   3. Release store of READY on the slot                 (~1 ns)
+ *   4. Atomic fetch-add on pending (signals consumer)     (~2 ns)
  *  ──────────────────────────────────────────────────────────────
- *  Total                                                  ~22 ns
+ *  Total                                                  ~14 ns
  *
  * No malloc on the hot path.  No spin loops.  No per-entry locks.
  *
  * Slot state machine
  * ==================
  *
- *   FREE ──(producer CAS)──► READY ──(drain CAS)──► FREE
- *The two-state machine is safe because:
- *   - prod_seq is a monotonically increasing counter; each fetch-add gives
- *     one thread exclusive ownership of a unique index.
+ *   FREE ──(producer store)──► READY ──(drain store)──► FREE
+ * The two-state machine is safe because:
+ *   - prod_seq is a monotonically increasing counter; the CAS on prod_seq
+ *     gives one thread exclusive ownership of a unique index and guarantees
+ *     that the slot is not currently in use.
  *   - The drain thread advances cons_seq only after writev completes, so it
  *     can never reach a slot whose producer has not yet stored READY.
  *
@@ -49,12 +49,13 @@
  */
 
 #include <inttypes.h>      /* PRIu64                             */
+#include <stdalign.h>      /* alignas                            */
 #include <stdatomic.h>     /* _Atomic, atomic_*                  */
 #include <stdbool.h>       /* bool                               */
 #include <stddef.h>        /* size_t                             */
 #include <stdint.h>        /* uint32_t, uint64_t                 */
 #include <sys/uio.h>       /* struct iovec, writev               */
-#include <unistd.h>        /* STDOUT_FILENO                      */
+#include <unistd.h>        /* STDOUT_FILENO, usleep              */
 
 #include <solidc/lock.h>   /* Lock, Condition, lock_*, cond_*   */
 #include <solidc/thread.h> /* Thread, thread_create, thread_join */
@@ -120,22 +121,25 @@ typedef struct {
  *
  * Declare as a static or global variable and pass to all plog_* functions.
  * Zero-initialised by plog_init(); do not memset manually.
+ *
+ * NOTE: If allocating PlogState on the heap, use aligned_alloc(64, sizeof(PlogState))
+ * or posix_memalign() to guarantee alignment of its members and prevent false sharing.
  */
 typedef struct {
     /** Ring buffer.  Indexed by (sequence & (PLOG_RING_CAPACITY - 1)). */
-    PlogSlot ring[PLOG_RING_CAPACITY];
+    alignas(64) PlogSlot ring[PLOG_RING_CAPACITY];
 
     /* -- Producer side -------------------------------------------------- */
 
     /** Next sequence number to claim.  Each fetch-add gives one thread an
      *  exclusive slot index.  Only the low PLOG_RING_CAPACITY bits matter. */
-    _Atomic uint64_t prod_seq;
+    alignas(64) _Atomic uint64_t prod_seq;
 
     /* -- Consumer side -------------------------------------------------- */
 
     /** Next sequence number to drain.  Advanced by the drain thread after
      *  each writev batch completes. */
-    _Atomic uint64_t cons_seq;
+    alignas(64) _Atomic uint64_t cons_seq;
 
     /** Cumulative entries dropped due to a full ring.  Read with
      *  plog_drop_count(). */
@@ -148,7 +152,7 @@ typedef struct {
 
     /* -- Drain thread --------------------------------------------------- */
 
-    Lock mu;                    /* protects the cond_wait predicate        */
+    alignas(64) Lock mu;        /* protects the cond_wait predicate        */
     Condition wake;             /* drain thread sleeps here when idle      */
     _Atomic bool drain_running; /* cleared by plog_destroy to stop thread */
     Thread thread_handle;       /* opaque handle returned by thread_create */
@@ -203,13 +207,10 @@ static void* plog__drain_thread(void* arg) {
             size_t idx     = plog__idx(seq + (uint64_t)batch);
             PlogSlot* slot = &lg->ring[idx];
 
-            /* Peek before CAS to avoid an unnecessary atomic RMW. */
-            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) break;
-
-            PlogSlotState expected = PLOG_SLOT_READY;
-            if (!atomic_compare_exchange_strong_explicit(&slot->state, &expected, PLOG_SLOT_FREE,
-                                                         memory_order_acq_rel, memory_order_acquire))
+            /* Peek slot readiness. No CAS on slot read to minimize RMW cycles. */
+            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) {
                 break;
+            }
 
             iov[batch].iov_base = slot->line;
             iov[batch].iov_len  = slot->len;
@@ -218,6 +219,15 @@ static void* plog__drain_thread(void* arg) {
 
         if (batch > 0) {
             (void)writev(lg->out_fd, iov, batch);
+
+            /* Release processed slots to FREE.
+             * relaxed store is correct because the release increment of cons_seq below
+             * enforces transitiveness for the producer acquire on cons_seq. */
+            for (int i = 0; i < batch; i++) {
+                size_t idx = plog__idx(seq + (uint64_t)i);
+                atomic_store_explicit(&lg->ring[idx].state, PLOG_SLOT_FREE, memory_order_relaxed);
+            }
+
             atomic_fetch_add_explicit(&lg->cons_seq, (uint64_t)batch, memory_order_release);
             atomic_fetch_sub_explicit(&lg->pending, (uint64_t)batch, memory_order_release);
             /* Keep draining without sleeping — there may be more slots. */
@@ -226,26 +236,38 @@ static void* plog__drain_thread(void* arg) {
     }
 
     /* --- Shutdown flush: drain whatever remains in the ring. ----------- */
-    {
+    while (true) {
         uint64_t seq = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
         uint64_t end = atomic_load_explicit(&lg->prod_seq, memory_order_acquire);
-        int batch    = 0;
-        struct iovec flush_iov[PLOG_BATCH_MAX];
+        if (seq == end) {
+            break;
+        }
 
+        int batch = 0;
         while (seq + (uint64_t)batch < end && batch < PLOG_BATCH_MAX) {
             size_t idx     = plog__idx(seq + (uint64_t)batch);
             PlogSlot* slot = &lg->ring[idx];
             if (atomic_load_explicit(&slot->state, memory_order_acquire) == PLOG_SLOT_READY) {
-                flush_iov[batch].iov_base = slot->line;
-                flush_iov[batch].iov_len  = slot->len;
-                atomic_store_explicit(&slot->state, PLOG_SLOT_FREE, memory_order_release);
+                iov[batch].iov_base = slot->line;
+                iov[batch].iov_len  = slot->len;
                 batch++;
             } else {
                 break;
             }
         }
 
-        if (batch > 0) (void)writev(lg->out_fd, flush_iov, batch);
+        if (batch > 0) {
+            (void)writev(lg->out_fd, iov, batch);
+            for (int i = 0; i < batch; i++) {
+                size_t idx = plog__idx(seq + (uint64_t)i);
+                atomic_store_explicit(&lg->ring[idx].state, PLOG_SLOT_FREE, memory_order_relaxed);
+            }
+            atomic_fetch_add_explicit(&lg->cons_seq, (uint64_t)batch, memory_order_release);
+            atomic_fetch_sub_explicit(&lg->pending, (uint64_t)batch, memory_order_release);
+        } else {
+            /* Wait briefly for a concurrent producer to finish writing to its claimed slot */
+            usleep(10);
+        }
     }
 
     return NULL;
@@ -289,48 +311,52 @@ static inline bool plog_init(PlogState* lg, int out_fd) {
 static inline void plog_submit(PlogState* lg, const char* buf, uint32_t len) {
     if (len > PLOG_LINE_MAX) len = PLOG_LINE_MAX;
 
-    /* Approximate fullness check before burning a sequence number.
-     * Uses relaxed loads — a stale view is acceptable; the CAS below
-     * is the authoritative guard.  The -1 leaves one slot as a sentinel
-     * so prod_seq - cons_seq never legitimately equals PLOG_RING_CAPACITY
-     * on a non-full ring. */
-    uint64_t prod = atomic_load_explicit(&lg->prod_seq, memory_order_relaxed);
+    /* Cache cons_seq in a local variable/register.
+     * By doing so, we completely bypass reloading it on CAS failure retries, 
+     * eliminating unnecessary memory accesses and LSU pressure inside the loop. */
     uint64_t cons = atomic_load_explicit(&lg->cons_seq, memory_order_relaxed);
-    if (prod - cons >= (uint64_t)(PLOG_RING_CAPACITY - 1)) {
-        atomic_fetch_add_explicit(&lg->drops, 1, memory_order_relaxed);
-        return;
+    uint64_t prod = atomic_load_explicit(&lg->prod_seq, memory_order_relaxed);
+
+    while (true) {
+        /* Since cons is cached, this check runs entirely in registers.
+         * If the queue appears full, we do a fresh acquire load to check if 
+         * the consumer has indeed advanced. */
+        if (prod - cons >= (uint64_t)PLOG_RING_CAPACITY) {
+            cons = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
+            if (prod - cons >= (uint64_t)PLOG_RING_CAPACITY) {
+                atomic_fetch_add_explicit(&lg->drops, 1, memory_order_relaxed);
+                return;
+            }
+        }
+
+        /* Try to claim our sequence number. On failure, 'prod' is automatically 
+         * updated to the latest 'prod_seq' value, and we loop back. */
+        if (atomic_compare_exchange_weak_explicit(&lg->prod_seq, &prod, prod + 1,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
     }
 
-    /* Claim a unique sequence number → unique slot index. */
-    uint64_t seq   = atomic_fetch_add_explicit(&lg->prod_seq, 1, memory_order_relaxed);
-    size_t idx     = plog__idx(seq);
+    size_t idx     = plog__idx(prod);
     PlogSlot* slot = &lg->ring[idx];
 
-    /* Atomically transition FREE → READY.  A failure means the ring
-     * wrapped and this slot is still occupied — drop without spinning. */
-    PlogSlotState expected = PLOG_SLOT_FREE;
-    if (!atomic_compare_exchange_strong_explicit(&slot->state, &expected, PLOG_SLOT_READY,
-                                                 memory_order_acq_rel, memory_order_acquire)) {
-        atomic_fetch_add_explicit(&lg->drops, 1, memory_order_relaxed);
-        return;
-    }
-
-    /* Slot is exclusively ours and already marked READY.  Write data. */
+    /* Slot is exclusively ours. Copy raw payload. */
     __builtin_memcpy(slot->line, buf, len);
     slot->len = len;
 
-    /* Increment pending AFTER the data is written but the ordering of
-     * pending vs the READY store does not matter for correctness here —
-     * the drain thread re-checks slot->state with a CAS, not pending,
-     * to decide whether to consume a slot.  pending only gates cond_wait.
-     * We increment before signalling to ensure the drain thread sees a
-     * non-zero pending if it checks between signal and cond_wait. */
-    atomic_fetch_add_explicit(&lg->pending, 1, memory_order_release);
+    /* Release payload before storing READY status so consumer reads valid data. */
+    atomic_store_explicit(&slot->state, PLOG_SLOT_READY, memory_order_release);
 
-    /* Wake the drain thread.  cond_signal(3p) does not require holding
-     * the mutex — signalling without the lock is explicitly permitted by
-     * POSIX and avoids a lock/unlock on every hot-path call. */
-    cond_signal(&lg->wake);
+    /* Increment outstanding entries. */
+    uint64_t prev_pending = atomic_fetch_add_explicit(&lg->pending, 1, memory_order_release);
+
+    /* Wake the consumer ONLY if the queue transitioned from empty to active.
+     * Bypasses heavy mutex/cond lock paths under sustained high loads. */
+    if (prev_pending == 0) {
+        lock_acquire(&lg->mu);
+        cond_signal(&lg->wake);
+        lock_release(&lg->mu);
+    }
 }
 
 /**
