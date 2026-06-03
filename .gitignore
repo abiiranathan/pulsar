@@ -11,6 +11,7 @@ dist
 *.egg-info
 *.mp4
 *.pdf
+*.log
 scratch
 .cache
 tests/test_memmem

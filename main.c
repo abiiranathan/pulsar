@@ -1,6 +1,8 @@
+#include <fcntl.h>
 #include <inttypes.h>
 #include <solidc/defer.h>
 #include "include/forms.h"
+#include "include/plog.h"
 #include "include/pulsar.h"
 
 static bool print_header_callback(StrSlice name, StrSlice value, void* userdata) {
@@ -323,15 +325,12 @@ void serve_movie(PulsarCtx* ctx) {
     conn_write_string(conn, html);
 }
 
-#define LOG_BUFFER_SIZE 1024
-#define LOGGING_ON      0
-static __thread char log_buffer[LOG_BUFFER_SIZE];
+/* -------------------------------------------------------------------------
+ * Callback — hot path, no syscalls
+ * ---------------------------------------------------------------------- */
+static PlogState g_log;  // Lives for the duration of the process
 
 void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
-    if (!LOGGING_ON) {
-        return;
-    }
-
     PulsarConn* conn        = ctx->conn;
     const char* method      = req_method(conn);
     const char* path        = req_path(conn);
@@ -341,52 +340,31 @@ void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
         user_agent = SS_LIT("-");
     }
 
-    // Format latency with appropriate unit
-    char latency_str[32];
+    /* Format latency with the most readable unit. */
+    char latency_str[24];
     if (total_ns < 1000) {
-        // Nanoseconds
         snprintf(latency_str, sizeof(latency_str), "%3" PRIu64 "ns", total_ns);
     } else if (total_ns < 1000000) {
-        // Microseconds
         snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "µs", total_ns / 1000);
     } else if (total_ns < 1000000000) {
-        // Milliseconds
         snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "ms", total_ns / 1000000);
     } else if (total_ns < UINT64_C(60000000000)) {
-        // Seconds
         snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "s", total_ns / 1000000000);
     } else {
-        // Minutes
         snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "m",
                  total_ns / UINT64_C(60000000000));
     }
 
-    // Build the log line in our buffer
-    char* ptr       = log_buffer;
-    const char* end = log_buffer + LOG_BUFFER_SIZE - 1;  // Leave room for null terminator
-
-    // [Pulsar]
-    ptr += snprintf(ptr, (size_t)(end - ptr), "[Pulsar] ");
-
-    // Method (2 chars, left-aligned)
-    ptr += snprintf(ptr, (size_t)(end - ptr), "%-2s ", method);
-
-    // Path (3 chars, left-aligned)
-    ptr += snprintf(ptr, (size_t)(end - ptr), "%-3s ", path);
-
-    // Status code (3 digits)
-    ptr += snprintf(ptr, (size_t)(end - ptr), "%3d ", status_code);
-
-    // Latency (8 chars)
-    ptr += snprintf(ptr, (size_t)(end - ptr), "%8s ", latency_str);
-
-    // User-Agent
-    ptr += snprintf(ptr, (size_t)(end - ptr), "%.*s\n", (int)user_agent.len, user_agent.data);
-
-    // Single write to stdout
-    if (write(STDOUT_FILENO, log_buffer, (size_t)(ptr - log_buffer)) == -1) {
-        perror("write");
-    };
+    /*
+     * Build the full log line on the stack.  snprintf + plog_submit is the
+     * entire hot-path cost — no locks, no syscalls.
+     */
+    char line[PLOG_LINE_MAX];
+    int n = snprintf(line, sizeof(line), "[Pulsar] %-7s %-5s %3d %8s %.*s\n", method, path,
+                     (int)status_code, latency_str, (int)user_agent.len, user_agent.data);
+    if (n > 0) {
+        plog_submit(&g_log, line, (uint32_t)n);
+    }
 }
 
 void mw1(PulsarCtx* ctx) {
@@ -397,13 +375,18 @@ void mw1(PulsarCtx* ctx) {
 
 void mw2(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-
-    char* name = pulsar_get(conn, "name");
+    char* name       = pulsar_get(conn, "name");
     assert(name && "name is NULL");
     (void)name;
 }
 
 int main() {
+    int fd = open("pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    // Initialiaze logger bg thread
+    if (!plog_init(&g_log, fd)) {
+        return -1;
+    }
+
     // Set post-request callback handler.
     pulsar_set_callback(pulsar_callback);
 
@@ -424,5 +407,14 @@ int main() {
     route_get("/movie", serve_movie);
     route_static("/static/", "./");
 
-    return pulsar_run("localhost", 8080);
+    int rc = pulsar_run("localhost", 8080);
+
+    /* Flush and stop the drain thread before exit. */
+    plog_destroy(&g_log);
+    uint64_t drops = plog_drop_count(&g_log);
+    if (drops > 0) {
+        fprintf(stderr, "[plog] warning: %" PRIu64 " log entries dropped under load\n", drops);
+    }
+    close(fd);
+    return rc;
 }
