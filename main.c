@@ -34,7 +34,7 @@ void hello_world_handler(PulsarCtx* ctx) {
 void json_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, "application/json");
+    conn_set_content_type(conn, SS_LIT("application/json"));
 
     char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
     conn_write(conn, json, sizeof(json) - 1);
@@ -43,7 +43,7 @@ void json_handler(PulsarCtx* ctx) {
 void echo_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, "text/plain");
+    conn_set_content_type(conn, SS_LIT("text/plain"));
 
     const char* method    = req_method(conn);
     const char* path      = req_path(conn);
@@ -321,7 +321,7 @@ void serve_movie(PulsarCtx* ctx) {
         "controls width='720' height='480'></video></body></html>";
 
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, HTML_TYPE);
+    conn_set_content_type(conn, SS_LIT(HTML_TYPE));
     conn_write_string(conn, html);
 }
 

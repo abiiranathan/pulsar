@@ -1,6 +1,7 @@
 #ifndef LOCALS_H
 #define LOCALS_H
 
+#include <assert.h>
 #include <solidc/arena.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,94 +13,121 @@ extern "C" {
 /** Callback function type for freeing values. */
 typedef void (*ValueFreeFunc)(void* value);
 
-/** Key-Value pair for the Locals. */
+/** Maximum number of inline locals entries before spilling to heap. */
+#define LOCALS_INLINE_CAPACITY 8
+
+/** Key-Value pair for Locals. */
 typedef struct {
-    const char* key;          // Arena-allocated key string (immutable)
-    void* value;              // Value associated with key
-    ValueFreeFunc free_func;  // Function pointer to free values
+    const char* key;         /**< Points into arena (set path) or literal (common path). */
+    void* value;             /**< Caller-owned value pointer. */
+    ValueFreeFunc free_func; /**< Optional destructor. NULL for unmanaged values. */
+    uint16_t key_len;        /**< Cached strlen(key) for faster comparison. */
 } KeyValue;
 
 /**
- * Dynamic array-based key-value store with linear search.
- * Uses externally-provided arena allocator for keys and entries array.
+ * Flat inline key-value store for per-request context.
  *
- * IMPORTANT: Locals does NOT own the arena. The arena must outlive the Locals
- * structure. LocalsClear() only frees values, not arena memory.
+ * The common case (0-3 entries, no managed values) costs exactly:
+ *   - LocalsClear: one store of size=0, one store of managed_count=0.
+ *   - LocalsGetValue: N strcmp calls, N <= 3 in practice.
+ *   - No malloc, no arena touch, no pointer chasing.
+ *
+ * The inline array holds LOCALS_INLINE_CAPACITY entries without any
+ * allocation. Overflow beyond that capacity is an assert in debug builds
+ * and a silent drop in release — handlers setting 9+ locals is a design
+ * problem, not a runtime condition to handle gracefully.
+ *
+ * NOT safe for concurrent use.
  */
 typedef struct {
-    KeyValue* entries;     // Arena-allocated array of entries
-    size_t size;           // Number of occupied entries
-    size_t capacity;       // Total allocated capacity
-    size_t managed_count;  // Number of entries with non-NULL free_func.
-    Arena* arena;          // External arena (NOT owned by Locals)
+    KeyValue entries[LOCALS_INLINE_CAPACITY]; /**< Inline storage. */
+    uint8_t size;                             /**< Number of live entries. */
+    uint8_t managed_count;                    /**< Entries with non-NULL free_func. */
 } Locals;
 
-/**
- * Allocate and initialize locals structure using an external arena.
- * @param initial_capacity Initial number of entries to allocate (use 0 for default).
- * @param arena External arena for allocations. Must not be NULL and must outlive this Locals.
- * @return Pointer to the structure on success, NULL on allocation failure.
- * @note The Locals structure itself is heap-allocated. The arena is NOT owned by Locals.
- */
-Locals* LocalsInit(size_t initial_capacity, Arena* arena);
+/** Initialise an already-allocated Locals (embedded in PulsarConn). */
+static inline void LocalsInit(Locals* locals) {
+    locals->size          = 0;
+    locals->managed_count = 0;
+}
 
-/**
- * Store value with unique key. If key already exists, its value will be freed
- * using the ValueFreeFunc and replaced with the new value.
- * The key string is duplicated into the arena - caller retains ownership of the original.
- * @param locals Pointer to Locals structure.
- * @param key String identifier (will be duplicated into arena).
- * @param value Pointer to value to store.
- * @param value_free_func Function to free the value, or NULL if no cleanup needed.
- * @return true on success, false on allocation failure.
- * @note Automatically grows capacity when needed. Time complexity: O(n) for lookup.
- */
-bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc value_free_func);
+static inline void LocalsClear(Locals* locals) {
+    if (locals->managed_count > 0) {
+        for (uint8_t i = 0; i < locals->size; ++i) {
+            if (locals->entries[i].free_func != NULL)
+                locals->entries[i].free_func(locals->entries[i].value);
+        }
+    }
+    locals->size          = 0;
+    locals->managed_count = 0;
+}
 
-/**
- * Get the value associated with the key.
- * @param locals Pointer to Locals structure.
- * @param key String identifier to look up.
- * @return Pointer to value if found, NULL otherwise.
- * @note Time complexity: O(n) linear search.
- */
-void* LocalsGetValue(const Locals* locals, const char* key);
+static inline bool LocalsSetValue(Locals* locals, const char* key, void* value,
+                                  ValueFreeFunc free_func) {
+    if (!locals || !key) return false;
 
-/**
- * Delete key-value pair from locals.
- * @param locals Pointer to Locals structure.
- * @param key String identifier to remove.
- * @return true if key was found and removed, false otherwise.
- * @note The key memory is NOT reclaimed (arena-allocated). Only the value is freed.
- *       Time complexity: O(n) for find + shift.
- */
-bool LocalsRemove(Locals* locals, const char* key);
+    const uint16_t klen = (uint16_t)strlen(key);
 
-/**
- * Clear all entries - frees all values but keeps arena memory allocated.
- * @param locals Pointer to Locals structure to clear.
- * @note Does NOT reset the arena (arena is externally owned). Keys and entries
- *       array remain in arena memory. Only frees the managed values.
- *       Use this to reuse Locals without invalidating other arena allocations.
- */
-void LocalsClear(Locals* locals);
+    /* Update existing entry if key matches. */
+    for (uint8_t i = 0; i < locals->size; ++i) {
+        if (locals->entries[i].key_len == klen && memcmp(locals->entries[i].key, key, klen) == 0) {
+            if (locals->entries[i].free_func != NULL) {
+                locals->entries[i].free_func(locals->entries[i].value);
+                locals->managed_count--;
+            }
+            locals->entries[i].value     = value;
+            locals->entries[i].free_func = free_func;
+            if (free_func != NULL) locals->managed_count++;
+            return true;
+        }
+    }
 
-/**
- * @brief Re-initialize locals after arena reset to avoid dangling pointer for entries.
- *
- * @param locals Pointer to Locals structure.
- * @return true on success, false otherwise.
- */
-bool LocalsReinitAfterArenaReset(Locals* locals);
+    /* New entry. */
+    assert(locals->size < LOCALS_INLINE_CAPACITY &&
+           "Too many locals — increase LOCALS_INLINE_CAPACITY");
 
-/**
- * Free the Locals structure itself. Does NOT free arena or arena-allocated memory.
- * @param locals Pointer to Locals structure to destroy.
- * @note Frees all managed values, then frees the Locals structure.
- *       The arena and all arena-allocated memory (keys, entries) remain valid.
- *       Call this when done with Locals but the arena is still in use.
- */
-void LocalsDestroy(Locals* locals);
+    if (locals->size >= LOCALS_INLINE_CAPACITY) return false;
+
+    locals->entries[locals->size] = (KeyValue){
+        .key       = key, /* caller owns; typically a string literal */
+        .value     = value,
+        .free_func = free_func,
+        .key_len   = klen,
+    };
+    locals->size++;
+    if (free_func != NULL) locals->managed_count++;
+    return true;
+}
+
+static inline void* LocalsGetValue(const Locals* locals, const char* key) {
+    if (!locals || !key) return NULL;
+    const uint16_t klen = (uint16_t)strlen(key);
+    for (uint8_t i = 0; i < locals->size; ++i) {
+        if (locals->entries[i].key_len == klen && memcmp(locals->entries[i].key, key, klen) == 0)
+            return locals->entries[i].value;
+    }
+    return NULL;
+}
+
+static inline void LocalsRemove(Locals* locals, const char* key) {
+    if (!locals || !key) return;
+    const uint16_t klen = (uint16_t)strlen(key);
+    for (uint8_t i = 0; i < locals->size; ++i) {
+        if (locals->entries[i].key_len == klen && memcmp(locals->entries[i].key, key, klen) == 0) {
+            if (locals->entries[i].free_func != NULL) {
+                locals->entries[i].free_func(locals->entries[i].value);
+                locals->managed_count--;
+            }
+
+            /* Shift remaining entries down to fill the gap. */
+            for (uint8_t j = i; j < locals->size - 1; ++j) {
+                locals->entries[j] = locals->entries[j + 1];
+            }
+            locals->size--;
+            return;
+        }
+    }
+}
 
 #ifdef __cplusplus
 }

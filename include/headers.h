@@ -58,7 +58,7 @@ typedef struct {
  */
 INLINE void headers_init(headers_t* h) {
     h->count = 0;
-    memset(h->entries, 0, sizeof(h->entries));
+    // entries not zeroed as will be overwritten.
 }
 
 /**

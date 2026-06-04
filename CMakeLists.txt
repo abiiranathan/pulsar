@@ -58,23 +58,14 @@ find_package(solidc CONFIG REQUIRED)
 get_target_property(SOLIDC_INCLUDE_DIRS solidc::solidc INTERFACE_INCLUDE_DIRECTORIES)
 message(STATUS "SOLIDC_INCLUDE_DIRS=${SOLIDC_INCLUDE_DIRS}")
 
-# ------------------------------------------------------------------------------
-# Compiler flags
-# ------------------------------------------------------------------------------
-
 add_compile_options(
     -Wall -Wextra -Werror
     -Wno-unused-function
     -Wno-unused-result
 )
 
-# ------------------------------------------------------------------------------
-# Sources
-# ------------------------------------------------------------------------------
-
 set(PULSAR_SOURCES
     src/forms.c
-    src/locals.c
     src/pulsar.c
     src/routing.c
 )

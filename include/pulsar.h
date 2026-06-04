@@ -278,6 +278,33 @@ int conn_writef(PulsarConn* conn, const char* fmt, ...) __attribute__((format(pr
 void conn_abort(PulsarConn* conn);
 
 /**
+ * @brief Sets the Content-Type header
+ *
+ * @param conn The connection object
+ * @param content_type Content type string
+ */
+void conn_set_content_type(PulsarConn* conn, StrSlice content_type);
+
+/**
+ * @brief Adds a header to the response. name and value MUST be valid
+ * null-terminated strings and not empty.
+ * @param conn The connection object
+ * @param name Header name string slice. e.g SS_LIT("Content-Type")
+ * @param value Header value string slice. e.g SS_LIT("application/json")
+ */
+void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value);
+
+/**
+ * @brief Adds raw pre-formatted header(s) to the response.
+ * Each header must be terminated with \r\n.
+ * This is the most perfomant variant of the 3 header writing functions.
+ * @param conn The connection object
+ * @param header Pre-formatted header.
+ * @param value Length of the header excluding the null-terminator.
+ */
+void conn_writeheader_raw(PulsarConn* conn, const char* header, size_t length);
+
+/**
  * @brief Sends a complete response
  *
  * @param conn The connection object
@@ -292,24 +319,27 @@ void conn_send(PulsarConn* conn, http_status status, const void* data, size_t le
  * @param conn The connection object
  * @param status HTTP status code
  * @param json Null-terminated JSON string
+ * @param length Length of response body
  */
-void conn_send_json(PulsarConn* conn, http_status status, const char* json);
+void conn_send_json(PulsarConn* conn, http_status status, const char* json, size_t length);
 
 /**
  * @brief Sends an HTML response
  * @param conn The connection object
  * @param status HTTP status code
  * @param html Null-terminated HTML string
+ * @param length Length of response body
  */
-void conn_send_html(PulsarConn* conn, http_status status, const char* html);
+void conn_send_html(PulsarConn* conn, http_status status, const char* html, size_t length);
 
 /**
  * @brief Sends a plain text response
  * @param conn The connection object
  * @param status HTTP status code
  * @param text Null-terminated text string
+ * @param length Length of response body
  */
-void conn_send_text(PulsarConn* conn, http_status status, const char* text);
+void conn_send_text(PulsarConn* conn, http_status status, const char* text, size_t length);
 
 /**
  * @brief Sends a redirect response
@@ -324,24 +354,28 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent);
  * @param conn The connection object
  * @param status HTTP status code
  * @param xml Null-terminated XML string
+ * @param length Length of response body
  */
-void conn_send_xml(PulsarConn* conn, http_status status, const char* xml);
+void conn_send_xml(PulsarConn* conn, http_status status, const char* xml, size_t length);
 
 /**
  * @brief Sends a JavaScript response
  * @param conn The connection object
  * @param status HTTP status code
  * @param javascript Null-terminated JS string
+ * @param length Length of response body
  */
-void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript);
+void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript,
+                          size_t length);
 
 /**
  * @brief Sends a CSS response
  * @param conn The connection object
  * @param status HTTP status code
  * @param css Null-terminated CSS string
+ * @param length Length of response body
  */
-void conn_send_css(PulsarConn* conn, http_status status, const char* css);
+void conn_send_css(PulsarConn* conn, http_status status, const char* css, size_t length);
 
 // Start chunked transfer. Stop by calling conn_end_chunked_transfer.
 void conn_start_chunked_transfer(PulsarConn* conn, int max_age_seconds);
@@ -391,33 +425,6 @@ void conn_send_event(PulsarConn* conn, const SSEvent* evt);
 
 // End SSE event.
 void conn_end_sse(PulsarConn* conn);
-
-/**
- * @brief Sets the Content-Type header
- *
- * @param conn The connection object
- * @param content_type Content type string
- */
-void conn_set_content_type(PulsarConn* conn, const char* content_type);
-
-/**
- * @brief Adds a header to the response. name and value MUST be valid
- * null-terminated strings and not empty.
- * @param conn The connection object
- * @param name Header name
- * @param value Header value
- */
-void conn_writeheader(PulsarConn* conn, const char* name, const char* value);
-
-/**
- * @brief Adds raw pre-formatted header(s) to the response.
- * Each header must be terminated with \r\n.
- * This is the most perfomant variant of the 3 header writing functions.
- * @param conn The connection object
- * @param header Pre-formatted header.
- * @param value Length of the header excluding the null-terminator.
- */
-void conn_writeheader_raw(PulsarConn* conn, const char* header, size_t length);
 
 /**
  * @brief Write multiple pre-formatted headers at once into response.
