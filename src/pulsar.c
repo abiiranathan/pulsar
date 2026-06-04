@@ -1,18 +1,14 @@
-#include "../include/pulsar.h"
-#include <solidc/defer.h>
 #include <stdatomic.h>
+
 #include "../include/events.h"
+#include "../include/pulsar.h"
 
-static int server_fd                                        = -1;   // Server socket file descriptor
-volatile sig_atomic_t server_running                        = 1;    // Server running flag
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global middleware array
-static size_t global_mw_count                               = 0;    // Global middleware count
-
-// No logger callback by default.
-static PulsarCallback LOGGER_CALLBACK = NULL;
-
-// Global userdata for handlers
-static void* GLOBAL_HANDLER_USERDATA = NULL;
+static int server_fd                                        = -1;
+volatile sig_atomic_t server_running                        = 1;
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
+static size_t global_mw_count                               = 0;
+static PulsarCallback LOGGER_CALLBACK                       = NULL;
+static void* GLOBAL_HANDLER_USERDATA                        = NULL;
 
 // reserves space for \r\n\0 in the response header buffer
 #define SAFETY_MARGIN 3
@@ -488,7 +484,8 @@ char* res_header_get(PulsarConn* conn, const char* name) {
     return result;
 }
 
-bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t dest_size) {
+bool res_header_get_buf(PulsarConn* conn, const char* __restrict__ name, char* __restrict__ dest,
+                        size_t dest_size) {
     response_t* res       = &conn->response;
     char* buf             = res->headers_buf;
     buf[res->headers_len] = '\0';
@@ -1509,7 +1506,9 @@ static void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state);
 static void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     // Record the start time as early as possible to capture request processing latency.
 #if ENABLE_LOGGING
-    clock_gettime(CLOCK_MONOTONIC, &conn->start);
+    if (LOGGER_CALLBACK) {
+        clock_gettime(CLOCK_MONOTONIC, &conn->start);
+    }
 #endif
 
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);

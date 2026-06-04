@@ -53,7 +53,6 @@ HEADERS_DIR := include
 TEST_DIR := tests
 
 BASE_SRC := $(SRC_DIR)/routing.c \
-            $(SRC_DIR)/locals.c \
             $(SRC_DIR)/pulsar.c \
             $(SRC_DIR)/forms.c \
 			$(EVENT_BACKEND)

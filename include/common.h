@@ -113,7 +113,7 @@ typedef struct request_t {
 } request_t;
 
 // Connection state structure
-struct ALIGN(64) pulsar_conn {
+struct pulsar_conn {
     int client_fd;             // Client socket file descriptor
     char* read_buf;            // Buffer for incoming data.
     Locals locals;             // Per-request context variables set by the user.
@@ -126,13 +126,9 @@ struct ALIGN(64) pulsar_conn {
     time_t last_activity;      // Timestamp of last I/O activity
 
     // Linked List nodes.
-    struct pulsar_conn* next;
-    struct pulsar_conn* prev;
-    bool closing;        // Server closing because of an error.
-    bool keep_alive;     // Keep-alive flag
-    bool abort;          // Abort handler/middleware processing
-    bool in_keep_alive;  // Flag for a tracked connection
-    int worker_id;       // ID of the current worker running the thread.
+    struct pulsar_conn *next, *prev;
+    bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
+    int worker_id;                                   // ID of the current worker running the thread.
 };
 
 #endif /* PULSAR_COMMON_H */

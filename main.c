@@ -18,17 +18,8 @@ void hello_world_handler(PulsarCtx* ctx) {
         "Set-Cookie: theme=dark; Path=/; Secure\r\n"
         "Content-Type: text/html\r\n");
 
-    conn_set_status(conn, StatusOK);
     conn_writeheader_raw(conn, headers.data, headers.len);
     conn_write(conn, "<h1>Hello World</h1>", 20);
-
-    // // Log all headers
-    // const headers_t* h = req_headers(conn);
-    // // headers_foreach(h, print_header_callback, NULL);
-    // for (size_t i = 0; i < h->count; ++i) {
-    //     printf("%.*s: %.*s\n", (int)h->entries[i].name.len, h->entries[i].name.data,
-    //            (int)h->entries[i].value.len, h->entries[i].value.data);
-    // }
 }
 
 void json_handler(PulsarCtx* ctx) {
@@ -160,19 +151,6 @@ void chunked_handler(PulsarCtx* ctx) {
             usleep(100000);
         }
 
-        // Test case 4: Very large binary-safe data (8KB)
-        {
-            char huge_data[8192];
-
-            // Fill with varied data including some null bytes to test binary safety
-            for (size_t i = 0; i < sizeof(huge_data); i++) {
-                huge_data[i] = (char)(i % 256);
-            }
-
-            conn_write_chunk(conn, huge_data, sizeof(huge_data));
-            usleep(100000);
-        }
-
         // Test case 5: Stream source file in large chunks
         {
             FILE* fp = fopen(__FILE__, "r");
@@ -185,48 +163,6 @@ void chunked_handler(PulsarCtx* ctx) {
                 }
                 fclose(fp);
             }
-        }
-
-        // Test case 6: Rapid succession of medium chunks (1.5KB each)
-        for (int i = 0; i < 5; i++) {
-            char medium_chunk[1536];
-
-            int len = snprintf(medium_chunk, sizeof(medium_chunk), "CHUNK %d: ", i);
-
-            // Fill rest with pattern
-            for (int j = len; j < (int)sizeof(medium_chunk) - 1; j++) {
-                medium_chunk[j] = 'A' + ((j - len) % 26);
-            }
-            medium_chunk[sizeof(medium_chunk) - 1] = '\0';
-
-            conn_write_chunk(conn, medium_chunk, strlen(medium_chunk));
-            usleep(25000);  // 25ms delay
-        }
-
-        // Test case 7: Single massive chunk (16KB)
-        {
-            static char massive_chunk[16384];
-            char* pos        = massive_chunk;
-            size_t remaining = sizeof(massive_chunk) - 1;
-
-            // Create structured content
-            int written = snprintf(pos, remaining, "=== MASSIVE CHUNK TEST ===\n");
-            pos += written;
-            remaining -= (size_t)written;
-
-            for (int i = 0; i < 200 && remaining > 80; i++) {
-                written = snprintf(pos, remaining,
-                                   "Entry %03d: Long detailed entry with timestamp %ld and data "
-                                   "payload.\n",
-                                   i, time(NULL) + i);
-                if (written >= (int)remaining) break;
-                pos += written;
-                remaining -= (size_t)written;
-            }
-
-            size_t total_len = (size_t)(pos - massive_chunk);
-            conn_write_chunk(conn, massive_chunk, total_len);
-            usleep(200000);  // 200ms
         }
 
         // Final small chunk to signal completion

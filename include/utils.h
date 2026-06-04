@@ -44,7 +44,8 @@ static const uint8_t hex_valid_table[256] = {
     ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
 };
 
-INLINE size_t url_percent_decode(const char* src, char* dst, size_t src_len, size_t dst_size) {
+static inline size_t url_percent_decode(const char* __restrict__ src, char* __restrict__ dst,
+                                        size_t src_len, size_t dst_size) {
     char* dst_start     = dst;                 // Remember starting position
     const char* dst_end = dst + dst_size - 1;  // reserve space for '\0';
     const char* src_end = src + src_len;       // avoids NULL termination assumption
