@@ -83,7 +83,7 @@
 
 // Constants
 #define STATUS_LINE_SIZE 48
-#define HEADERS_BUF_SIZE 1024
+#define HEADERS_BUF_SIZE 512
 #define CACHE_LINE_SIZE  64
 
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");

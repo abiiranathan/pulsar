@@ -62,8 +62,8 @@ typedef struct response_t {
     size_t body_sent;      // Bytes of body sent
 
     // 2-Byte Fields
-    size_t headers_len;   // Actual length of headers
-    size_t headers_sent;  // Bytes of headers sent
+    uint16_t headers_len;   // Actual length of headers
+    uint16_t headers_sent;  // Bytes of headers sent
 
     // 1-Byte Fields
     bool heap_allocated;  // If heap allocation is used

@@ -7,25 +7,22 @@ static int server_fd                                        = -1;   // Server so
 volatile sig_atomic_t server_running                        = 1;    // Server running flag
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};  // Global middleware array
 static size_t global_mw_count                               = 0;    // Global middleware count
-static PulsarCallback LOGGER_CALLBACK = NULL;  // No logger callback by default.
-static void* GLOBAL_HANDLER_USERDATA  = NULL;  // Global userdata for handlers
 
-#define SAFETY_MARGIN 3  // reserves space for \r\n\0 in the response header buffer
+// No logger callback by default.
+static PulsarCallback LOGGER_CALLBACK = NULL;
 
-/* ================================================================
- * Cached Date Header
- *
- * strftime + gmtime costs ~300 ns.  The HTTP Date header only needs
- * second-level precision, so we cache the formatted string and refresh
- * it at most once per second using a relaxed atomic timestamp check.
- * ================================================================ */
+// Global userdata for handlers
+static void* GLOBAL_HANDLER_USERDATA = NULL;
+
+// reserves space for \r\n\0 in the response header buffer
+#define SAFETY_MARGIN 3
+
 static _Atomic time_t cached_date_ts = 0;
 static char cached_date_hdr[64]      = {0};
 static int cached_date_len           = 0;
 
-/* ================================================================
- * Keep-Alive State
- * ================================================================ */
+#define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
+
 typedef struct KeepAliveState {
     PulsarConn* head;
     PulsarConn* tail;
@@ -58,14 +55,7 @@ INLINE int u64_to_dec(char* buf, uint64_t v) {
     return len;
 }
 
-INLINE bool conn_timedout(time_t now, time_t last_activity) {
-    return (now - last_activity) > CONNECTION_TIMEOUT;
-}
-
-/* ================================================================
- * Keep-Alive Doubly-Linked List
- * ================================================================ */
-INLINE void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
+static void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     if (!conn->in_keep_alive) return;
 
     if (conn->prev)
@@ -84,7 +74,7 @@ INLINE void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     conn->in_keep_alive = false;
 }
 
-INLINE void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
+static void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     if (conn->in_keep_alive) return;
 
     conn->next = state->head;
@@ -127,31 +117,6 @@ static void install_signal_handler(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
-}
-
-/* ================================================================
- * Request / Response / Connection Lifecycle
- * ================================================================ */
-static request_t* create_request(Arena* arena) {
-    size_t sizes[3] = {sizeof(request_t), sizeof(headers_t), (MAX_PATH_LEN + 1)};
-    void* ptrs[3]   = {0};
-    if (!arena_alloc_batch(arena, sizes, 3, ptrs)) {
-        return NULL;
-    };
-
-    request_t* req = ptrs[0];
-    req->headers   = ptrs[1];
-    req->path      = ptrs[2];
-
-    headers_init(req->headers);
-
-    req->method[0]      = '\0';
-    req->method_type    = HTTP_INVALID;
-    req->content_length = 0;
-    req->body           = NULL;
-    req->query_params   = NULL;
-    req->route          = NULL;
-    return req;
 }
 
 static inline void response_init(response_t* resp) {
@@ -1276,14 +1241,12 @@ void pulsar_delete(PulsarConn* conn, const char* k) {
 /* ================================================================
  * Logging / Latency
  * ================================================================ */
-/** Minimum nanoseconds between logger callbacks to avoid excessive overhead. */
-#define LOG_MIN_INTERVAL_NS 1000000ULL /* 1ms — tune to taste */
 
 INLINE void request_complete(PulsarConn* conn) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
         struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC_COARSE, &end);
+        clock_gettime(CLOCK_MONOTONIC, &end);
         uint64_t s_ns = (uint64_t)conn->start.tv_sec * 1000000000ULL + (uint64_t)conn->start.tv_nsec;
         uint64_t e_ns = (uint64_t)end.tv_sec * 1000000000ULL + (uint64_t)end.tv_nsec;
         PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
@@ -1565,7 +1528,7 @@ static void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
 static void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     // Record the start time as early as possible to capture the entire request processing latency.
 #if ENABLE_LOGGING
-    clock_gettime(CLOCK_MONOTONIC_COARSE, &conn->start);
+    clock_gettime(CLOCK_MONOTONIC, &conn->start);
 #endif
 
     ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
@@ -1740,7 +1703,7 @@ void* worker_thread(void* arg) {
         loop_counter++;
         if (n == 0 || loop_counter >= 100) {
             struct timespec now;
-            clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
+            clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec - last_timeout_check >= 5) {
                 CheckKeepAliveTimeouts(ka_state, worker_id, queue_fd);
                 last_timeout_check = now.tv_sec;
