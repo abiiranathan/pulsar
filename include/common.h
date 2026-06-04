@@ -56,35 +56,27 @@ typedef enum {
 
 // HTTP Response structure
 typedef struct response_t {
-    // =========================================================================
-    // CACHE LINE 1: HOT CONTROL METADATA (Fits entirely in 64 bytes)
-    // =========================================================================
-
     // 8-Byte Fields
     size_t body_len;       // Actual length of body
     size_t body_capacity;  // Capacity of body buffer
     size_t body_sent;      // Bytes of body sent
 
-    // 4-Byte Fields
-    http_status status_code;  // HTTP status code (enum)
-    int file_fd;              // File descriptor for file to send
-    uint32_t file_size;       // Size of file to send
-    uint32_t file_offset;     // Offset in file for sendfile
-    uint32_t max_range;       // Maximum range of requested bytes
-
     // 2-Byte Fields
     size_t headers_len;   // Actual length of headers
     size_t headers_sent;  // Bytes of headers sent
 
-    // 1-Byte Fields (Packed tightly together with zero alignment padding)
+    // 1-Byte Fields
     bool heap_allocated;  // If heap allocation is used
     uint8_t status_len;   // Actual length of status line
     uint8_t flags;        // 4 bytes for all flags
     uint8_t status_sent;  // Bytes of status line sent
 
-    // =========================================================================
-    // CACHE LINE 2 & BEYOND: LARGE DATA BUFFERS
-    // =========================================================================
+    // 4-Byte Fields
+    http_status status_code;             // HTTP status code (enum)
+    int file_fd;                         // File descriptor for file to send
+    uint32_t file_size;                  // Size of file to send
+    uint32_t file_offset;                // Offset in file for sendfile
+    uint32_t max_range;                  // Maximum range of requested bytes
 
     char status_buf[STATUS_LINE_SIZE];   // Null-terminated buffer for status line
     char headers_buf[HEADERS_BUF_SIZE];  // Null-terminated buffer for headers
@@ -109,16 +101,16 @@ typedef struct request_t {
 
 // Connection state structure
 struct pulsar_conn {
-    int client_fd;              // Client socket file descriptor
-    char* read_buf;             // Buffer for incoming data.
-    Locals* locals;             // Per-request context variables set by the user.
-    response_t* response;       // HTTP response data (arena allocated)
-    struct request_t* request;  // HTTP request data (arena allocated)
-    Arena* arena;               // Memory arena for allocations
+    int client_fd;             // Client socket file descriptor
+    char* read_buf;            // Buffer for incoming data.
+    Locals* locals;            // Per-request context variables set by the user.
+    struct request_t request;  // HTTP request data (arena allocated)
+    response_t response;       // HTTP response data (arena allocated)
+    Arena* arena;              // Memory arena for allocations
 #if ENABLE_LOGGING
-    struct timespec start;      // Timestamp of first request
+    struct timespec start;     // Timestamp of first request
 #endif
-    time_t last_activity;       // Timestamp of last I/O activity
+    time_t last_activity;      // Timestamp of last I/O activity
 
     // Linked List nodes.
     struct pulsar_conn* next;
