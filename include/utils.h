@@ -15,10 +15,6 @@ extern "C" {
 #include <unistd.h>
 #include "macros.h"
 
-// Fast memmem implementation
-// Uses AVX intrinsics for better performance on x86/x86_64.
-#include "memmem.h"
-
 INLINE bool is_malicious_path(const char* path) {
     // List of dangerous patterns
     static const char* patterns[] = {"../", "/./", "//", "/~", "%2e%2e", NULL};
