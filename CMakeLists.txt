@@ -28,7 +28,6 @@ endif()
 option(BUILD_SHARED_LIBS          "Build shared library"              ON)
 option(BUILD_STATIC_LIBS          "Build static library"              ON)
 option(BUILD_TESTS                "Build tests"                       ON)
-option(INSTALL_HEADERS            "Install public headers"            ON)
 option(ENABLE_NATIVE_OPTIMIZATION "Enable CPU-specific optimizations" ON)
 option(ENABLE_UNIVERSAL_BINARY    "Build universal macOS binaries"    ON)
 
@@ -197,11 +196,10 @@ if(BUILD_SHARED_LIBS)
     )
 endif()
 
-if(INSTALL_HEADERS)
-    install(FILES ${PULSAR_HEADERS}
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pulsar
-    )
-endif()
+
+install(FILES ${PULSAR_HEADERS}
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pulsar
+)
 
 # ------------------------------------------------------------------------------
 # Package export

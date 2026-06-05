@@ -3,7 +3,7 @@
 void hello_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, "text/plain");
+    conn_set_content_type(conn, SS_LIT("text/plain"));
     conn_write_string(conn, "Hello World!");
 }
 
