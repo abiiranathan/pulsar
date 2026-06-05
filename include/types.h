@@ -15,11 +15,11 @@
 #include <solidc/filepath.h>
 #include <solidc/str_to_num.h>
 
-#include "../include/constants.h"
-#include "../include/headers.h"
-#include "../include/locals.h"
-#include "../include/method.h"
-#include "../include/status.h"
+#include "constants.h"
+#include "headers.h"
+#include "locals.h"
+#include "method.h"
+#include "status.h"
 
 typedef enum {
     // Indicates that the Content-Type header has been set for the response.
