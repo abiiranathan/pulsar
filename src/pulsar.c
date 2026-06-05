@@ -1,13 +1,18 @@
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 
 #include "../include/events.h"
+#include "../include/mimetypes.h"
+#include "../include/plog.h"
 #include "../include/pulsar.h"
 
 static int server_fd                                        = -1;
 volatile sig_atomic_t server_running                        = 1;
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 static size_t global_mw_count                               = 0;
-static PulsarCallback LOGGER_CALLBACK                       = NULL;
 static void* GLOBAL_HANDLER_USERDATA                        = NULL;
 
 // reserves space for \r\n\0 in the response header buffer
@@ -416,22 +421,25 @@ static bool parse_request_body(PulsarConn* conn, size_t headers_len, size_t read
 /* ================================================================
  * Request Getters
  * ================================================================ */
-const char* req_body(PulsarConn* conn) {
-    return conn->request.body;
+
+StrSlice req_body(PulsarConn* conn) {
+    return (StrSlice){
+        .data = conn->request.body,
+        .len  = conn->request.content_length,
+    };
 }
+
 const char* req_method(PulsarConn* conn) {
     return conn->request.method;
 }
 const char* req_path(PulsarConn* conn) {
     return conn->request.path;
 }
-size_t req_content_len(PulsarConn* conn) {
-    return conn->request.content_length;
-}
 
 StrSlice query_get(PulsarConn* conn, const char* name) {
     if (!conn->request.query_params) return (StrSlice){0};
-    return headers_get(conn->request.query_params, name);
+    StrSlice h = headers_get(conn->request.query_params, name);
+    return ss_is_valid(h) ? h : ss_empty();
 }
 
 headers_t* query_params(PulsarConn* conn) {
@@ -443,7 +451,8 @@ const headers_t* req_headers(PulsarConn* conn) {
 }
 
 StrSlice req_header_get(PulsarConn* conn, const char* name) {
-    return headers_get(conn->request.headers, name);
+    StrSlice h = headers_get(conn->request.headers, name);
+    return ss_is_valid(h) ? h : ss_empty();
 }
 
 /* ================================================================
@@ -509,7 +518,7 @@ bool res_header_get_buf(PulsarConn* conn, const char* __restrict__ name, char* _
  * ================================================================ */
 void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value) {
     response_t* resp = &conn->response;
-    size_t required  = name.len + value.len + 4;
+    size_t required  = name.len + value.len + 4;  // ': ' + '\r\n'
     size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
 
     if (required > remaining) {
@@ -520,17 +529,21 @@ void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value) {
 
     char* dest = resp->headers_buf + resp->headers_len;
     memcpy(dest, name.data, name.len);
-    dest += name.len;
-    *dest++ = ':';
-    *dest++ = ' ';
-    memcpy(dest, value.data, value.len);
-    dest += value.len;
-    *dest++ = '\r';
-    *dest++ = '\n';
+    dest[name.len]     = ':';
+    dest[name.len + 1] = ' ';
+    memcpy(dest + name.len + 2, value.data, value.len);
+    dest[name.len + 2 + value.len]     = '\r';
+    dest[name.len + 2 + value.len + 1] = '\n';
     resp->headers_len += required;
 }
 
 void conn_writeheader_raw(PulsarConn* conn, const char* header, size_t length) {
+    // Check that header ends with \r\n
+    if (length < 2 || header[length - 2] != '\r' || header[length - 1] != '\n') {
+        fprintf(stderr, "Headers must end with \\r\\n\n");
+        return;
+    }
+
     response_t* resp = &conn->response;
     size_t offset    = resp->headers_len;
     size_t remaining = (HEADERS_BUF_SIZE - offset - SAFETY_MARGIN);
@@ -1094,9 +1107,10 @@ void static_file_handler(PulsarCtx* ctx) {
     if (is_malicious) rtype = RESP_MALICIOUS;
     if (path_too_long) rtype = RESP_TOO_LONG;
 
-    char filepath[PATH_MAX]   = {0};
-    char index_file[PATH_MAX] = {0};
-    bool file_found           = false;
+    char filepath[PATH_MAX]     = {0};
+    char decoded_path[PATH_MAX] = {0};
+    char index_file[PATH_MAX]   = {0};
+    bool file_found             = false;
 
     if (rtype == RESP_PROCESS) {
         bool needs_slash = (dirlen > 0) & (dirname[dirlen - 1] != '/');
@@ -1105,8 +1119,10 @@ void static_file_handler(PulsarCtx* ctx) {
                             (diff_prefix & needs_slash) ? "/" : "", (int)static_len, static_ptr);
 
         if (plen >= 0 && plen < PATH_MAX) {
-            if (strstr(filepath, "%") || strstr(filepath, "+"))
-                url_percent_decode(filepath, filepath, (size_t)plen, PATH_MAX);
+            if (strstr(filepath, "%") || strstr(filepath, "+")) {
+                url_percent_decode(filepath, decoded_path, (size_t)plen, PATH_MAX);
+                strncpy(filepath, decoded_path, sizeof(filepath));
+            }
 
             file_found = is_file(filepath);
             if (!file_found) {
@@ -1195,11 +1211,98 @@ void use_route_middleware(route_t* route, HttpHandler* mw, size_t count) {
 void pulsar_set_handler_userdata(void* ud) {
     GLOBAL_HANDLER_USERDATA = ud;
 }
+
 void* pulsar_get_handler_userdata(void) {
     return GLOBAL_HANDLER_USERDATA;
 }
-void pulsar_set_callback(PulsarCallback cb) {
+
+static PlogState PLOG_STATE = {0};             // State for the plog async logger.
+static int LOG_FD           = -1;              // Set to a valid file descriptor to enable logging.
+static PulsarCallback LOGGER_CALLBACK = NULL;  // User-provided callback for logging request latency.
+
+bool pulsar_set_callback(PulsarCallback cb, int fd) {
+#if ENABLE_LOGGING
+    if ((LOGGER_CALLBACK && cb) || (LOG_FD != -1 && fd != -1)) {
+        LOG_ERROR("Cannot set logger callback: already set");
+        return false;
+    }
     LOGGER_CALLBACK = cb;
+    LOG_FD          = fd;
+    return plog_init(&PLOG_STATE, LOG_FD);
+#else
+    LOGGER_CALLBACK = NULL;
+    LOG_FD          = -1;
+    UNUSED(cb);
+    UNUSED(fd);
+    return true;
+#endif
+}
+
+__attribute__((destructor)) void cleanup_logger() {
+#if ENABLE_LOGGING
+    if (LOG_FD != -1) {
+        int drop = plog_drop_count(&PLOG_STATE);
+        if (drop > 0) {
+            fprintf(stderr,
+                    "Dropped %d log entries due to full queue. Consider increasing "
+                    "PLOG_RING_CAPACITY "
+                    "or ensuring the logger keeps up with the request rate.\n",
+                    drop);
+        }
+        plog_destroy(&PLOG_STATE);
+        LOG_FD = -1;
+    }
+#endif
+}
+
+/** Async logging callback for Pulsar.
+* ---------------------------------------
+*
+ * This logger is asynchronous and non-blocking as possible: 
+ * it formats the log line on the stack and submits it to plog without any locks or syscalls in the hot path.
+ *
+ * This is called after every request, and is passed the total latency in nanoseconds.
+ * It gathers request info from the connection
+ * and submits a formatted log line to the logger.
+ * The callback must be set via pulsar_set_callback() before starting the server.
+ * You can customize the PLOG_LINE_MAX macro to increase the maximum log line length if needed.
+ *
+ */
+void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns) {
+    PulsarConn* conn        = ctx->conn;
+    const char* method      = req_method(conn);
+    const char* path        = req_path(conn);
+    http_status status_code = res_get_status(conn);
+    StrSlice user_agent     = req_header_get(conn, "User-Agent");
+    if (!ss_is_valid(user_agent)) {
+        user_agent = SS_LIT("-");
+    }
+
+    /* Format latency with the most readable unit. */
+    char latency_str[24];
+    if (total_ns < 1000) {
+        snprintf(latency_str, sizeof(latency_str), "%3" PRIu64 "ns", total_ns);
+    } else if (total_ns < 1000000) {
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "µs", total_ns / 1000);
+    } else if (total_ns < 1000000000) {
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "ms", total_ns / 1000000);
+    } else if (total_ns < UINT64_C(60000000000)) {
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "s", total_ns / 1000000000);
+    } else {
+        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "m",
+                 total_ns / UINT64_C(60000000000));
+    }
+
+    /*
+     * Build the full log line on the stack.  snprintf + plog_submit is the
+     * entire hot-path cost — no locks, no syscalls.
+     */
+    char line[PLOG_LINE_MAX];
+    int n = snprintf(line, sizeof(line), "[Pulsar] %-7s %-5s %3d %8s %.*s\n", method, path,
+                     (int)status_code, latency_str, (int)user_agent.len, user_agent.data);
+    if (n > 0 && n < (int)sizeof(line)) {
+        plog_submit(&PLOG_STATE, line, (uint32_t)n);
+    }
 }
 
 bool pulsar_set(PulsarConn* conn, const char* k, void* v, ValueFreeFunc ff) {
@@ -1230,6 +1333,7 @@ INLINE void request_complete(PulsarConn* conn) {
         LOGGER_CALLBACK(&ctx, e_ns - s_ns);
     }
 #endif
+    UNUSED(conn);
 }
 
 /* ================================================================

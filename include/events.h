@@ -1,7 +1,20 @@
 #ifndef EVENTS_H
 #define EVENTS_H
 
-#include "common.h"
+#include <stdlib.h>
+
+// Platform-specific includes
+#if defined(__linux__)
+#include <sys/epoll.h>
+#include <sys/sendfile.h>
+#elif defined(__FreeBSD__)
+#include <sys/event.h>
+#include <sys/param.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <sys/event.h>
+#include <sys/param.h>
+#endif
 
 /* ----------------------------------------------------------------
  * Opaque event type.

@@ -4,12 +4,13 @@
 #include <signal.h>
 #include <sys/uio.h>
 #include <time.h>
+
 #include "constants.h"
-#include "content_types.h"
 #include "locals.h"
 #include "routing.h"
-#include "status_code.h"
-#include "utils.h"
+#include "status.h"
+#include "types.h"
+#include "url.h"
 
 extern volatile sig_atomic_t server_running;
 
@@ -91,8 +92,32 @@ void* pulsar_get_handler_userdata(void);
 
 /** @brief Set a post_handler callback that is called after the handler runs
  * before writing data to the socket.
+ * @param cb User-provided callback function pointer.
+ * @param fd File descriptor for the logger (must be set to enable logging).
+ * @note The callback is ideal for logging request latency and other metrics.
+ * The callback receives the total processing time in nanoseconds (excluding
+ * network I/O) and a pointer to the request context. 
+ * The userdata pointer in the context is the same pointer set via pulsar_set_handler_userdata.
+ * @note The callback must be set before starting the server and 
+ * can only be set once.
+ * @return true If async logger background thread was successfully initialized. 
  */
-void pulsar_set_callback(PulsarCallback cb);
+bool pulsar_set_callback(PulsarCallback cb, int fd);
+
+/** Pulsar Async Logger
+* ---------------------
+*
+ * This logger is asynchronous and non-blocking as possible: 
+ * it formats the log line on the stack and submits it to plog without any locks or syscalls in the hot path.
+ *
+ * This is called after every request, and is passed the total latency in nanoseconds.
+ * It gathers request info from the connection
+ * and submits a formatted log line to the logger.
+ * The callback must be set via pulsar_set_callback() before starting the server.
+ * You can customize the PLOG_LINE_MAX macro to increase the maximum log line length if needed.
+ *
+ */
+void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns);
 
 // Set a user-owned value pointer to the context with a callback function to
 // free the value. The function may be NULL if the value is not to be freed.
@@ -449,7 +474,7 @@ void conn_set_status(PulsarConn* conn, http_status code);
  *
  * @param conn The connection object
  * @param name Parameter name
- * @return const char* Parameter value or NULL if not found
+ * @return A string slice for query. It is empty(but valid) if query not found.
  */
 StrSlice query_get(PulsarConn* conn, const char* name);
 
@@ -474,7 +499,7 @@ const headers_t* req_headers(PulsarConn* conn);
  *
  * @param conn The connection object
  * @param name Header name
- * @return const char* Header value or NULL if not found
+ * @return A string slice for header matching name. It is empty(but valid) if not found.
  */
 StrSlice req_header_get(PulsarConn* conn, const char* name);
 
@@ -503,12 +528,12 @@ bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t d
 http_status res_get_status(PulsarConn* conn);
 
 /**
- * @brief Gets the request body
- *
+ * @brief Gets the request body string slice. 
+ * 
  * @param conn The connection object
  * @return const char* Request body or NULL if none
  */
-const char* req_body(PulsarConn* conn);
+StrSlice req_body(PulsarConn* conn);
 
 /**
  * @brief Gets the request method
@@ -525,14 +550,6 @@ const char* req_method(PulsarConn* conn);
  * @return const char* Request path
  */
 const char* req_path(PulsarConn* conn);
-
-/**
- * @brief Gets the request content length
- *
- * @param conn The connection object
- * @return size_t Content-Length header value
- */
-size_t req_content_len(PulsarConn* conn);
 
 /**
  * @brief Gets a path parameter value

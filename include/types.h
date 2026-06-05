@@ -1,5 +1,5 @@
-#ifndef PULSAR_COMMON_H
-#define PULSAR_COMMON_H
+#ifndef __PULSAR_TYPES_H__
+#define __PULSAR_TYPES_H__
 
 #define _FILE_OFFSET_BITS 64
 
@@ -8,34 +8,18 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <pthread.h>
-#include <signal.h>
-#include <stdarg.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-
-// Platform-specific includes
-#if defined(__linux__)
-#include <sys/epoll.h>
-#include <sys/sendfile.h>
-#elif defined(__FreeBSD__)
-#include <sys/event.h>
-#include <sys/param.h>
-#elif defined(__APPLE__)
-#include <mach/mach.h>
-#include <sys/event.h>
-#include <sys/param.h>
-#endif
 
 #include <solidc/arena.h>
 #include <solidc/filepath.h>
 #include <solidc/str_to_num.h>
+
 #include "../include/constants.h"
 #include "../include/headers.h"
 #include "../include/locals.h"
 #include "../include/method.h"
-#include "../include/mimetype.h"
-#include "../include/status_code.h"
+#include "../include/status.h"
 
 typedef enum {
     // Indicates that the Content-Type header has been set for the response.
@@ -114,21 +98,19 @@ typedef struct request_t {
 
 // Connection state structure
 struct pulsar_conn {
-    int client_fd;             // Client socket file descriptor
-    char* read_buf;            // Buffer for incoming data.
-    Locals locals;             // Per-request context variables set by the user.
-    struct request_t request;  // HTTP request data (arena allocated)
-    response_t response;       // HTTP response data (arena allocated)
-    Arena* arena;              // Memory arena for allocations
+    int client_fd;                    // Client socket file descriptor
+    char* read_buf;                   // Buffer for incoming data.
+    Locals locals;                    // Per-request context variables set by the user.
+    struct request_t request;         // HTTP request data (arena allocated)
+    response_t response;              // HTTP response data (arena allocated)
+    Arena* arena;                     // Memory arena for allocations
 #if ENABLE_LOGGING
-    struct timespec start;     // Timestamp of first request
+    struct timespec start;            // Timestamp of first request
 #endif
-    time_t last_activity;      // Timestamp of last I/O activity
-
-    // Linked List nodes.
-    struct pulsar_conn *next, *prev;
+    time_t last_activity;             // Timestamp of last I/O activity
+    struct pulsar_conn *next, *prev;  // Linked list nodes for keep-alive tracking.
     bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
     int worker_id;                                   // ID of the current worker running the thread.
 };
 
-#endif /* PULSAR_COMMON_H */
+#endif /* __PULSAR_TYPES_H__ */

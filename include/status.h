@@ -88,7 +88,7 @@ typedef enum : uint32_t {
 // Predefined status lines for common HTTP status codes. Indexed by status code.
 // Format:
 static const StrSlice status_info[512] = {
-    [100] = SS_LIT("HTTP/1.1 100 Continue\r\n"),  // 100
+    [100] = SS_LIT("HTTP/1.1 100 Continue\r\n"),
     [101] = SS_LIT("HTTP/1.1 101 Switching Protocols\r\n"),
     [102] = SS_LIT("HTTP/1.1 102 Processing\r\n"),
     [103] = SS_LIT("HTTP/1.1 103 Early Hints\r\n"),

@@ -5,19 +5,12 @@
 extern "C" {
 #endif
 
-#include <assert.h>
-#include <errno.h>
-#include <inttypes.h>
-#include <limits.h>
-#include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include "macros.h"
 
 INLINE bool is_malicious_path(const char* path) {
     // List of dangerous patterns
-    static const char* patterns[] = {"../", "/./", "//", "/~", "%2e%2e", NULL};
+    static const char* patterns[] = {"../", "/./", "\\", "//", "/~", "%2e%2e", NULL};
     for (int i = 0; patterns[i]; i++) {
         if (strstr(path, patterns[i])) {
             return true;

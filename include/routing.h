@@ -46,9 +46,6 @@ typedef void (*HttpHandler)(PulsarCtx* ctx);
 /** Middleware function (same signature as handler). */
 typedef HttpHandler Middleware;
 
-/** Forward declaration of route structure. */
-struct route_t;
-
 /** Route state union to save space. */
 typedef union {
     struct {
@@ -61,16 +58,13 @@ typedef union {
 /**
  * Route structure optimized for cache locality.
  */
-typedef struct route_t {
-    /* HOT: Fields accessed during route matching (first cache line). */
+typedef struct ALIGN(CACHE_LINE_SIZE) route_t {
     const char* pattern;                         /**< Route pattern (dynamically allocated). */
     HttpHandler handler;                         /**< Handler function pointer. */
     uint16_t pattern_len;                        /**< Length of the pattern. */
     HttpMethod method;                           /**< HTTP method. */
     uint8_t route_type;                          /**< 0=exact, 1=static, 2=param. */
     uint8_t mw_count;                            /**< Number of middleware. */
-    uint8_t _padding[3];                         /**< Align to 8 bytes. */
-
     route_state_t state;                         /**< Route-specific state. */
     Middleware middleware[MAX_ROUTE_MIDDLEWARE]; /**< Middleware array. */
 } route_t;

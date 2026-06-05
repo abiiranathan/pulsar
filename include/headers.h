@@ -161,6 +161,18 @@ INLINE void headers_foreach(const headers_t* h, header_iter_fn callback, void* u
     }
 }
 
+// DEBUG MACRO: Print all headers to stdout
+#define DUMP_HEADERS(h)                                                                            \
+    if (h) {                                                                                       \
+        do {                                                                                       \
+            printf("Headers (count=%zu):\n", (h)->count);                                          \
+            for (size_t i = 0; i < (h)->count; ++i) {                                              \
+                printf("  %.*s: %.*s\n", (int)(h)->entries[i].name.len, (h)->entries[i].name.data, \
+                       (int)(h)->entries[i].value.len, (h)->entries[i].value.data);                \
+            }                                                                                      \
+        } while (0);                                                                               \
+    }
+
 #ifdef __cplusplus
 }
 #endif

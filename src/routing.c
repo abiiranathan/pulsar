@@ -1,7 +1,8 @@
 #include "../include/routing.h"
+#include <solidc/filepath.h>
 #include <stdalign.h>
 #include <string.h>
-#include "../include/common.h"
+
 #include "../include/method.h"
 
 /** Static file handler provided by pulsar.c. */

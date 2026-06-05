@@ -1,18 +1,21 @@
-#include <fcntl.h>
-#include <inttypes.h>
-#include <solidc/defer.h>
-#include "include/forms.h"
-#include "include/plog.h"
-#include "include/pulsar.h"
+#include <inttypes.h>        // for PRIu64
+#include <string.h>          // for strlen, memset
+#include <time.h>            // for time()
+#include <unistd.h>          // for usleep
 
-static bool print_header_callback(StrSlice name, StrSlice value, void* userdata) {
-    (void)userdata;
-    printf("%.*s = %.*s\n", (int)name.len, name.data, (int)value.len, value.data);
-    return true;
-}
+#include "include/error.h"   // abort_if*, require_path_param, defer_*, PARSE_MULTIPART_FORM
+#include "include/forms.h"   // MultipartForm, multipart_file, multipart_save_file
+#include "include/pulsar.h"  // PulsarCtx, PulsarConn, route_*, pulsar_run, conn_*, req_*
 
+/* =========================================================================
+ * Hello World
+ * Demonstrates raw header injection and a plain HTML response body.
+ * ========================================================================= */
 void hello_world_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
+
+    // Inject multiple Set-Cookie headers directly into the response.
+    // conn_writeheader_raw appends pre-formatted header lines verbatim.
     StrSlice headers = SS_LIT(
         "Set-Cookie: sessionId=12345; Path=/; HttpOnly\r\n"
         "Set-Cookie: theme=dark; Path=/; Secure\r\n"
@@ -22,76 +25,93 @@ void hello_world_handler(PulsarCtx* ctx) {
     conn_write(conn, "<h1>Hello World</h1>", 20);
 }
 
+/* =========================================================================
+ * JSON response
+ * Demonstrates conn_send_json: sets status, Content-Type, and body in one
+ * call.
+ * ========================================================================= */
 void json_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, SS_LIT("application/json"));
-
-    char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
-    conn_write(conn, json, sizeof(json) - 1);
+    char json[]      = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
+    conn_send_json(conn, StatusOK, json, sizeof(json) - 1);
 }
 
+/* =========================================================================
+ * Echo
+ * Reflects the request method, path, and body back to the client as plain
+ * text.  Demonstrates multiple conn_write calls — the server buffers them
+ * and flushes when the handler returns.
+ * ========================================================================= */
 void echo_handler(PulsarCtx* ctx) {
+    const char *method, *path;
+    StrSlice body;
+
     PulsarConn* conn = ctx->conn;
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, SS_LIT("text/plain"));
 
-    const char* method    = req_method(conn);
-    const char* path      = req_path(conn);
-    const char* body      = req_body(conn);
-    size_t content_length = req_content_len(conn);
+    method = req_method(conn);
+    path   = req_path(conn);
+    body   = req_body(conn);
 
-    // Echo request method and path
     conn_write(conn, "Method: ", 8);
     conn_write(conn, method, strlen(method));
     conn_write(conn, "\nPath: ", 7);
     conn_write(conn, path, strlen(path));
 
-    // Echo body if present
-    if (body && content_length > 0) {
+    // Only echo the body when one was actually sent.
+    if (body.data && body.len > 0) {
         conn_write(conn, "\nBody: ", 7);
-        conn_write(conn, body, content_length);
+        conn_write(conn, body.data, body.len);
     }
 }
 
+/* =========================================================================
+ * Server-Sent Events (SSE)
+ * Streams 1 000 numbered events to the client at 1 ms intervals.
+ *
+ * NOTE: WITH_SSE_CONNECTION holds the worker thread for the entire stream
+ * duration.  This is intentional for the POC but limits concurrency — a
+ * production implementation should use non-blocking I/O or a dedicated
+ * thread pool for long-lived connections.
+ * ========================================================================= */
 void sse_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     WITH_SSE_CONNECTION(conn, {
         size_t total = 1000;
 
-        // This will block the whole worker thread :) Be ware!!
         while (total > 0 && server_running && conn_is_open(conn)) {
             char msg[64];
             char msg_id[24];
+            snprintf(msg, sizeof(msg), "Message: %zu", total);
+            snprintf(msg_id, sizeof(msg_id), "%zu", total);
 
-            snprintf(msg, sizeof(msg), "Message: %lu", total);
-            snprintf(msg_id, sizeof(msg_id), "%lu", total);
-
-            StrSlice data  = ss_from_cstr(msg);
-            StrSlice event = SS_LIT("message");
-            StrSlice id    = ss_from_cstr(msg_id);
-            SSEvent evt    = SSE_EVENT_INIT(data, event, id);
+            SSEvent evt = SSE_EVENT_INIT(ss_from_cstr(msg), SS_LIT("message"), ss_from_cstr(msg_id));
             conn_send_event(conn, &evt);
             total--;
-            usleep(1000);
+            usleep(1000);  // 1 ms between events
         }
     });
 }
 
+/* =========================================================================
+ * Chunked transfer encoding
+ * Exercises the chunked-transfer path with varied payload sizes and a live
+ * file stream.  Each test case is self-contained in its own block scope.
+ * ========================================================================= */
 void chunked_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     WITH_CHUNKED_TRANSFER(conn, {
-        // Test case 1: Large single chunk (2KB)
+        // ── Case 1: 2 KB of repeated 'A' characters ──────────────────────
         {
             char large_data[2048];
             memset(large_data, 'A', sizeof(large_data) - 1);
             large_data[sizeof(large_data) - 1] = '\0';
-
-            conn_write_chunk(conn, large_data, strlen(large_data));
-            usleep(100000);  // 100ms delay
+            conn_write_chunk(conn, large_data, sizeof(large_data) - 1);
+            usleep(100000);  // 100 ms
         }
 
-        // Test case 2: Multi-line text chunk (4KB)
+        // ── Case 2: 20 long lines of text (~4 KB) ────────────────────────
         {
             char multi_line[4096];
             char* pos        = multi_line;
@@ -100,8 +120,7 @@ void chunked_handler(PulsarCtx* ctx) {
             for (int i = 0; i < 20 && remaining > 100; i++) {
                 int written =
                     snprintf(pos, remaining,
-                             "Line %d: This is a very long line of text that exceeds normal "
-                             "sizes. "
+                             "Line %d: This is a very long line of text that exceeds normal sizes. "
                              "It contains repeated information to make it longer and test large "
                              "chunk handling. "
                              "Data data data data data data data data data data data data.\n",
@@ -111,12 +130,11 @@ void chunked_handler(PulsarCtx* ctx) {
                 remaining -= (size_t)written;
             }
 
-            size_t data_len = (size_t)(pos - multi_line);
-            conn_write_chunk(conn, multi_line, data_len);
+            conn_write_chunk(conn, multi_line, (size_t)(pos - multi_line));
             usleep(100000);
         }
 
-        // Test case 3: JSON payload (3KB)
+        // ── Case 3: ~3 KB JSON array of 40 user objects ──────────────────
         {
             char json_data[3072];
             int len = snprintf(json_data, sizeof(json_data),
@@ -127,11 +145,10 @@ void chunked_handler(PulsarCtx* ctx) {
                                "    \"users\": [\n",
                                time(NULL));
 
-            // Add many user objects
             for (int i = 0; i < 40 && len < (int)sizeof(json_data) - 200; i++) {
                 len += snprintf(json_data + len, sizeof(json_data) - (size_t)len,
-                                "      {\"id\": %d, \"name\": \"User%d\", \"email\": "
-                                "\"user%d@example.com\", "
+                                "      {\"id\": %d, \"name\": \"User%d\", "
+                                "\"email\": \"user%d@example.com\", "
                                 "\"active\": %s}%s\n",
                                 i, i, i, (i % 2) ? "true" : "false", (i < 39) ? "," : "");
             }
@@ -141,8 +158,8 @@ void chunked_handler(PulsarCtx* ctx) {
                             "    \"metadata\": {\n"
                             "      \"count\": 40,\n"
                             "      \"generated_by\": \"chunked_handler\",\n"
-                            "      \"description\": \"Large JSON payload for testing chunked "
-                            "transfer encoding\"\n"
+                            "      \"description\": \"Large JSON payload for testing "
+                            "chunked transfer encoding\"\n"
                             "    }\n"
                             "  }\n"
                             "}");
@@ -151,161 +168,92 @@ void chunked_handler(PulsarCtx* ctx) {
             usleep(100000);
         }
 
-        // Test case 5: Stream source file in large chunks
+        // ── Case 4: Stream this source file back to the client ────────────
+        // __FILE__ resolves to the current translation unit at compile time.
         {
             FILE* fp = fopen(__FILE__, "r");
             if (fp) {
+                defer_close_file(fp);
                 char file_chunk[4096];
                 size_t bytes_read;
                 while ((bytes_read = fread(file_chunk, 1, sizeof(file_chunk), fp)) > 0) {
                     conn_write_chunk(conn, file_chunk, bytes_read);
-                    usleep(50000);  // 50ms between file chunks
+                    usleep(50000);  // 50 ms between file chunks
                 }
-                fclose(fp);
             }
         }
 
-        // Final small chunk to signal completion
-        const char* completion = "\n=== LARGE CHUNK TESTING COMPLETED ===\n";
-        conn_write_chunk(conn, completion, strlen(completion));
+        // ── Sentinel chunk ────────────────────────────────────────────────
+        const char* done = "\n=== LARGE CHUNK TESTING COMPLETED ===\n";
+        conn_write_chunk(conn, done, strlen(done));
     });
 }
 
+/* =========================================================================
+ * Path and query parameters
+ * Demonstrates require_path_param (aborts 500 on routing bug) and
+ * query_params / DUMP_HEADERS for diagnostic output.
+ * ========================================================================= */
 void pathparams_query_params_handler(PulsarCtx* ctx) {
-    PulsarConn* conn     = ctx->conn;
-    const char* userId   = get_path_param(conn, "user_id");
-    const char* username = get_path_param(conn, "username");
-    assert(userId && username);
+    PulsarConn* conn = ctx->conn;
 
-    // Should exist, otherwise our router is broken
-    printf("Path Params: \n");
-    printf("User ID= %s and username= %s\n", userId, username);
+    // require_path_param declares the variable and aborts 500 if the router
+    // somehow failed to populate the segment — safer than assert().
+    require_path_param(user_id, conn, "user_id");
+    require_path_param(username, conn, "username");
+
+    printf("Path params — user_id=%s  username=%s\n", user_id, username);
 
     headers_t* params = query_params(conn);
-    if (params) {
-        // Check for query params.
-        printf("Query Params: \n");
-        headers_foreach(params, print_header_callback, NULL);
-    }
-    conn_writef(conn, "Your user_id is %s and username %s\n", userId, username);
+    DUMP_HEADERS(params);
+
+    conn_writef(conn, "Your user_id is %s and username %s\n", user_id, username);
 }
 
+/* =========================================================================
+ * Multipart form upload
+ * PARSE_MULTIPART_FORM handles init, boundary extraction, body parsing,
+ * and deferred cleanup in one macro call.  `body` holds the raw request
+ * body needed by multipart_save_file.
+ * ========================================================================= */
 void handle_form(PulsarCtx* ctx) {
     PulsarConn* conn   = ctx->conn;
-    char boundary[128] = {0};
-    MultipartCode code = {0};
     MultipartForm form = {0};
 
-    code = multipart_init(&form);
-    if (code != MULTIPART_OK) {
-        conn_set_status(conn, StatusBadRequest);
-        conn_write_string(conn, multipart_error(code));
-        return;
-    }
-
-    defer {
-        multipart_cleanup((MultipartForm*)&form);
-    };
-
-    StrSlice ctype = req_header_get(conn, "Content-Type");
-    if (!ss_is_valid(ctype)) {
-        conn_set_status(conn, StatusBadRequest);
-        conn_write_string(conn, "Invalid content type header");
-        return;
-    }
-
-    char* content_type = ss_to_owned_cstr(ctype);
-    if (!content_type) {
-        conn_set_status(conn, StatusInternalServerError);
-        conn_write_string(conn, "Out of memory");
-        return;
-    }
-
-    if (!parse_boundary(content_type, boundary, sizeof(boundary))) {
-        conn_set_status(conn, StatusBadRequest);
-        conn_write_string(conn, "Invalid content type header");
-        return;
-    }
-    free(content_type);
-
-    const char* body      = req_body(conn);
-    size_t content_length = req_content_len(conn);
-
-    code = multipart_parse(body, content_length, boundary, &form);
-    if (code != MULTIPART_OK) {
-        conn_set_status(conn, StatusBadRequest);
-        conn_write_string(conn, multipart_error(code));
-        return;
-    }
+    PARSE_MULTIPART_FORM(conn, &form, content_type, body);
 
     FileHeader* file = multipart_file(&form, "file");
     if (file) {
-        char dest[1024] = {0};
-        strlcat(dest, "./test_output/", sizeof(dest));
-        strlcat(dest, file->filename, sizeof(dest) - 15);
-        if (multipart_save_file(file, body, dest)) {
+        char* dst = filepath_join("test_output", file->filename);
+        defer_free(dst);
+        if (multipart_save_file(file, body.data, dst)) {
             conn_write_string(conn, "File uploaded successfully\n");
         }
     }
 }
 
+/* =========================================================================
+ * Movie player page
+ * Serves a minimal HTML page that streams an MP4 via the /static/ route.
+ * ========================================================================= */
 void serve_movie(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     const char* html =
-        "<html><body style='max-width: 1000px; margin: 20px;'><video "
-        "src='/static/FlightRisk.mp4' "
-        "controls width='720' height='480'></video></body></html>";
+        "<html><body style='max-width:1000px;margin:20px'>"
+        "<video src='/static/FlightRisk.mp4' controls width='720' height='480'>"
+        "</video></body></html>";
 
     conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, SS_LIT(HTML_TYPE));
+    conn_set_content_type(conn, SS_LIT("text/html"));
     conn_write_string(conn, html);
 }
 
-/* -------------------------------------------------------------------------
- * Callback — hot path, no syscalls
- * ---------------------------------------------------------------------- */
-static PlogState g_log;  // Lives for the duration of the process
-static int enable_logging = 0;
-
-void pulsar_callback(PulsarCtx* ctx, uint64_t total_ns) {
-    if (!enable_logging) return;
-
-    PulsarConn* conn        = ctx->conn;
-    const char* method      = req_method(conn);
-    const char* path        = req_path(conn);
-    http_status status_code = res_get_status(conn);
-    StrSlice user_agent     = req_header_get(conn, "User-Agent");
-    if (!ss_is_valid(user_agent)) {
-        user_agent = SS_LIT("-");
-    }
-
-    /* Format latency with the most readable unit. */
-    char latency_str[24];
-    if (total_ns < 1000) {
-        snprintf(latency_str, sizeof(latency_str), "%3" PRIu64 "ns", total_ns);
-    } else if (total_ns < 1000000) {
-        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "µs", total_ns / 1000);
-    } else if (total_ns < 1000000000) {
-        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "ms", total_ns / 1000000);
-    } else if (total_ns < UINT64_C(60000000000)) {
-        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "s", total_ns / 1000000000);
-    } else {
-        snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "m",
-                 total_ns / UINT64_C(60000000000));
-    }
-
-    /*
-     * Build the full log line on the stack.  snprintf + plog_submit is the
-     * entire hot-path cost — no locks, no syscalls.
-     */
-    char line[PLOG_LINE_MAX];
-    int n = snprintf(line, sizeof(line), "[Pulsar] %-7s %-5s %3d %8s %.*s\n", method, path,
-                     (int)status_code, latency_str, (int)user_agent.len, user_agent.data);
-    if (n > 0) {
-        plog_submit(&g_log, line, (uint32_t)n);
-    }
-}
-
+/* =========================================================================
+ * Middleware pair — context value passing
+ * mw1 allocates a string in the connection arena and stores it under "name".
+ * mw2 retrieves and validates it.  Together they demonstrate pulsar_set /
+ * pulsar_get and the arena-backed pulsar_strdup pattern.
+ * ========================================================================= */
 void mw1(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     char* name       = pulsar_strdup(conn, "PULSAR");
@@ -315,23 +263,25 @@ void mw1(PulsarCtx* ctx) {
 void mw2(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     char* name       = pulsar_get(conn, "name");
-    assert(name && "name is NULL");
+
+    // This assert is intentional: mw2 must never run without mw1 preceding
+    // it in the middleware chain.  A routing misconfiguration is a programmer
+    // error, not a recoverable runtime condition.
+    assert(name && "mw2: 'name' key missing — ensure mw1 runs before mw2");
     (void)name;
 }
 
-int main() {
-    // int fd = open("pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    // Initialiaze logger bg thread
-    if (!plog_init(&g_log, STDOUT_FILENO)) {
-        return -1;
-    }
+/* =========================================================================
+ * Entry point
+ * ========================================================================= */
+int main(void) {
+    // Attach the built-in access logger; writes combined-log lines to stdout.
+    pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
-    // Set post-request callback handler.
-    // pulsar_set_callback(pulsar_callback);
-
-    // Register routes using the new API
+    // ── Route table ───────────────────────────────────────────────────────
     route_register("/", HTTP_GET, hello_world_handler);
 
+    // Attach middleware to /hello — mw1 must precede mw2.
     route_t* hello   = route_get("/hello", hello_world_handler);
     Middleware mw[2] = {mw1, mw2};
     use_route_middleware(hello, mw, 2);
@@ -340,19 +290,13 @@ int main() {
     route_get("/sse", sse_handler);
     route_get("/chunked", chunked_handler);
     route_get("/echo", echo_handler);
-    route_get("/params/{user_id}/{username}", pathparams_query_params_handler);
     route_post("/echo", echo_handler);
+    route_get("/params/{user_id}/{username}", pathparams_query_params_handler);
     route_post("/form", handle_form);
     route_get("/movie", serve_movie);
+
+    // Serve everything under ./ at the /static/ prefix.
     route_static("/static/", "./");
 
-    int rc = pulsar_run("localhost", 8080);
-
-    /* Flush and stop the drain thread before exit. */
-    plog_destroy(&g_log);
-    uint64_t drops = plog_drop_count(&g_log);
-    if (drops > 0) {
-        fprintf(stderr, "[plog] warning: %" PRIu64 " log entries dropped under load\n", drops);
-    }
-    return rc;
+    return pulsar_run("localhost", 8080);
 }
