@@ -76,7 +76,7 @@
 
 /** Maximum iovec entries per writev(2) batch.  POSIX guarantees >= 16. */
 #ifndef PLOG_BATCH_MAX
-#define PLOG_BATCH_MAX 128
+#define PLOG_BATCH_MAX 256
 #endif
 
 _Static_assert((PLOG_RING_CAPACITY & (PLOG_RING_CAPACITY - 1)) == 0,
