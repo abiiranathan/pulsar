@@ -93,9 +93,17 @@
     const char* var = get_path_param((conn), (key)); \
     abort_if_lit((var) == NULL, (conn), StatusBadRequest, "missing required path parameter: " key)
 
-#define require_query_param(var, conn, key)       \
-    const char* var = query_param((conn), (key)); \
-    abort_if_lit((var) == NULL, (conn), StatusBadRequest, "missing required query parameter: " key)
+// Fetch a query string slice
+#define require_query(var, conn, key)        \
+    StrSlice var = query_get((conn), (key)); \
+    abort_if_lit(!ss_is_valid((var)), (conn), StatusBadRequest, "missing required query parameter: " key)
+
+// Allocate a proper null-terminated query on heap and return a valid pointer.
+#define require_query_alloc(var, conn, key)                                                        \
+    StrSlice query_ss = query_get((conn), (key));                                                  \
+    abort_if_lit(!ss_is_valid((query_ss)), (conn), StatusBadRequest,                               \
+                 "missing required query parameter: " key) char* var = ss_to_owned_cstr(query_ss); \
+    abort_if_nullptr((var), conn, "memory alloc failed for query string: " key)
 
 #define defer_form_cleanup(form)                   \
     defer {                                        \
@@ -129,7 +137,7 @@
     };                                                                                                  \
     abort_if_lit(!parse_boundary(ct_var, boundary_buf, sizeof(boundary_buf)), (conn), StatusBadRequest, \
                  "invalid or missing multipart boundary");                                              \
-    StrSlice body_var = req_body(conn);                                                                 \
+    StrSlice body_var = req_body_slice(conn);                                                           \
     MultipartCode mc2 = multipart_parse(body_var.data, body_var.len, boundary_buf, (form_ptr));         \
     const char* me2 = multipart_error(mc2);                                                             \
     abort_if(mc2 != MULTIPART_OK, (conn), StatusBadRequest, me2, strlen(me2))

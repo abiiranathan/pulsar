@@ -9,7 +9,6 @@
 #include "locals.h"
 #include "routing.h"
 #include "status.h"
-#include "types.h"
 #include "url.h"
 
 extern volatile sig_atomic_t server_running;
@@ -154,12 +153,10 @@ void* pulsar_alloc(PulsarConn* conn, size_t size);
  * is NULL.
  */
 static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
-    if (str == NULL) {
-        return NULL;
-    }
+    if (str == NULL) { return NULL; }
 
     size_t len = strlen(str);
-    char* dup  = pulsar_alloc(conn, len + 1);
+    char* dup = pulsar_alloc(conn, len + 1);
     if (dup != NULL) {
         memcpy(dup, str, len + 1);  // includes terminating NUL
     }
@@ -181,15 +178,11 @@ static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
  */
 static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
     /* Guard against overflow in nmemb * size */
-    if (nmemb != 0 && size > SIZE_MAX / nmemb) {
-        return NULL;
-    }
+    if (nmemb != 0 && size > SIZE_MAX / nmemb) { return NULL; }
 
     size_t total = nmemb * size;
-    void* ptr    = pulsar_alloc(conn, total);
-    if (ptr != NULL) {
-        memset(ptr, 0, total);
-    }
+    void* ptr = pulsar_alloc(conn, total);
+    if (ptr != NULL) { memset(ptr, 0, total); }
     return ptr;
 }
 
@@ -217,26 +210,18 @@ static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
  */
 static inline void* pulsar_realloc(PulsarConn* conn, void* ptr, size_t old_size, size_t new_size) {
     /* Handle NULL ptr as pure allocation */
-    if (ptr == NULL) {
-        return pulsar_alloc(conn, new_size);
-    }
+    if (ptr == NULL) { return pulsar_alloc(conn, new_size); }
 
     /* Guard against overflow when comparing sizes */
-    if (new_size > SIZE_MAX) {
-        return NULL;
-    }
+    if (new_size > SIZE_MAX) { return NULL; }
 
     void* new_ptr = pulsar_alloc(conn, new_size);
-    if (new_ptr == NULL) {
-        return NULL;
-    }
+    if (new_ptr == NULL) { return NULL; }
 
     /* Determine how many bytes to copy: the minimum of old_size and new_size */
     size_t copy_size = old_size < new_size ? old_size : new_size;
 
-    if (copy_size > 0) {
-        memcpy(new_ptr, ptr, copy_size);
-    }
+    if (copy_size > 0) { memcpy(new_ptr, ptr, copy_size); }
     return new_ptr;
 }
 
@@ -390,8 +375,7 @@ void conn_send_xml(PulsarConn* conn, http_status status, const char* xml, size_t
  * @param javascript Null-terminated JS string
  * @param length Length of response body
  */
-void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript,
-                          size_t length);
+void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript, size_t length);
 
 /**
  * @brief Sends a CSS response
@@ -528,12 +512,20 @@ bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t d
 http_status res_get_status(PulsarConn* conn);
 
 /**
+ * @brief Gets the request body data. 
+ * 
+ * @param conn The connection object
+ * @return const char* request body or NULL if none
+ */
+char* req_body(PulsarConn* conn);
+
+/**
  * @brief Gets the request body string slice. 
  * 
  * @param conn The connection object
- * @return const char* Request body or NULL if none
+ * @return Request body slice or NULL if none
  */
-StrSlice req_body(PulsarConn* conn);
+StrSlice req_body_slice(PulsarConn* conn);
 
 /**
  * @brief Gets the request method
@@ -560,22 +552,23 @@ const char* req_path(PulsarConn* conn);
  */
 const char* get_path_param(PulsarConn* conn, const char* name);
 
-/**
- * @brief Attaches user data to a connection
- *
- * @param conn The connection object
- * @param ptr User data pointer
- * @param free_func Optional cleanup function
- */
-void set_userdata(PulsarConn* conn, void* ptr, void (*free_func)(void* ptr));
+// Read-Only request data.
+typedef struct Request {
+    const char* path;           // Request path
+    const char* method;         // HTTP method (GET, POST etc.)
+    StrSlice body;              // Request body. The body.data ptr is guaranteed to be NULL-terminated.
+    const char* route_pattern;  // Matched route pattern(has static lifetime)
+} Request;
 
 /**
- * @brief Gets user data from connection
- *
- * @param conn The connection object
- * @return void* User data pointer or NULL
+ * @brief Populates all the request metadata.
+ *  Must not be modified by the caller.
+ * @param req Pointer to Request structure and must be a valid pointer.
  */
-void* get_userdata(PulsarConn* conn);
+Request conn_get_request_metadata(PulsarConn* conn);
+
+// Our structure are defined.
+#define PulsarConnDef 1
 
 #ifdef __cplusplus
 }

@@ -1,10 +1,11 @@
 #include <inttypes.h>        // for PRIu64
+#include <solidc/filepath.h>
 #include <string.h>          // for strlen, memset
 #include <time.h>            // for time()
 #include <unistd.h>          // for usleep
 
 #include "include/error.h"   // abort_if*, require_path_param, defer_*, PARSE_MULTIPART_FORM
-#include "include/forms.h"   // MultipartForm, multipart_file, multipart_save_file
+#include "include/forms.h"   // MultipartForm processing.
 #include "include/pulsar.h"  // PulsarCtx, PulsarConn, route_*, pulsar_run, conn_*, req_*
 
 /* =========================================================================
@@ -43,16 +44,15 @@ void json_handler(PulsarCtx* ctx) {
  * and flushes when the handler returns.
  * ========================================================================= */
 void echo_handler(PulsarCtx* ctx) {
-    const char *method, *path;
-    StrSlice body;
-
     PulsarConn* conn = ctx->conn;
+
+    Request req = conn_get_request_metadata(conn);
+    const char* method = req.method;
+    const char* path = req.path;
+    StrSlice body = req.body;
+
     conn_set_status(conn, StatusOK);
     conn_set_content_type(conn, SS_LIT("text/plain"));
-
-    method = req_method(conn);
-    path = req_path(conn);
-    body = req_body(conn);
 
     conn_write(conn, "Method: ", 8);
     conn_write(conn, method, strlen(method));
@@ -205,6 +205,13 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
 
     headers_t* params = query_params(conn);
     DUMP_HEADERS(params);
+
+    // // Required query parameter
+    // require_query(query, conn, "q");         // Returns a slice (no alloc)
+    // require_query_alloc(query2, conn, "q");  // allocates
+    // printf("query: %s\n", query);
+    // printf("query2: %s\n", query2);
+    // free(query2);
 
     conn_writef(conn, "Your user_id is %s and username %s\n", user_id, username);
 }

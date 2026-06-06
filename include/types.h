@@ -1,6 +1,10 @@
 #ifndef __PULSAR_TYPES_H__
 #define __PULSAR_TYPES_H__
 
+#if !defined(ALLOW_PULSAR_TYPES) || defined(PulsarConnDef)
+#error "<pulsar/types.h> should not be included directly. Include <pulsar/pulsar.h> instead!"
+#endif
+
 #define _FILE_OFFSET_BITS 64
 
 #include <arpa/inet.h>
@@ -53,7 +57,7 @@ typedef enum {
 #define CLR_WRITE_PENDING(flags) ((flags) &= ~HTTP_WRITE_PENDING)
 
 // HTTP Response structure
-typedef struct response_t {
+struct response_t {
     // 8-Byte Fields
     size_t body_len;       // Actual length of body
     size_t body_capacity;  // Capacity of body buffer
@@ -82,10 +86,10 @@ typedef struct response_t {
         uint8_t stack[STACK_BUFFER_SIZE];  // Stack buffer for smaller responses
         uint8_t* heap;                     // Dynamically allocated body buffer (aligned)
     } body;                                // Response body
-} response_t;
+};
 
 // HTTP Request structure
-typedef struct request_t {
+struct request_t {
     char* path;               // Request path (arena allocated)
     char method[8];           // HTTP method (GET, POST etc.)
     HttpMethod method_type;   // MethodType Enum
@@ -94,21 +98,21 @@ typedef struct request_t {
     headers_t* headers;       // Request headers
     headers_t* query_params;  // Query parameters
     struct route_t* route;    // Matched route (has static lifetime)
-} request_t;
+};
 
 // Connection state structure
 struct pulsar_conn {
-    int client_fd;                    // Client socket file descriptor
-    char* read_buf;                   // Buffer for incoming data.
-    Locals locals;                    // Per-request context variables set by the user.
-    struct request_t request;         // HTTP request data (arena allocated)
-    response_t response;              // HTTP response data (arena allocated)
-    Arena* arena;                     // Memory arena for allocations
+    int client_fd;                                   // Client socket file descriptor
+    char* read_buf;                                  // Buffer for incoming data.
+    Locals locals;                                   // Per-request context variables set by the user.
+    struct request_t request;                        // HTTP request data (arena allocated)
+    struct response_t response;                      // HTTP response data (arena allocated)
+    Arena* arena;                                    // Memory arena for allocations
 #if ENABLE_LOGGING
-    struct timespec start;            // Timestamp of first request
+    struct timespec start;                           // Timestamp of first request
 #endif
-    time_t last_activity;             // Timestamp of last I/O activity
-    struct pulsar_conn *next, *prev;  // Linked list nodes for keep-alive tracking.
+    time_t last_activity;                            // Timestamp of last I/O activity
+    struct pulsar_conn *next, *prev;                 // Linked list nodes for keep-alive tracking.
     bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
     int worker_id;                                   // ID of the current worker running the thread.
 };

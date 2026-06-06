@@ -90,7 +90,7 @@ target_include_directories(pulsar_objects
 )
 
 target_compile_definitions(pulsar_objects
-    PUBLIC DA_IMPLEMENTATION _GNU_SOURCE
+    PUBLIC _GNU_SOURCE
 )
 
 target_compile_options(pulsar_objects PRIVATE
