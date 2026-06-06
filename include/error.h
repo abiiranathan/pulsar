@@ -41,6 +41,8 @@
 #define abort_if_lit(condition, conn, status_code, literal) \
     abort_if((condition), (conn), (status_code), (literal), (sizeof(literal) - 1))
 
+#define abort_if_nullptr(ptr, conn, literal) abort_if_lit(ptr == NULL, conn, StatusInternalServerError, literal)
+
 /* =========================================================================
  * §2  Convenience abort macros for common HTTP status codes
  * =========================================================================
@@ -68,15 +70,12 @@
 #define abort_404_msg(conn, msg, len) abort_if(true, (conn), StatusNotFound, (msg), (len))
 #define abort_405_msg(conn, msg, len) abort_if(true, (conn), StatusMethodNotAllowed, (msg), (len))
 #define abort_409_msg(conn, msg, len) abort_if(true, (conn), StatusConflict, (msg), (len))
-#define abort_413_msg(conn, msg, len) \
-    abort_if(true, (conn), StatusRequestEntityTooLarge, (msg), (len))
-#define abort_422_msg(conn, msg, len) \
-    abort_if(true, (conn), StatusUnprocessableEntity, (msg), (len))
-#define abort_500_msg(conn, msg, len) \
-    abort_if(true, (conn), StatusInternalServerError, (msg), (len))
+#define abort_413_msg(conn, msg, len) abort_if(true, (conn), StatusRequestEntityTooLarge, (msg), (len))
+#define abort_422_msg(conn, msg, len) abort_if(true, (conn), StatusUnprocessableEntity, (msg), (len))
+#define abort_500_msg(conn, msg, len) abort_if(true, (conn), StatusInternalServerError, (msg), (len))
 
 /* =========================================================================
- * §3  Path-parameter extraction with built-in null guard
+ * §3  Path-parameter and query parameter extraction with built-in null guard
  * =========================================================================
  *
  * require_path_param(var, conn, key)
@@ -90,34 +89,13 @@
  *     require_path_param(user_id,  conn, "user_id");
  *     require_path_param(username, conn, "username");
  */
-#define require_path_param(var, conn, key)                         \
-    const char* var = get_path_param((conn), (key));               \
-    abort_if_lit((var) == NULL, (conn), StatusInternalServerError, \
-                 "missing required path parameter: " key)
+#define require_path_param(var, conn, key)           \
+    const char* var = get_path_param((conn), (key)); \
+    abort_if_lit((var) == NULL, (conn), StatusBadRequest, "missing required path parameter: " key)
 
-/* =========================================================================
- * §8  RAII resource-cleanup macros
- * =========================================================================
- *
- * defer_free(var)         — free a malloc'd pointer at scope exit.
- * defer_close_file(f)     — fclose a FILE* at scope exit (NULL-safe).
- * defer_close_fd(fd)      — close a file descriptor at scope exit (-1-safe).
- * defer_form_cleanup(form)— multipart_cleanup a MultipartForm* at scope exit.
- */
-#define defer_free(var) \
-    defer {             \
-        free((var));    \
-    }
-
-#define defer_close_file(f)          \
-    defer {                          \
-        if ((f)) fclose((FILE*)(f)); \
-    }
-
-#define defer_close_fd(fd)           \
-    defer {                          \
-        if ((fd) != -1) close((fd)); \
-    }
+#define require_query_param(var, conn, key)       \
+    const char* var = query_param((conn), (key)); \
+    abort_if_lit((var) == NULL, (conn), StatusBadRequest, "missing required query parameter: " key)
 
 #define defer_form_cleanup(form)                   \
     defer {                                        \
@@ -139,19 +117,19 @@
  *     printf("Content-Type: %s\n", content_type);
  *     printf("Body length:  %zu\n", body.len);
  */
-#define PARSE_MULTIPART_FORM(conn, form_ptr, ct_var, body_var)                                  \
-    char boundary_buf[256] = {0};                                                               \
-    MultipartCode mc       = multipart_init((form_ptr));                                        \
-    const char* me         = multipart_error(mc);                                               \
-    abort_if(mc != MULTIPART_OK, (conn), StatusBadRequest, me, strlen(me));                     \
-    defer_form_cleanup(form_ptr);                                                               \
-    char* ct_var = ss_to_owned_cstr(req_header_get((conn), "Content-Type"));                    \
-    defer {                                                                                     \
-        free(ct_var);                                                                           \
-    };                                                                                          \
-    abort_if_lit(!parse_boundary(ct_var, boundary_buf, sizeof(boundary_buf)), (conn),           \
-                 StatusBadRequest, "invalid or missing multipart boundary");                    \
-    StrSlice body_var = req_body(conn);                                                         \
-    MultipartCode mc2 = multipart_parse(body_var.data, body_var.len, boundary_buf, (form_ptr)); \
-    const char* me2   = multipart_error(mc2);                                                   \
+#define PARSE_MULTIPART_FORM(conn, form_ptr, ct_var, body_var)                                          \
+    char boundary_buf[256] = {0};                                                                       \
+    MultipartCode mc = multipart_init((form_ptr));                                                      \
+    const char* me = multipart_error(mc);                                                               \
+    abort_if(mc != MULTIPART_OK, (conn), StatusBadRequest, me, strlen(me));                             \
+    defer_form_cleanup(form_ptr);                                                                       \
+    char* ct_var = ss_to_owned_cstr(req_header_get((conn), "Content-Type"));                            \
+    defer {                                                                                             \
+        free(ct_var);                                                                                   \
+    };                                                                                                  \
+    abort_if_lit(!parse_boundary(ct_var, boundary_buf, sizeof(boundary_buf)), (conn), StatusBadRequest, \
+                 "invalid or missing multipart boundary");                                              \
+    StrSlice body_var = req_body(conn);                                                                 \
+    MultipartCode mc2 = multipart_parse(body_var.data, body_var.len, boundary_buf, (form_ptr));         \
+    const char* me2 = multipart_error(mc2);                                                             \
     abort_if(mc2 != MULTIPART_OK, (conn), StatusBadRequest, me2, strlen(me2))

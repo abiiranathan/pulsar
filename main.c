@@ -32,7 +32,7 @@ void hello_world_handler(PulsarCtx* ctx) {
  * ========================================================================= */
 void json_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    char json[]      = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
+    char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
     conn_send_json(conn, StatusOK, json, sizeof(json) - 1);
 }
 
@@ -51,8 +51,8 @@ void echo_handler(PulsarCtx* ctx) {
     conn_set_content_type(conn, SS_LIT("text/plain"));
 
     method = req_method(conn);
-    path   = req_path(conn);
-    body   = req_body(conn);
+    path = req_path(conn);
+    body = req_body(conn);
 
     conn_write(conn, "Method: ", 8);
     conn_write(conn, method, strlen(method));
@@ -114,17 +114,16 @@ void chunked_handler(PulsarCtx* ctx) {
         // ── Case 2: 20 long lines of text (~4 KB) ────────────────────────
         {
             char multi_line[4096];
-            char* pos        = multi_line;
+            char* pos = multi_line;
             size_t remaining = sizeof(multi_line) - 1;
 
             for (int i = 0; i < 20 && remaining > 100; i++) {
-                int written =
-                    snprintf(pos, remaining,
-                             "Line %d: This is a very long line of text that exceeds normal sizes. "
-                             "It contains repeated information to make it longer and test large "
-                             "chunk handling. "
-                             "Data data data data data data data data data data data data.\n",
-                             i);
+                int written = snprintf(pos, remaining,
+                                       "Line %d: This is a very long line of text that exceeds normal sizes. "
+                                       "It contains repeated information to make it longer and test large "
+                                       "chunk handling. "
+                                       "Data data data data data data data data data data data data.\n",
+                                       i);
                 if (written >= (int)remaining) break;
                 pos += written;
                 remaining -= (size_t)written;
@@ -171,9 +170,9 @@ void chunked_handler(PulsarCtx* ctx) {
         // ── Case 4: Stream this source file back to the client ────────────
         // __FILE__ resolves to the current translation unit at compile time.
         {
-            FILE* fp = fopen(__FILE__, "r");
+            DEFER_VAR FILE* fp = fopen(__FILE__, "r");
             if (fp) {
-                defer_close_file(fp);
+                defer_fclose(fp);
                 char file_chunk[4096];
                 size_t bytes_read;
                 while ((bytes_read = fread(file_chunk, 1, sizeof(file_chunk), fp)) > 0) {
@@ -217,18 +216,16 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
  * body needed by multipart_save_file.
  * ========================================================================= */
 void handle_form(PulsarCtx* ctx) {
-    PulsarConn* conn   = ctx->conn;
+    PulsarConn* conn = ctx->conn;
     MultipartForm form = {0};
 
     PARSE_MULTIPART_FORM(conn, &form, content_type, body);
 
     FileHeader* file = multipart_file(&form, "file");
     if (file) {
-        char* dst = filepath_join("test_output", file->filename);
+        DEFER_VAR char* dst = filepath_join("test_output", file->filename);
         defer_free(dst);
-        if (multipart_save_file(file, body.data, dst)) {
-            conn_write_string(conn, "File uploaded successfully\n");
-        }
+        if (multipart_save_file(file, body.data, dst)) { conn_write_string(conn, "File uploaded successfully\n"); }
     }
 }
 
@@ -256,13 +253,13 @@ void serve_movie(PulsarCtx* ctx) {
  * ========================================================================= */
 void mw1(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    char* name       = pulsar_strdup(conn, "PULSAR");
+    char* name = pulsar_strdup(conn, "PULSAR");
     pulsar_set(conn, "name", name, NULL);
 }
 
 void mw2(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    char* name       = pulsar_get(conn, "name");
+    char* name = pulsar_get(conn, "name");
 
     // This assert is intentional: mw2 must never run without mw1 preceding
     // it in the middleware chain.  A routing misconfiguration is a programmer
@@ -282,7 +279,7 @@ int main(void) {
     route_register("/", HTTP_GET, hello_world_handler);
 
     // Attach middleware to /hello — mw1 must precede mw2.
-    route_t* hello   = route_get("/hello", hello_world_handler);
+    route_t* hello = route_get("/hello", hello_world_handler);
     Middleware mw[2] = {mw1, mw2};
     use_route_middleware(hello, mw, 2);
 
