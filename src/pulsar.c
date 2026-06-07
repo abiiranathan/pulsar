@@ -1308,6 +1308,14 @@ void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns) {
 bool pulsar_set(PulsarConn* conn, const char* k, void* v, ValueFreeFunc ff) {
     return LocalsSetValue(&conn->locals, k, v, ff);
 }
+
+// Get a thread-safe arena for this connection.
+// It's lifetime is tied to the handler and will be reset or destroyed when
+// the handler returns.
+Arena* pulsar_get_arena(PulsarConn* conn) {
+    return conn->arena;
+}
+
 void* pulsar_alloc(PulsarConn* conn, size_t sz) {
     return arena_alloc(conn->arena, sz);
 }

@@ -163,6 +163,12 @@ static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
     return dup;
 }
 
+// Get a thread-safe arena for this connection.
+// It's lifetime is tied to the handler and will be reset or destroyed when
+// the handler returns. Use this if you are building custom allocators for other
+// libs like yyjson e.t.c.
+Arena* pulsar_get_arena(PulsarConn* conn);
+
 /**
  * @brief Allocate an array of 'nmemb' elements of 'size' bytes each using the
  * request-scoped arena.
