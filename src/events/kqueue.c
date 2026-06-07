@@ -1,8 +1,7 @@
 #include <sys/time.h> /* struct timespec */
 #include "../include/events.h"
 
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
-    defined(__DragonFly__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
 
 int event_queue_create(void) {
     return kqueue();
@@ -52,9 +51,9 @@ int event_wait(int queue_fd, event_t* events, int max_events, int timeout_ms) {
     struct timespec* ts_ptr = NULL;
 
     if (timeout_ms >= 0) {
-        ts.tv_sec  = timeout_ms / 1000;
+        ts.tv_sec = timeout_ms / 1000;
         ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
-        ts_ptr     = &ts;
+        ts_ptr = &ts;
     }
     return kevent(queue_fd, NULL, 0, &events[0], max_events, ts_ptr);
 }

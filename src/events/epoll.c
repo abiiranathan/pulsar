@@ -8,7 +8,7 @@ int event_queue_create(void) {
 
 int event_add_read(int queue_fd, int fd, void* data) {
     struct epoll_event ev = {
-        .events   = EPOLLIN | EPOLLET | EPOLLRDHUP,
+        .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
         .data.ptr = data,
     };
     return epoll_ctl(queue_fd, EPOLL_CTL_ADD, fd, &ev);
@@ -18,7 +18,7 @@ int event_add_server(int queue_fd, int server_fd) {
     /* EPOLLEXCLUSIVE ensures only one thread is woken per accept()
      * opportunity, avoiding the thundering-herd problem on Linux 4.5+. */
     struct epoll_event ev = {
-        .events  = EPOLLIN | EPOLLEXCLUSIVE,
+        .events = EPOLLIN | EPOLLEXCLUSIVE,
         .data.fd = server_fd,
     };
     return epoll_ctl(queue_fd, EPOLL_CTL_ADD, server_fd, &ev);
@@ -31,7 +31,7 @@ int event_delete(int queue_fd, int fd) {
 
 int event_mod_write(int queue_fd, int fd, void* data) {
     struct epoll_event ev = {
-        .events   = EPOLLOUT | EPOLLET,
+        .events = EPOLLOUT | EPOLLET,
         .data.ptr = data,
     };
     return epoll_ctl(queue_fd, EPOLL_CTL_MOD, fd, &ev);
@@ -39,7 +39,7 @@ int event_mod_write(int queue_fd, int fd, void* data) {
 
 int event_mod_read(int queue_fd, int fd, void* data) {
     struct epoll_event ev = {
-        .events   = EPOLLIN | EPOLLET | EPOLLRDHUP,
+        .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
         .data.ptr = data,
     };
     return epoll_ctl(queue_fd, EPOLL_CTL_MOD, fd, &ev);

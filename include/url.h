@@ -12,14 +12,10 @@ INLINE bool is_malicious_path(const char* path) {
     // List of dangerous patterns
     static const char* patterns[] = {"../", "/./", "\\", "//", "/~", "%2e%2e", NULL};
     for (int i = 0; patterns[i]; i++) {
-        if (strstr(path, patterns[i])) {
-            return true;
-        }
+        if (strstr(path, patterns[i])) { return true; }
     }
     // Check for URL-encoded characters(\\x).
-    if (strstr(path, "\\x")) {
-        return true;
-    }
+    if (strstr(path, "\\x")) { return true; }
     return false;
 }
 
@@ -37,9 +33,9 @@ static const uint8_t hex_valid_table[256] = {
     ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
 };
 
-static inline size_t url_percent_decode(const char* __restrict__ src, char* __restrict__ dst,
-                                        size_t src_len, size_t dst_size) {
-    char* dst_start     = dst;                 // Remember starting position
+static inline size_t url_percent_decode(const char* __restrict__ src, char* __restrict__ dst, size_t src_len,
+                                        size_t dst_size) {
+    char* dst_start = dst;                     // Remember starting position
     const char* dst_end = dst + dst_size - 1;  // reserve space for '\0';
     const char* src_end = src + src_len;       // avoids NULL termination assumption
 
@@ -55,7 +51,7 @@ static inline size_t url_percent_decode(const char* __restrict__ src, char* __re
         // Copy the run of normal characters
         size_t run_length = (size_t)(src - run_start);
         if (run_length > 0) {
-            size_t space_left  = (size_t)(dst_end - dst);
+            size_t space_left = (size_t)(dst_end - dst);
             size_t copy_length = run_length < space_left ? run_length : space_left;
 
             memcpy(dst, run_start, copy_length);

@@ -79,8 +79,7 @@
 #define PLOG_BATCH_MAX 256
 #endif
 
-_Static_assert((PLOG_RING_CAPACITY & (PLOG_RING_CAPACITY - 1)) == 0,
-               "PLOG_RING_CAPACITY must be a power of two");
+_Static_assert((PLOG_RING_CAPACITY & (PLOG_RING_CAPACITY - 1)) == 0, "PLOG_RING_CAPACITY must be a power of two");
 _Static_assert(PLOG_LINE_MAX > 0, "PLOG_LINE_MAX must be positive");
 _Static_assert(PLOG_BATCH_MAX > 0, "PLOG_BATCH_MAX must be positive");
 
@@ -91,7 +90,7 @@ _Static_assert(PLOG_BATCH_MAX > 0, "PLOG_BATCH_MAX must be positive");
 /** Slot state: FREE means available to a producer; READY means written and
  *  waiting for the drain thread. */
 typedef enum {
-    PLOG_SLOT_FREE  = 0, /* available for a new producer             */
+    PLOG_SLOT_FREE = 0,  /* available for a new producer             */
     PLOG_SLOT_READY = 1, /* written, waiting to be drained           */
 } PlogSlotState;
 
@@ -200,20 +199,18 @@ static void* plog__drain_thread(void* arg) {
         if (shutting_down) break;
 
     drain_batch:;
-        int batch    = 0;
+        int batch = 0;
         uint64_t seq = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
 
         while (batch < PLOG_BATCH_MAX) {
-            size_t idx     = plog__idx(seq + (uint64_t)batch);
+            size_t idx = plog__idx(seq + (uint64_t)batch);
             PlogSlot* slot = &lg->ring[idx];
 
             /* Peek slot readiness. No CAS on slot read to minimize RMW cycles. */
-            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) {
-                break;
-            }
+            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) { break; }
 
             iov[batch].iov_base = slot->line;
-            iov[batch].iov_len  = slot->len;
+            iov[batch].iov_len = slot->len;
             batch++;
         }
 
@@ -239,17 +236,15 @@ static void* plog__drain_thread(void* arg) {
     while (true) {
         uint64_t seq = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
         uint64_t end = atomic_load_explicit(&lg->prod_seq, memory_order_acquire);
-        if (seq == end) {
-            break;
-        }
+        if (seq == end) { break; }
 
         int batch = 0;
         while (seq + (uint64_t)batch < end && batch < PLOG_BATCH_MAX) {
-            size_t idx     = plog__idx(seq + (uint64_t)batch);
+            size_t idx = plog__idx(seq + (uint64_t)batch);
             PlogSlot* slot = &lg->ring[idx];
             if (atomic_load_explicit(&slot->state, memory_order_acquire) == PLOG_SLOT_READY) {
                 iov[batch].iov_base = slot->line;
-                iov[batch].iov_len  = slot->len;
+                iov[batch].iov_len = slot->len;
                 batch++;
             } else {
                 break;
@@ -286,7 +281,7 @@ static void* plog__drain_thread(void* arg) {
  * @note   Not thread-safe.  Call once before any plog_submit().
  */
 static inline bool plog_init(PlogState* lg, int out_fd) {
-    *lg        = (PlogState){0};
+    *lg = (PlogState){0};
     lg->out_fd = out_fd;
 
     lock_init(&lg->mu);
@@ -331,13 +326,13 @@ static inline void plog_submit(PlogState* lg, const char* buf, uint32_t len) {
 
         /* Try to claim our sequence number. On failure, 'prod' is automatically 
          * updated to the latest 'prod_seq' value, and we loop back. */
-        if (atomic_compare_exchange_weak_explicit(&lg->prod_seq, &prod, prod + 1,
-                                                  memory_order_relaxed, memory_order_relaxed)) {
+        if (atomic_compare_exchange_weak_explicit(&lg->prod_seq, &prod, prod + 1, memory_order_relaxed,
+                                                  memory_order_relaxed)) {
             break;
         }
     }
 
-    size_t idx     = plog__idx(prod);
+    size_t idx = plog__idx(prod);
     PlogSlot* slot = &lg->ring[idx];
 
     /* Slot is exclusively ours. Copy raw payload. */

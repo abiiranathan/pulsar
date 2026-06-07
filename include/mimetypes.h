@@ -121,16 +121,14 @@ static MimeEntry mime_entries[] = {
     // Documents
     {.ext = "pdf", .mimetype = SS_LIT("application/pdf")},
     {.ext = "doc", .mimetype = SS_LIT("application/msword")},
-    {.ext      = "docx",
-     .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    {.ext = "docx", .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
     {
         .ext = "pptx",
-        .mimetype =
-            SS_LIT("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
     },
     {.ext = "xls", .mimetype = SS_LIT("application/vnd.ms-excel")},
     {
-        .ext      = "xlsx",
+        .ext = "xlsx",
         .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     },
     {.ext = "odt", .mimetype = SS_LIT("application/vnd.oasis.opendocument.text")},
@@ -356,9 +354,9 @@ static unsigned int hash_func(const char* str) {
 // get_mimetype.
 static inline void init_mimetypes() {
     for (size_t i = 0; i < MIME_MAPPING_SIZE; i++) {
-        unsigned int hash    = hash_func(mime_entries[i].ext);
+        unsigned int hash = hash_func(mime_entries[i].ext);
         mime_entries[i].next = hash_table[hash];
-        hash_table[hash]     = &mime_entries[i];
+        hash_table[hash] = &mime_entries[i];
     }
 }
 
@@ -386,9 +384,7 @@ static inline StrSlice get_mimetype(char* filename) {
 
     // Walk the chain.
     for (MimeEntry* entry = hash_table[hash]; entry; entry = entry->next) {
-        if (strcmp(ext, entry->ext) == 0) {
-            return entry->mimetype;
-        }
+        if (strcmp(ext, entry->ext) == 0) { return entry->mimetype; }
     }
     return DEFAULT_CONTENT_TYPE;
 }

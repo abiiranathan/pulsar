@@ -73,9 +73,7 @@ INLINE void headers_init(headers_t* h) {
 INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
     // Check if we have space for a new header.
     // Remember string slices are not guaranteed to be NULL-terminated.
-    if (h->count >= HEADERS_CAPACITY) {
-        return false;
-    }
+    if (h->count >= HEADERS_CAPACITY) { return false; }
 
     // Check if header already exists.
     header_entry* entry = NULL;
@@ -155,9 +153,7 @@ typedef bool (*header_iter_fn)(StrSlice name, StrSlice value, void* userdata);
 
 INLINE void headers_foreach(const headers_t* h, header_iter_fn callback, void* userdata) {
     for (size_t i = 0; i < h->count; i++) {
-        if (!callback(h->entries[i].name, h->entries[i].value, userdata)) {
-            break;
-        }
+        if (!callback(h->entries[i].name, h->entries[i].value, userdata)) { break; }
     }
 }
 

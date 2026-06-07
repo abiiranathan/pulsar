@@ -10,7 +10,7 @@ extern void static_file_handler(PulsarCtx* ctx);
 
 /** Global route storage. */
 static route_t global_routes[MAX_ROUTES] = {0};
-static size_t global_route_count         = 0;
+static size_t global_route_count = 0;
 
 /*
  * Compact per-route metadata stored contiguously for cache-friendly linear
@@ -81,8 +81,8 @@ static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
  */
 static size_t count_path_params(const char* pattern, bool* valid) {
     const char* p = pattern;
-    size_t count  = 0;
-    *valid        = true;
+    size_t count = 0;
+    *valid = true;
 
     while (*p) {
         if (*p == '{') {
@@ -138,8 +138,8 @@ INLINE uint8_t classify_route(const char* pattern, bool is_static, uint8_t* npar
  *                    and total_params must reflect the actual placeholder count.
  */
 static void populate_param_names(const char* pattern, PathParams* path_params) {
-    const char* p       = pattern;
-    uint8_t idx         = 0;
+    const char* p = pattern;
+    uint8_t idx = 0;
     const uint8_t total = path_params->total_params;
 
     while (*p && idx < total) {
@@ -163,7 +163,7 @@ static void populate_param_names(const char* pattern, PathParams* path_params) {
          * We cast away const to satisfy the non-const field, but the pointer
          * will never be written through in the matcher.
          */
-        path_params->items[idx].name     = (char*)name_start;
+        path_params->items[idx].name = (char*)name_start;
         path_params->items[idx].name_len = name_len;
         idx++;
     }
@@ -178,23 +178,22 @@ static void populate_param_names(const char* pattern, PathParams* path_params) {
  * @param is_static True for static file routes.
  * @return Pointer to the newly registered route_t entry.
  */
-static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler,
-                                      int is_static) {
+static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler, int is_static) {
     ASSERT(global_route_count < MAX_ROUTES && "Route table full");
     ASSERT(METHOD_VALID(method) && "Invalid HTTP method");
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
 
     uint8_t nparams = 0;
-    route_t* r      = &global_routes[global_route_count];
+    route_t* r = &global_routes[global_route_count];
 
     /* Zero-initialise the whole entry via compound literal, then fill fields.
      * A single memset-equivalent store is cheaper than piecemeal zeroing. */
     *r = (route_t){
-        .pattern     = pattern,
+        .pattern = pattern,
         .pattern_len = (uint16_t)strlen(pattern),
-        .method      = method,
-        .handler     = handler,
-        .route_type  = classify_route(pattern, is_static, &nparams),
+        .method = method,
+        .handler = handler,
+        .route_type = classify_route(pattern, is_static, &nparams),
     };
 
     if (r->route_type == ROUTE_TYPE_PARAM && nparams > 0) {
@@ -205,7 +204,7 @@ static route_t* route_register_helper(const char* pattern, HttpMethod method, Ht
         r->state.path_params->items = calloc(nparams, sizeof(PathParam));
         ASSERT(r->state.path_params->items && "Failed to allocate PathParam array");
 
-        r->state.path_params->match_count  = 0;
+        r->state.path_params->match_count = 0;
         r->state.path_params->total_params = nparams;
 
         /*
@@ -228,8 +227,8 @@ route_t* route_static(const char* pattern, const char* dirname) {
     ASSERT(pattern && dirname && "pattern and dirname must be non-NULL");
     ASSERT(is_dir(dirname) && "dir must be an existing directory");
 
-    route_t* r                   = route_register_helper(pattern, HTTP_GET, static_file_handler, 1);
-    r->state.static_.dirname     = dirname;
+    route_t* r = route_register_helper(pattern, HTTP_GET, static_file_handler, 1);
+    r->state.static_.dirname = dirname;
     r->state.static_.dirname_len = (uint8_t)strlen(dirname);
     return r;
 }
@@ -251,10 +250,8 @@ static int compare_routes(const void* a, const void* b) {
     if (ra->method != rb->method) return (ra->method < rb->method) ? -1 : 1;
 
     /* Root static routes serve as catch-alls; push them to the end. */
-    const bool ra_root_static =
-        (ra->route_type == ROUTE_TYPE_STATIC && ra->pattern_len == 1 && ra->pattern[0] == '/');
-    const bool rb_root_static =
-        (rb->route_type == ROUTE_TYPE_STATIC && rb->pattern_len == 1 && rb->pattern[0] == '/');
+    const bool ra_root_static = (ra->route_type == ROUTE_TYPE_STATIC && ra->pattern_len == 1 && ra->pattern[0] == '/');
+    const bool rb_root_static = (rb->route_type == ROUTE_TYPE_STATIC && rb->pattern_len == 1 && rb->pattern[0] == '/');
 
     if (ra_root_static != rb_root_static) return ra_root_static ? 1 : -1;
 
@@ -274,7 +271,7 @@ void sort_routes(void) {
     /* Reset directory counts and map their contiguous backing storage */
     for (size_t i = 0; i < HTTP_METHOD_COUNT; i++) {
         method_routes[i].routes = method_route_storage[i];
-        method_routes[i].count  = 0;
+        method_routes[i].count = 0;
     }
 
     /*
@@ -286,7 +283,7 @@ void sort_routes(void) {
      * lives in the same cache line as the metadata entry itself.
      */
     for (size_t i = 0; i < global_route_count; i++) {
-        route_t* r              = &global_routes[i];
+        route_t* r = &global_routes[i];
         const HttpMethod method = r->method;
 
         ASSERT(method < HTTP_METHOD_COUNT && "Invalid method during sort");
@@ -295,11 +292,11 @@ void sort_routes(void) {
         ASSERT(idx < MAX_ROUTES && "Too many routes for method");
 
         method_routes[method].routes[idx] = (RouteMetadata){
-            .pattern     = r->pattern,
-            .target      = r,
+            .pattern = r->pattern,
+            .target = r,
             .pattern_len = r->pattern_len,
-            .route_type  = r->route_type,
-            .first_char  = r->pattern[0],
+            .route_type = r->route_type,
+            .first_char = r->pattern[0],
         };
         method_routes[method].count++;
     }
@@ -325,12 +322,11 @@ void sort_routes(void) {
  * @param arena       Arena used for value string allocation.
  * @return true if the pattern matches the URL exactly and all params were filled.
  */
-static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params,
-                                  Arena* arena) {
-    const char* pat            = pattern;
-    const char* url_ptr        = url;
+static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params, Arena* arena) {
+    const char* pat = pattern;
+    const char* url_ptr = url;
     const uint8_t total_params = path_params->total_params;
-    uint8_t nparams            = 0;
+    uint8_t nparams = 0;
 
     path_params->match_count = 0;
 
@@ -359,7 +355,7 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
         /* Extract value: stop at '/', the next literal pattern character,
          * or end-of-string. Hoist *pat to avoid re-dereferencing each iter. */
         const char* val_start = url_ptr;
-        const char stop_pat   = *pat; /* next pattern char after '}' */
+        const char stop_pat = *pat; /* next pattern char after '}' */
 
         if (stop_pat == '\0') {
             /* Terminal param: consume everything except a trailing slash. */
@@ -371,7 +367,7 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
         }
 
         const size_t val_len = (size_t)(url_ptr - val_start);
-        param->value         = arena_strdupn(arena, val_start, val_len);
+        param->value = arena_strdupn(arena, val_start, val_len);
         if (!param->value) return false;
     }
 
@@ -402,18 +398,17 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
  * @param arena      Arena passed through to param matchers.
  * @return Matched route pointer, or NULL if none found.
  */
-INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length,
-                                    Arena* arena) {
+INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length, Arena* arena) {
     if (method >= HTTP_METHOD_COUNT) return NULL;
 
     const MethodRoutes* mr = &method_routes[method];
-    const uint16_t count   = mr->count;
+    const uint16_t count = mr->count;
 
     /* Exit immediately if no routes exist for this method */
     if (count == 0) return NULL;
 
     const RouteMetadata* routes = mr->routes;
-    const char first_url_ch     = path[0]; /* hoist: avoids re-read each iteration */
+    const char first_url_ch = path[0]; /* hoist: avoids re-read each iteration */
 
     for (uint16_t i = 0; i < count; i++) {
         const RouteMetadata* meta = &routes[i];
@@ -440,8 +435,7 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
                  * here because param patterns virtually always start with '/' and
                  * so do all URL paths — the check would never filter anything.
                  */
-                if (match_path_parameters(meta->pattern, path, meta->target->state.path_params,
-                                          arena)) {
+                if (match_path_parameters(meta->pattern, path, meta->target->state.path_params, arena)) {
                     return meta->target;
                 }
                 break;

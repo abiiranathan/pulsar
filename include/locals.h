@@ -47,23 +47,21 @@ typedef struct {
 
 /** Initialise an already-allocated Locals (embedded in PulsarConn). */
 static inline void LocalsInit(Locals* locals) {
-    locals->size          = 0;
+    locals->size = 0;
     locals->managed_count = 0;
 }
 
 static inline void LocalsClear(Locals* locals) {
     if (locals->managed_count > 0) {
         for (uint8_t i = 0; i < locals->size; ++i) {
-            if (locals->entries[i].free_func != NULL)
-                locals->entries[i].free_func(locals->entries[i].value);
+            if (locals->entries[i].free_func != NULL) locals->entries[i].free_func(locals->entries[i].value);
         }
     }
-    locals->size          = 0;
+    locals->size = 0;
     locals->managed_count = 0;
 }
 
-static inline bool LocalsSetValue(Locals* locals, const char* key, void* value,
-                                  ValueFreeFunc free_func) {
+static inline bool LocalsSetValue(Locals* locals, const char* key, void* value, ValueFreeFunc free_func) {
     if (!locals || !key) return false;
 
     const uint16_t klen = (uint16_t)strlen(key);
@@ -75,7 +73,7 @@ static inline bool LocalsSetValue(Locals* locals, const char* key, void* value,
                 locals->entries[i].free_func(locals->entries[i].value);
                 locals->managed_count--;
             }
-            locals->entries[i].value     = value;
+            locals->entries[i].value = value;
             locals->entries[i].free_func = free_func;
             if (free_func != NULL) locals->managed_count++;
             return true;
@@ -83,16 +81,15 @@ static inline bool LocalsSetValue(Locals* locals, const char* key, void* value,
     }
 
     /* New entry. */
-    assert(locals->size < LOCALS_INLINE_CAPACITY &&
-           "Too many locals — increase LOCALS_INLINE_CAPACITY");
+    assert(locals->size < LOCALS_INLINE_CAPACITY && "Too many locals — increase LOCALS_INLINE_CAPACITY");
 
     if (locals->size >= LOCALS_INLINE_CAPACITY) return false;
 
     locals->entries[locals->size] = (KeyValue){
-        .key       = key, /* caller owns; typically a string literal */
-        .value     = value,
+        .key = key, /* caller owns; typically a string literal */
+        .value = value,
         .free_func = free_func,
-        .key_len   = klen,
+        .key_len = klen,
     };
     locals->size++;
     if (free_func != NULL) locals->managed_count++;

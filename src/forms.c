@@ -23,23 +23,21 @@ typedef enum {
 
 // Helper function to grow the files array
 INLINE bool grow_files_array(MultipartForm* form) {
-    size_t new_capacity    = form->files_capacity * 2;
+    size_t new_capacity = form->files_capacity * 2;
     FileHeader** new_files = arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
     if (!new_files) return false;
 
     // Copy existing pointers
-    if (form->files && form->num_files > 0) {
-        memcpy(new_files, form->files, form->num_files * sizeof(FileHeader*));
-    }
+    if (form->files && form->num_files > 0) { memcpy(new_files, form->files, form->num_files * sizeof(FileHeader*)); }
 
-    form->files          = new_files;
+    form->files = new_files;
     form->files_capacity = new_capacity;
     return true;
 }
 
 // Helper function to grow the fields array
 INLINE bool grow_fields_array(MultipartForm* form) {
-    size_t new_capacity   = form->fields_capacity * 2;
+    size_t new_capacity = form->fields_capacity * 2;
     FormField* new_fields = arena_alloc(form->arena, new_capacity * sizeof(FormField));
     if (!new_fields) return false;
 
@@ -48,38 +46,29 @@ INLINE bool grow_fields_array(MultipartForm* form) {
         memcpy(new_fields, form->fields, form->num_fields * sizeof(FormField));
     }
 
-    form->fields          = new_fields;
+    form->fields = new_fields;
     form->fields_capacity = new_capacity;
     return true;
 }
 
 MultipartCode multipart_init(MultipartForm* form) {
-    if (!form) {
-        return MEMORY_ALLOC_ERROR;
-    }
+    if (!form) { return MEMORY_ALLOC_ERROR; }
 
     // Zero the form.
     memset(form, 0, sizeof(*form));
 
     // Create arena with default block size.
     form->arena = arena_create(0);
-    if (!form->arena) {
-        return MEMORY_ALLOC_ERROR;
-    }
+    if (!form->arena) { return MEMORY_ALLOC_ERROR; }
 
     // Allocate initial arrays from arena
-    form->files =
-        (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
-    if (!form->files) {
-        return ARENA_ALLOC_ERROR;
-    }
+    form->files = (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
+    if (!form->files) { return ARENA_ALLOC_ERROR; }
 
     form->fields = (FormField*)arena_alloc(form->arena, INITIAL_FIELD_CAPACITY * sizeof(FormField));
-    if (!form->fields) {
-        return ARENA_ALLOC_ERROR;
-    }
+    if (!form->fields) { return ARENA_ALLOC_ERROR; }
 
-    form->files_capacity  = INITIAL_FILE_CAPACITY;
+    form->files_capacity = INITIAL_FILE_CAPACITY;
     form->fields_capacity = INITIAL_FIELD_CAPACITY;
 
     return MULTIPART_OK;
@@ -105,20 +94,17 @@ INLINE bool form_insert_header(MultipartForm* form, FileHeader* header) {
  *
  * @returns: MpCode enum value indicating success or failure.
  */
-MultipartCode multipart_parse(const char* data, size_t size, const char* boundary,
-                              MultipartForm* form) {
-    if (!data || !boundary || !form || !form->arena) {
-        return MEMORY_ALLOC_ERROR;
-    }
+MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form) {
+    if (!data || !boundary || !form || !form->arena) { return MEMORY_ALLOC_ERROR; }
 
     size_t boundary_length = strlen(boundary);
-    const char* ptr        = data;
+    const char* ptr = data;
 
     // Temporary variables for parsing
-    const char* key_start   = NULL;
+    const char* key_start = NULL;
     const char* value_start = NULL;
 
-    State state        = STATE_BOUNDARY;
+    State state = STATE_BOUNDARY;
     MultipartCode code = MULTIPART_OK;
 
     // Current file header being built
@@ -148,7 +134,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     }
                     ptr += 6;  // Skip name=\"
                     key_start = ptr;
-                    state     = STATE_KEY;
+                    state = STATE_KEY;
                 } else {
                     ptr++;
                 }
@@ -161,8 +147,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     // Check if this is a file field
                     if (strncmp(ptr, "\"; filename=\"", 13) == 0) {
                         // Allocate field name from arena
-                        current_header.field_name =
-                            arena_strdupn(form->arena, key_start, key_length);
+                        current_header.field_name = arena_strdupn(form->arena, key_start, key_length);
                         if (!current_header.field_name) {
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
@@ -174,7 +159,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         }
                         ptr += 13;  // Skip "; filename=\""
                         key_start = ptr;
-                        state     = STATE_FILENAME;
+                        state = STATE_FILENAME;
                     } else {
                         // Regular form field - move to value
                         while (ptr < data + size && *ptr != '\n')
@@ -182,12 +167,10 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         if (ptr < data + size) ptr++;  // Skip newline
 
                         // Consume CRLF before value
-                        if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
-                            ptr += 2;
-                        }
+                        if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') { ptr += 2; }
 
                         value_start = ptr;
-                        state       = STATE_VALUE;
+                        state = STATE_VALUE;
 
                         // Store the key for later use
                         if (form->num_fields >= form->fields_capacity) {
@@ -197,8 +180,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                             }
                         }
 
-                        form->fields[form->num_fields].name =
-                            arena_strdupn(form->arena, key_start, key_length);
+                        form->fields[form->num_fields].name = arena_strdupn(form->arena, key_start, key_length);
                         if (!form->fields[form->num_fields].name) {
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
@@ -215,8 +197,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     size_t value_length = (size_t)(ptr - value_start);
 
                     // Allocate value from arena
-                    form->fields[form->num_fields].value =
-                        arena_strdupn(form->arena, value_start, value_length);
+                    form->fields[form->num_fields].value = arena_strdupn(form->arena, value_start, value_length);
                     if (!form->fields[form->num_fields].value) {
                         code = ARENA_ALLOC_ERROR;
                         goto cleanup;
@@ -251,9 +232,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     if (ptr < data + size) ptr++;  // Skip newline
 
                     // Consume CRLF if present
-                    if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
-                        ptr += 2;
-                    }
+                    if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') { ptr += 2; }
 
                     state = STATE_FILE_MIME_HEADER;
                 } else {
@@ -314,7 +293,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
 
             case STATE_FILE_BODY: {
                 current_header.offset = (size_t)(ptr - data);
-                size_t haystack_len   = size - current_header.offset;
+                size_t haystack_len = size - current_header.offset;
 
                 // Find end of file content
                 char* endptr = (char*)memmem(ptr, haystack_len, boundary, boundary_length);
@@ -323,7 +302,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     goto cleanup;
                 }
 
-                size_t endpos    = (size_t)(endptr - data);
+                size_t endpos = (size_t)(endptr - data);
                 size_t file_size = endpos - current_header.offset;
 
                 // Validate file size
@@ -353,7 +332,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                 memset(&current_header, 0, sizeof(FileHeader));
 
                 // Move pointer to boundary
-                ptr   = endptr;
+                ptr = endptr;
                 state = STATE_BOUNDARY;
             } break;
 
@@ -364,22 +343,18 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
     }
 
 cleanup:
-    if (code != MULTIPART_OK) {
-        multipart_cleanup(form);
-    }
+    if (code != MULTIPART_OK) { multipart_cleanup(form); }
     return code;
 }
 
 bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     if (!content_type || !boundary) return false;
 
-    const char* prefix  = "--";
-    size_t prefix_len   = 2;
+    const char* prefix = "--";
+    size_t prefix_len = 2;
     size_t total_length = strlen(content_type);
 
-    if (strncasecmp(content_type, "multipart/form-data", 19) != 0) {
-        return false;
-    }
+    if (strncasecmp(content_type, "multipart/form-data", 19) != 0) { return false; }
 
     char* start = strstr((char*)content_type, "boundary=");
     if (!start) return false;
@@ -404,11 +379,11 @@ void multipart_cleanup(MultipartForm* form) {
         form->arena = NULL;
     }
 
-    form->files           = NULL;
-    form->fields          = NULL;
-    form->num_files       = 0;
-    form->num_fields      = 0;
-    form->files_capacity  = 0;
+    form->files = NULL;
+    form->fields = NULL;
+    form->num_files = 0;
+    form->num_fields = 0;
+    form->files_capacity = 0;
     form->fields_capacity = 0;
 }
 
@@ -418,9 +393,7 @@ const char* multipart_field_value(const MultipartForm* form, const char* name) {
     if (!form || !name) return NULL;
 
     for (size_t i = 0; i < form->num_fields; i++) {
-        if (form->fields[i].name && strcmp(form->fields[i].name, name) == 0) {
-            return form->fields[i].value;
-        }
+        if (form->fields[i].name && strcmp(form->fields[i].name, name) == 0) { return form->fields[i].value; }
     }
     return NULL;
 }
@@ -438,12 +411,8 @@ FileHeader* multipart_file(const MultipartForm* form, const char* field_name) {
     return NULL;
 }
 
-size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices,
-                       size_t max_indices) {
-    if (!form || !field_name || !out_indices) {
-        return 0;
-    }
-
+size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices, size_t max_indices) {
+    if (!form || !field_name || !out_indices) { return 0; }
     size_t found = 0;
     for (size_t i = 0; i < form->num_files && found < max_indices; i++) {
         if (form->files[i]->field_name && strcmp(form->files[i]->field_name, field_name) == 0) {
