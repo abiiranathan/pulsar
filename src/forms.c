@@ -58,7 +58,7 @@ MultipartCode multipart_init(MultipartForm* form) {
     memset(form, 0, sizeof(*form));
 
     // Create arena with default block size.
-    form->arena = arena_create(0);
+    form->arena = arena_create(1 << 20);
     if (!form->arena) { return MEMORY_ALLOC_ERROR; }
 
     // Allocate initial arrays from arena
