@@ -175,8 +175,6 @@ static bool reset_connection(PulsarConn* conn) {
     request_t* req = &conn->request;
     Arena* arena = conn->arena;
 
-    if (req->body) free(req->body);
-
     free_response_body(res);
 
     req->method[0] = '\0';
@@ -375,23 +373,22 @@ static bool parse_query_params(PulsarConn* conn, size_t* path_len) {
     return true;
 }
 
-static bool parse_request_body(PulsarConn* conn, size_t headers_len, size_t read_bytes) {
-    if (conn->request.content_length == 0) return true;
+static http_status parse_request_body(PulsarConn* conn, size_t headers_len, size_t read_bytes) {
+    if (conn->request.content_length == 0) return StatusOK;
 
     request_t* req = &conn->request;
     size_t content_length = req->content_length;
     size_t body_available = read_bytes - headers_len;
     ASSERT(body_available <= content_length);
 
-    if (content_length > MAX_BODY_SIZE) {
-        conn_set_status(conn, StatusRequestEntityTooLarge);
-        return false;
-    }
+    if (content_length > MAX_BODY_SIZE) { return StatusRequestEntityTooLarge; }
 
-    req->body = malloc(content_length + 1);
+    // Allocate body in arena since it is always growing and not
+    // limited to initial block size.
+    req->body = arena_alloc(conn->arena, content_length + 1);
     if (!req->body) {
-        perror("malloc body");
-        return false;
+        perror("arena_alloc failed to allocated body");
+        return StatusInternalServerError;
     }
 
     memcpy(req->body, conn->read_buf + headers_len, body_available);
@@ -406,15 +403,15 @@ static bool parse_request_body(PulsarConn* conn, size_t headers_len, size_t read
                 continue;
             }
             perror("read body");
-            return false;
+            return StatusInternalServerError;
         }
         if (n == 0) {
             perror("read body EOF");
-            return false;
+            return StatusInternalServerError;
         }
         received += (size_t)n;
     }
-    return true;
+    return StatusOK;
 }
 
 /* ================================================================
@@ -651,6 +648,8 @@ int conn_write_string(PulsarConn* conn, const char* str) {
     return str ? conn_write(conn, str, strlen(str)) : 0;
 }
 
+// TODO: Allocate in arena.
+// arena_alloc(conn->arena, size)
 __attribute__((format(printf, 2, 3))) int conn_writef(PulsarConn* conn, const char* restrict fmt, ...) {
     va_list args;
     char sbuf[1024];
@@ -1417,7 +1416,9 @@ static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
     if (!route) return StatusNotFound;
 
     req->route = route;
-    if (!parse_request_body(conn, headers_len, read_bytes)) return StatusInternalServerError;
+    http_status status;
+    status = parse_request_body(conn, headers_len, read_bytes);
+    if (status != StatusOK) { return status; }
 
     PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
     execute_all_middleware(&ctx, route);
@@ -1425,6 +1426,7 @@ static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
 
     if (HAS_CHUNKED_TRANSFER(conn->response.flags)) {
         request_complete(conn);
+
         if (conn->keep_alive) {
             AddKeepAliveConnection(conn, state);
             conn->closing = true;
@@ -1581,7 +1583,7 @@ static void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
 
     PulsarConn* conn = calloc(1, sizeof(*conn));
     if (!conn || !arena) {
-        fprintf(stderr, "add_connection_to_worker malloc failed\n");
+        fprintf(stderr, "add_connection_to_worker calloc failed\n");
         close(client_fd);
         arena_destroy(arena);
         return;

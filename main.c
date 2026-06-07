@@ -206,13 +206,6 @@ void pathparams_query_params_handler(PulsarCtx* ctx) {
     headers_t* params = query_params(conn);
     DUMP_HEADERS(params);
 
-    // // Required query parameter
-    // require_query(query, conn, "q");         // Returns a slice (no alloc)
-    // require_query_alloc(query2, conn, "q");  // allocates
-    // printf("query: %s\n", query);
-    // printf("query2: %s\n", query2);
-    // free(query2);
-
     conn_writef(conn, "Your user_id is %s and username %s\n", user_id, username);
 }
 
