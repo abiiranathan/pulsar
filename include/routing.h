@@ -58,7 +58,7 @@ typedef union {
 /**
  * Route structure optimized for cache locality.
  */
-typedef struct ALIGN(CACHE_LINE_SIZE) route_t {
+typedef struct route_t {
     const char* pattern;                         /**< Route pattern (dynamically allocated). */
     HttpHandler handler;                         /**< Handler function pointer. */
     uint16_t pattern_len;                        /**< Length of the pattern. */
