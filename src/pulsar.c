@@ -208,8 +208,6 @@ static void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_
     conn->client_fd = -1;
 
     RemoveKeepAliveConnection(conn, ka_state);
-
-    if (conn->request.body) free(conn->request.body);
     free_response_body(&conn->response);
     LocalsClear(&conn->locals);
     arena_destroy(conn->arena);
@@ -1423,7 +1421,6 @@ static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
     PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
     execute_all_middleware(&ctx, route);
     if (!conn->abort) route->handler(&ctx);
-
     if (HAS_CHUNKED_TRANSFER(conn->response.flags)) {
         request_complete(conn);
 
@@ -1602,7 +1599,6 @@ static void add_connection_to_worker(int queue_fd, int client_fd, int worker_id)
         perror("event_add_read");
         close(client_fd);
         conn->client_fd = -1;
-        if (conn->request.body) free(conn->request.body);
         free_response_body(&conn->response);
         LocalsClear(&conn->locals);
         arena_destroy(arena);
