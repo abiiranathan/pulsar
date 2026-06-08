@@ -3,7 +3,6 @@
 #include <string.h>          // for strlen, memset
 #include <time.h>            // for time()
 #include <unistd.h>          // for usleep
-
 #include "include/error.h"   // abort_if*, require_path_param, defer_*, PARSE_MULTIPART_FORM
 #include "include/forms.h"   // MultipartForm processing.
 #include "include/pulsar.h"  // PulsarCtx, PulsarConn, route_*, pulsar_run, conn_*, req_*
@@ -67,31 +66,65 @@ void echo_handler(PulsarCtx* ctx) {
 }
 
 /* =========================================================================
- * Server-Sent Events (SSE)
- * Streams 1 000 numbered events to the client at 1 ms intervals.
+ * Server-Sent Events (SSE) - Offloaded Implementation
  *
- * NOTE: WITH_SSE_CONNECTION holds the worker thread for the entire stream
- * duration.  This is intentional for the POC but limits concurrency — a
- * production implementation should use non-blocking I/O or a dedicated
- * thread pool for long-lived connections.
+ * Stream events to the client at 1 ms intervals. The handoff mechanism 
+ * transfers the connection to a slow event loop, avoiding blocking on the
+ * main thread pool.
  * ========================================================================= */
+
+typedef struct SseState {
+    size_t total;
+} SseState;
+
+static void sse_on_write(PulsarConn* conn) {
+    if (!conn_is_open(conn)) return;
+    SseState* state = pulsar_get(conn, "sse_state");
+
+    // socket ready to write.
+    while (state->total > 0) {
+        char msg[64];
+        char msg_id[24];
+        snprintf(msg, sizeof(msg), "Message: %zu", state->total);
+        snprintf(msg_id, sizeof(msg_id), "%zu", state->total);
+
+        SSEvent evt = SSE_EVENT_INIT(ss_from_cstr(msg), SS_LIT("message"), ss_from_cstr(msg_id));
+        conn_send_event(conn, &evt);
+        state->total--;
+        usleep(5000);
+        yield_write(conn);
+    }
+
+    conn_end_sse(conn);
+}
+
+static void sse_on_close(PulsarConn* conn) {
+    (void)conn;
+    printf("[Pulsar] SSE Connection closed and cleaned up in slow worker.\n");
+}
+
 void sse_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    WITH_SSE_CONNECTION(conn, {
-        size_t total = 1000;
 
-        while (total > 0 && server_running && conn_is_open(conn)) {
-            char msg[64];
-            char msg_id[24];
-            snprintf(msg, sizeof(msg), "Message: %zu", total);
-            snprintf(msg_id, sizeof(msg_id), "%zu", total);
+    // Send the initial HTTP handshake headers
+    conn_start_sse(conn);
 
-            SSEvent evt = SSE_EVENT_INIT(ss_from_cstr(msg), SS_LIT("message"), ss_from_cstr(msg_id));
-            conn_send_event(conn, &evt);
-            total--;
-            usleep(1000);  // 1 ms between events
-        }
-    });
+    // Allocate the stream state in the connection's thread-safe arena
+    SseState* state = pulsar_alloc(conn, sizeof(SseState));
+    state->total = 5000;
+
+    // Track the state within the connection locals context
+    pulsar_set(conn, "sse_state", state, NULL);
+
+    // Define the offloading lifecycle hooks
+    PulsarOffloadHandler handlers = {
+        .on_read = NULL,           // Discard client-to-server data
+        .on_write = sse_on_write,  // Stream chunks as the socket becomes writable
+        .on_close = sse_on_close   // Post-disconnect memory cleanup callback
+    };
+
+    // Transition the connection to the background slow worker pool
+    if (!pulsar_handoff(conn, handlers)) { conn_set_status(conn, StatusInternalServerError); }
 }
 
 /* =========================================================================

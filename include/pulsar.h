@@ -6,9 +6,11 @@
 #include <time.h>
 
 #include "constants.h"
+#include "events.h"
 #include "locals.h"
 #include "routing.h"
 #include "status.h"
+#include "types.h"
 #include "url.h"
 
 extern volatile sig_atomic_t server_running;
@@ -55,6 +57,18 @@ typedef Locals* (*LocalsCreateCallback)();
  * @return int 0 on success, non-zero on error
  */
 int pulsar_run(const char* addr, int port);
+
+// Re-arm client socket for another write and yield from
+// on_write callback giving control back to the event loop.
+#define yield_write(conn)                                         \
+    event_mod_write(conn->owner_queue_fd, conn->client_fd, conn); \
+    return;
+
+// Re-arm client socket for another read and yield from
+// on_read callback giving control back to the event loop.
+#define yield_read(conn)                                         \
+    event_mod_read(conn->owner_queue_fd, conn->client_fd, conn); \
+    return;
 
 /** Returns the worker id of the current worker.
 Can be used as an index for per-thread objects because each worker runs in a

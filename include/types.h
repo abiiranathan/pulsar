@@ -1,9 +1,9 @@
 #ifndef __PULSAR_TYPES_H__
 #define __PULSAR_TYPES_H__
 
-#if !defined(ALLOW_PULSAR_TYPES) || defined(PulsarConnDef)
-#error "<pulsar/types.h> should not be included directly. Include <pulsar/pulsar.h> instead!"
-#endif
+// #if !defined(ALLOW_PULSAR_TYPES) || defined(PulsarConnDef)
+// #error "<pulsar/types.h> should not be included directly. Include <pulsar/pulsar.h> instead!"
+// #endif
 
 #define _FILE_OFFSET_BITS 64
 
@@ -100,6 +100,20 @@ struct request_t {
     struct route_t* route;    // Matched route (has static lifetime)
 };
 
+/* ================================================================
+ * Slow Connection Offloader Types and API
+ * ================================================================ */
+struct pulsar_conn;  // Forward declaration.
+
+/**
+ * @brief User-defined hooks for managing the state of offloaded connections.
+ */
+typedef struct PulsarOffloadHandler {
+    void (*on_read)(struct pulsar_conn* conn);   // Invoked when data arrives (useful for WebSockets)
+    void (*on_write)(struct pulsar_conn* conn);  // Invoked when the socket is writable
+    void (*on_close)(struct pulsar_conn* conn);  // Invoked when the client disconnects or an error occurs
+} PulsarOffloadHandler;
+
 // Connection state structure
 struct pulsar_conn {
     int client_fd;                                   // Client socket file descriptor
@@ -115,6 +129,21 @@ struct pulsar_conn {
     struct pulsar_conn *next, *prev;                 // Linked list nodes for keep-alive tracking.
     bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
     int worker_id;                                   // ID of the current worker running the thread.
+
+    // Background worker processing
+    int owner_queue_fd;                         // The event queue FD of its current owner
+    void* owner_ka_state;                       // Reference to the owner's KeepAliveState
+    bool offloaded;                             // Flag indicating ownership transfer
+    struct PulsarOffloadHandler offload_hooks;  // Registered lifecycle callbacks
 };
+
+/**
+ * @brief Transitions a connection from the main worker pool to the slow pool.
+ * 
+ * @param conn The current connection context.
+ * @param handlers A struct containing lifecycle callbacks for the connection.
+ * @return true if the handover succeeded, false otherwise.
+ */
+bool pulsar_handoff(struct pulsar_conn* conn, PulsarOffloadHandler handlers);
 
 #endif /* __PULSAR_TYPES_H__ */

@@ -21,6 +21,9 @@
 #define NUM_WORKERS 4
 #endif
 
+// Number of slow workers processing SSE or websocket requests.
+#define NUM_SLOW_WORKERS 2
+
 // maximum path length
 #ifndef MAX_PATH_LEN
 #define MAX_PATH_LEN 1024
