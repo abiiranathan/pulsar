@@ -131,10 +131,7 @@
     const char* me = multipart_error(mc);                                                               \
     abort_if(mc != MULTIPART_OK, (conn), StatusBadRequest, me, strlen(me));                             \
     defer_form_cleanup(form_ptr);                                                                       \
-    char* ct_var = ss_to_owned_cstr(req_header_get((conn), "Content-Type"));                            \
-    defer {                                                                                             \
-        free(ct_var);                                                                                   \
-    };                                                                                                  \
+    const char* ct_var = req_header_get((conn), "Content-Type");                                        \
     abort_if_lit(!parse_boundary(ct_var, boundary_buf, sizeof(boundary_buf)), (conn), StatusBadRequest, \
                  "invalid or missing multipart boundary");                                              \
     StrSlice body_var = req_body_slice(conn);                                                           \

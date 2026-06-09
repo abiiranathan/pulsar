@@ -323,7 +323,7 @@ void mw2(PulsarCtx* ctx) {
  * ========================================================================= */
 int main(void) {
     // Attach the built-in access logger; writes combined-log lines to stdout.
-    pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
+    // pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
     // ── Route table ───────────────────────────────────────────────────────
     route_register("/", HTTP_GET, hello_world_handler);

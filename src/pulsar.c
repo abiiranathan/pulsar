@@ -649,10 +649,10 @@ const char* req_path(PulsarConn* conn) {
     return conn->request.path;
 }
 
-StrSlice query_get(PulsarConn* conn, const char* name) {
-    if (!conn->request.query_params) return (StrSlice){0};
+const char* query_get(PulsarConn* conn, const char* name) {
+    if (!conn->request.query_params) return NULL;
     StrSlice h = headers_get(conn->request.query_params, name);
-    return ss_is_valid(h) ? h : ss_empty();
+    return arena_strdupn(conn->arena, h.data, h.len);
 }
 
 headers_t* query_params(PulsarConn* conn) {
@@ -663,9 +663,9 @@ const headers_t* req_headers(PulsarConn* conn) {
     return (const headers_t*)conn->request.headers;
 }
 
-StrSlice req_header_get(PulsarConn* conn, const char* name) {
+const char* req_header_get(PulsarConn* conn, const char* name) {
     StrSlice h = headers_get(conn->request.headers, name);
-    return ss_is_valid(h) ? h : ss_empty();
+    return arena_strdupn(conn->arena, h.data, h.len);
 }
 
 /* ================================================================
@@ -1440,8 +1440,8 @@ void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns) {
     const char* method = req_method(conn);
     const char* path = req_path(conn);
     http_status status_code = res_get_status(conn);
-    StrSlice user_agent = req_header_get(conn, "User-Agent");
-    if (!ss_is_valid(user_agent)) { user_agent = SS_LIT("-"); }
+    const char* user_agent = req_header_get(conn, "User-Agent");
+    if (!user_agent) { user_agent = "-"; }
 
     char latency_str[24];
     if (total_ns < 1000) {
@@ -1455,10 +1455,9 @@ void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns) {
     } else {
         snprintf(latency_str, sizeof(latency_str), "%5" PRIu64 "m", total_ns / UINT64_C(60000000000));
     }
-
     char line[PLOG_LINE_MAX];
-    int n = snprintf(line, sizeof(line), "[Pulsar] %-7s %-5s %3d %8s %.*s\n", method, path, (int)status_code,
-                     latency_str, (int)user_agent.len, user_agent.data);
+    int n = snprintf(line, sizeof(line), "[Pulsar] %-7s %-5s %3d %8s %s\n", method, path, (int)status_code, latency_str,
+                     user_agent);
     if (n > 0 && n < (int)sizeof(line)) { plog_submit(&PLOG_STATE, line, (uint32_t)n); }
 }
 

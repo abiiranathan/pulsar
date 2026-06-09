@@ -478,15 +478,16 @@ void conn_set_status(PulsarConn* conn, http_status code);
  *
  * @param conn The connection object
  * @param name Parameter name
- * @return A string slice for query. It is empty(but valid) if query not found.
+ * @return A an arena-allocated char * or NULL if its not found. MUST never free it.
  */
-StrSlice query_get(PulsarConn* conn, const char* name);
+const char* query_get(PulsarConn* conn, const char* name);
 
 /**
  * @brief Gets all query parameters
  *
  * @param conn The connection object
- * @return headers_t* Map of all query parameters
+ * @return headers_t* Map of all query parameters. Note that the entries values are not NULL-terminated
+ * and are just views into the original URL.
  */
 headers_t* query_params(PulsarConn* conn);
 
@@ -495,6 +496,8 @@ headers_t* query_params(PulsarConn* conn);
  *
  * @param conn The connection object
  * @return The headers fixed-size array.
+ * Note that the entries values are not NULL-terminated
+ * and are just views into the original request headers' byte buffer.
  */
 const headers_t* req_headers(PulsarConn* conn);
 
@@ -503,9 +506,9 @@ const headers_t* req_headers(PulsarConn* conn);
  *
  * @param conn The connection object
  * @param name Header name
- * @return A string slice for header matching name. It is empty(but valid) if not found.
+ * @return An arena-allocated char* that is valid up to life-time of request.
  */
-StrSlice req_header_get(PulsarConn* conn, const char* name);
+const char* req_header_get(PulsarConn* conn, const char* name);
 
 /**
  * @brief Gets a response header value
