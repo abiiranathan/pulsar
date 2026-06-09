@@ -94,16 +94,9 @@
     abort_if_lit((var) == NULL, (conn), StatusBadRequest, "missing required path parameter: " key)
 
 // Fetch a query string slice
-#define require_query(var, conn, key)        \
-    StrSlice var = query_get((conn), (key)); \
-    abort_if_lit(!ss_is_valid((var)), (conn), StatusBadRequest, "missing required query parameter: " key)
-
-// Allocate a proper null-terminated query on heap and return a valid pointer.
-#define require_query_alloc(var, conn, key)                                                        \
-    StrSlice query_ss = query_get((conn), (key));                                                  \
-    abort_if_lit(!ss_is_valid((query_ss)), (conn), StatusBadRequest,                               \
-                 "missing required query parameter: " key) char* var = ss_to_owned_cstr(query_ss); \
-    abort_if_nullptr((var), conn, "memory alloc failed for query string: " key)
+#define require_query(var, conn, key)           \
+    const char* var = query_get((conn), (key)); \
+    abort_if_nullptr((var), (conn), StatusBadRequest, "missing required query parameter: " key)
 
 #define defer_form_cleanup(form)                   \
     defer {                                        \
