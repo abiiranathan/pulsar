@@ -14,13 +14,11 @@ volatile sig_atomic_t server_running = 1;
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 static size_t global_mw_count = 0;
 static void* GLOBAL_HANDLER_USERDATA = NULL;
-
-/* reserves space for \r\n\0 in the response header buffer */
-#define SAFETY_MARGIN 3
-
 static _Atomic time_t cached_date_ts = 0;
 static char cached_date_hdr[64] = {0};
 static int cached_date_len = 0;
+
+#define SERVER_NAME "PULSAR/1.0 (Unix)"
 
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
 
@@ -351,9 +349,20 @@ static inline void response_init(response_t* resp, Arena* arena) {
         .body_capacity = WRITE_BUFFER_SIZE,
         .file_fd = -1,
     };
+    resp->headers_buf = arena_alloc_align(arena, HEADERS_DEFAULT_CAPACITY, ARENA_DEFAULT_ALIGN);
+    resp->status_buf = arena_alloc_align(arena, STATUS_LINE_SIZE, ARENA_DEFAULT_ALIGN);
+    resp->headers_cap = HEADERS_DEFAULT_CAPACITY;
 
-    resp->headers_buf = arena_alloc_align(arena, HEADERS_BUF_SIZE, 32);
-    resp->status_buf = arena_alloc_align(arena, STATUS_LINE_SIZE, 32);
+    ASSERT(resp->headers_buf && resp->status_buf);
+}
+
+// Ensure there is enough space for the header.
+INLINE void ensure_headers_capacity(Arena* arena, response_t* res, size_t required) {
+    if (LIKELY(res->headers_len + required >= res->headers_cap)) { return; }
+    size_t new_cap = res->headers_cap * 2;
+    res->headers_buf = arena_realloc(arena, res->headers_buf, res->headers_cap, new_cap, ARENA_DEFAULT_ALIGN);
+    ASSERT(res->headers_buf);
+    res->headers_cap = new_cap;
 }
 
 INLINE void free_response_body(response_t* resp) {
@@ -721,14 +730,9 @@ bool res_header_get_buf(PulsarConn* conn, const char* __restrict__ name, char* _
  * ================================================================ */
 void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value) {
     response_t* resp = &conn->response;
-    size_t required = name.len + value.len + 4; /* ': ' + '\r\n' */
-    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
-
-    if (required > remaining) {
-        fprintf(stderr, "Not enough space left for response headers\n");
-        conn->closing = true;
-        return;
-    }
+    Arena* a = conn->arena;
+    size_t required = name.len + value.len + 4; /* ': ' + '\r\n' and possible terminating \r\n*/
+    ensure_headers_capacity(a, resp, required);
 
     char* dest = resp->headers_buf + resp->headers_len;
     memcpy(dest, name.data, name.len);
@@ -741,19 +745,10 @@ void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value) {
 }
 
 void conn_writeheader_raw(PulsarConn* conn, const char* header, size_t length) {
-    if (length < 2 || header[length - 2] != '\r' || header[length - 1] != '\n') {
-        fprintf(stderr, "Headers must end with \\r\\n\n");
-        return;
-    }
-
     response_t* resp = &conn->response;
-    size_t offset = resp->headers_len;
-    size_t remaining = (HEADERS_BUF_SIZE - offset - SAFETY_MARGIN);
-    if (length > remaining) {
-        conn->closing = true;
-        return;
-    }
-    memcpy(resp->headers_buf + offset, header, length);
+    Arena* a = conn->arena;
+    ensure_headers_capacity(a, resp, length);
+    memcpy(resp->headers_buf + resp->headers_len, header, length);
     resp->headers_len += length;
 }
 
@@ -763,11 +758,7 @@ void conn_writeheaders_vec(PulsarConn* conn, const struct iovec* headers, size_t
     for (size_t i = 0; i < count; i++)
         total_len += headers[i].iov_len;
 
-    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
-    if (total_len > remaining) {
-        conn->closing = true;
-        return;
-    }
+    ensure_headers_capacity(conn->arena, resp, total_len);
 
     char* dest = resp->headers_buf + resp->headers_len;
     for (size_t i = 0; i < count; i++) {
@@ -926,10 +917,8 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
     response_t* resp = &conn->response;
     size_t loc_len = strlen(location);
     size_t needed = 10 + loc_len + 2;
-    if (resp->headers_len + needed >= HEADERS_BUF_SIZE - SAFETY_MARGIN) {
-        conn->closing = true;
-        return;
-    }
+    ensure_headers_capacity(conn->arena, resp, resp->headers_len + needed);
+
     char* dest = resp->headers_buf + resp->headers_len;
     memcpy(dest, "Location: ", 10);
     dest += 10;
@@ -944,7 +933,8 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
  * Cached Server + Date Headers
  * ================================================================ */
 INLINE void write_server_headers(PulsarConn* conn) {
-    conn_writeheader_raw(conn, "Server: Pulsar/1.0\r\n", 20);
+    const char name[] = "Server: " SERVER_NAME "\r\n";
+    conn_writeheader_raw(conn, name, sizeof(name) - 1);
 
     time_t now = conn->last_activity;
     time_t ts = atomic_load_explicit(&cached_date_ts, memory_order_relaxed);
@@ -1021,10 +1011,9 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
     static const char trailer[] = "\r\n";
 
     if (!HAS_HEADERS_WRITTEN(conn->response.flags)) {
-#if WRITE_SERVER_HEADERS
         write_server_headers(conn);
-#endif
-        assert(conn->response.headers_len < HEADERS_BUF_SIZE - 3);
+        // Ensure space for \r\n
+        ensure_headers_capacity(conn->arena, &conn->response, conn->response.headers_len + 2);
         memcpy(conn->response.headers_buf + conn->response.headers_len, "\r\n", 2);
         conn->response.headers_len += 2;
 
@@ -1051,10 +1040,9 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
 void conn_send_event(PulsarConn* conn, const SSEvent* evt) {
     bool send_headers = false;
     if (!HAS_HEADERS_WRITTEN(conn->response.flags)) {
-#if WRITE_SERVER_HEADERS
         write_server_headers(conn);
-#endif
-        ASSERT(conn->response.headers_len < HEADERS_BUF_SIZE - 3);
+        // Ensure space for \r\n
+        ensure_headers_capacity(conn->arena, &conn->response, conn->response.headers_len + 2);
         memcpy(conn->response.headers_buf + conn->response.headers_len, "\r\n", 2);
         conn->response.headers_len += 2;
         SET_HEADERS_WRITTEN(conn->response.flags);
@@ -1181,16 +1169,10 @@ INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off
              "Content-Length: %ld\r\n"
              "Content-Range: bytes %ld-%ld/%lld\r\n";
     response_t* resp = &conn->response;
-    size_t remaining = HEADERS_BUF_SIZE - resp->headers_len - SAFETY_MARGIN;
-    if (remaining > 164) {
-        int len = snprintf(resp->headers_buf + resp->headers_len, remaining, hfmt, end - start + 1, start, end,
-                           (long long)file_size);
-        if (len > 0 && (size_t)len < remaining) {
-            resp->headers_len += (uint16_t)len;
-            return;
-        }
-    }
-    conn->closing = true;
+    ensure_headers_capacity(conn->arena, &conn->response, conn->response.headers_len + sizeof(hfmt) - 1);
+    size_t n = (size_t)snprintf(resp->headers_buf + resp->headers_len, sizeof(hfmt), hfmt, end - start + 1, start, end,
+                                (long long)file_size);
+    resp->headers_len += n;
 }
 
 bool conn_servefile(PulsarConn* conn, const char* filename) {
@@ -1257,14 +1239,11 @@ static void finalize_response(PulsarConn* conn, HttpMethod method) {
         conn_writeheader_raw(conn, cl_buf, (size_t)cl_len);
     }
 
-#if WRITE_SERVER_HEADERS
     write_server_headers(conn);
-#endif
-
-    assert(resp->headers_len < HEADERS_BUF_SIZE - SAFETY_MARGIN);
+    ensure_headers_capacity(conn->arena, resp, resp->headers_len + 3);
     memcpy(resp->headers_buf + resp->headers_len, "\r\n", 2);
     resp->headers_len += 2;
-    resp->headers_buf[HEADERS_BUF_SIZE - 1] = '\0';
+    resp->headers_buf[resp->headers_len] = '\0';
 }
 
 /* ================================================================
@@ -1281,70 +1260,73 @@ void static_file_handler(PulsarCtx* ctx) {
     size_t dirlen = route->state.static_.dirname_len;
     size_t pattern_len = route->pattern_len;
 
-    bool is_malicious = is_malicious_path(path);
+    /* Reject path traversal / null-byte injection early. */
+    if (is_malicious_path(path)) {
+        conn_notfound(conn);
+        return;
+    }
+
+    /*
+     * Slice off the route prefix to get the static sub-path.
+     * For a non-root pattern ("/static"), also eat a leading slash so
+     * we don't produce double slashes in the joined path.
+     */
     const char* static_ptr = path + pattern_len;
+    if (strcmp(pattern, "/") != 0 && *static_ptr == '/') { static_ptr++; }
     size_t static_len = strlen(static_ptr);
 
-    if (strcmp(pattern, "/") != 0) {
-        static_ptr += (*static_ptr == '/');
-        static_len -= (*static_ptr == '/');
+    /* Overflow-safe length guard before touching the stack buffer. */
+    if (dirlen >= PATH_MAX || static_len >= PATH_MAX || dirlen + static_len + 2 >= PATH_MAX) {
+        conn_set_status(conn, StatusRequestURITooLong);
+        conn_set_content_type(conn, SS_LIT("text/html"));
+        conn_write_string(conn, "<h1>Path too long</h1>");
+        return;
     }
 
-    bool path_too_long = (dirlen >= PATH_MAX) | (static_len >= PATH_MAX) | ((dirlen + static_len + 2) >= PATH_MAX);
+    char filepath[PATH_MAX];
+    char decoded[PATH_MAX];
+    char index_file[PATH_MAX];
 
-    enum { RESP_MALICIOUS = 1, RESP_TOO_LONG = 2, RESP_PROCESS = 3 } rtype = RESP_PROCESS;
-    if (is_malicious) rtype = RESP_MALICIOUS;
-    if (path_too_long) rtype = RESP_TOO_LONG;
-
-    char filepath[PATH_MAX] = {0};
-    char decoded_path[PATH_MAX] = {0};
-    char index_file[PATH_MAX] = {0};
-    bool file_found = false;
-
-    if (rtype == RESP_PROCESS) {
-        bool needs_slash = (dirlen > 0) & (dirname[dirlen - 1] != '/');
-        bool diff_prefix = strncmp(static_ptr, route->pattern, pattern_len) != 0;
-        int plen = snprintf(filepath, PATH_MAX, "%.*s%s%.*s", (int)dirlen, dirname,
-                            (diff_prefix & needs_slash) ? "/" : "", (int)static_len, static_ptr);
-
-        if (plen >= 0 && plen < PATH_MAX) {
-            if (strstr(filepath, "%") || strstr(filepath, "+")) {
-                url_percent_decode(filepath, decoded_path, (size_t)plen, PATH_MAX);
-                strncpy(filepath, decoded_path, sizeof(filepath));
-            }
-
-            file_found = is_file(filepath);
-            if (!file_found) {
-                int ilen = snprintf(index_file, sizeof(index_file), "%s/index.html", filepath);
-                file_found = (ilen >= 0 && ilen < PATH_MAX) && is_file(index_file);
-            }
-        }
+    /* Join: dirname + optional '/' + static sub-path. */
+    bool needs_slash = dirlen > 0 && dirname[dirlen - 1] != '/';
+    int plen = snprintf(filepath, sizeof(filepath), "%.*s%s%.*s", (int)dirlen, dirname, needs_slash ? "/" : "",
+                        (int)static_len, static_ptr);
+    if (plen < 0 || plen >= (int)sizeof(filepath)) {
+        conn_set_status(conn, StatusInternalServerError);
+        return;
     }
 
-    switch (rtype) {
-        case RESP_MALICIOUS:
+    /* Decode percent-encoding / '+' in-place when present. */
+    if (memchr(filepath, '%', (size_t)plen) || memchr(filepath, '+', (size_t)plen)) {
+        url_percent_decode(filepath, decoded, (size_t)plen, sizeof(decoded));
+        memcpy(filepath, decoded, (size_t)plen + 1); /* +1 for '\0' */
+    }
+
+    /*
+     * Resolve the target: prefer the path as-is; fall back to
+     * appending "/index.html" for directory requests.
+     */
+    bool use_index = false;
+    const char* serve_file = filepath;
+
+    if (!is_file(filepath)) {
+        int ilen = snprintf(index_file, sizeof(index_file), "%s%sindex.html", filepath,
+                            filepath[plen - 1] != '/' ? "/" : "");
+        if (ilen < 0 || ilen >= (int)sizeof(index_file) || !is_file(index_file)) {
             conn_notfound(conn);
-            break;
-        case RESP_TOO_LONG:
-            conn_set_status(conn, StatusRequestURITooLong);
-            conn_set_content_type(conn, SS_LIT("text/html"));
-            conn_write_string(conn, "<h1>Path too long</h1>");
-            break;
-        case RESP_PROCESS:
-            if (file_found) {
-                bool use_index = !is_file(filepath);
-                const char* serve_file = use_index ? index_file : filepath;
-                StrSlice content_type = use_index ? SS_LIT("text/html") : get_mimetype(filepath);
-                conn_set_content_type(conn, content_type);
-                if (!conn_servefile(conn, serve_file)) {
-                    conn_set_status(conn, StatusInternalServerError);
-                    conn_set_content_type(conn, SS_LIT("text/html"));
-                    conn_write_string(conn, "<h1>Error serving file</h1>");
-                }
-            } else {
-                conn_notfound(conn);
-            }
-            break;
+            return;
+        }
+        use_index = true;
+        serve_file = index_file;
+    }
+
+    StrSlice content_type = use_index ? SS_LIT("text/html") : get_mimetype(filepath);
+    conn_set_content_type(conn, content_type);
+
+    if (!conn_servefile(conn, serve_file)) {
+        conn_set_status(conn, StatusInternalServerError);
+        conn_set_content_type(conn, SS_LIT("text/html"));
+        conn_write_string(conn, "<h1>Error serving file</h1>");
     }
 }
 

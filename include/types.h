@@ -80,6 +80,7 @@ struct response_t {
 
     // 2-Byte Fields
     uint16_t headers_len;                  // Actual length of headers
+    uint16_t headers_cap;                  // Available capacity for the headers
     uint16_t headers_sent;                 // Bytes of headers sent
     char* headers_buf;                     // Buffer for the for headers
     union {

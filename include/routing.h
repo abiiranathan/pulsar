@@ -121,7 +121,8 @@ static inline route_t* route_delete(const char* pattern, HttpHandler handler) {
 
 /**
  * Registers a static file serving route.
- * @param pattern URL prefix pattern.
+ * @param pattern URL prefix pattern. If the pattern ends in / e.g /static/ then path /static will not match.
+ * But if the pattern is /static, both /static and /static/ will match.
  * @param dir Directory path (must exist and be resolved).
  * @return Pointer to the registered route structure.
  * @note Handles index.html serving and prevents directory traversal.

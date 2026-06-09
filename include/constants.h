@@ -10,12 +10,6 @@
 #define ENABLE_LOGGING 1
 #endif
 
-// If "truthy", server headers are written to the response.
-// This includes "Server" and "Date" headers.
-#ifndef WRITE_SERVER_HEADERS
-#define WRITE_SERVER_HEADERS 1
-#endif
-
 // Number of workers. Should be ideally == ncpus.
 #ifndef NUM_WORKERS
 #define NUM_WORKERS 4
@@ -85,9 +79,9 @@
 #endif
 
 // Constants
-#define STATUS_LINE_SIZE 48
-#define HEADERS_BUF_SIZE 4096
-#define CACHE_LINE_SIZE  64
+#define STATUS_LINE_SIZE         48
+#define HEADERS_DEFAULT_CAPACITY 4096
+#define CACHE_LINE_SIZE          64
 
 static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");

@@ -105,6 +105,7 @@ static void sse_on_close(PulsarConn* conn) {
 
 void sse_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
+    conn_writeheader(conn, SS_LIT("Access-Control-Allow-Origin"), SS_LIT("*"));
 
     // Send the initial HTTP handshake headers
     conn_start_sse(conn);
@@ -125,6 +126,22 @@ void sse_handler(PulsarCtx* ctx) {
 
     // Transition the connection to the background slow worker pool
     if (!pulsar_handoff(conn, handlers)) { conn_set_status(conn, StatusInternalServerError); }
+}
+
+void sse_page(PulsarCtx* ctx) {
+    StrSlice html = SS_LIT(
+        "<html><body><script>"
+        " const url=\"http://localhost:8080/sse\";"
+        " const ev = new EventSource(url);"
+        " ev.onmessage = (ev) => {"
+        "    let p = document.createElement(\"p\");"
+        "    p.innerText = ev.data; "
+        "    document.body.appendChild(p);p.scrollIntoView();"
+        "};"
+        "ev.onerror = (err)=>{"
+        "    console.log(err);"
+        "}</script></body></html>");
+    conn_send_html(ctx->conn, StatusOK, html.data, html.len);
 }
 
 /* =========================================================================
@@ -318,6 +335,7 @@ int main(void) {
 
     route_get("/json", json_handler);
     route_get("/sse", sse_handler);
+    route_get("/sse-page", sse_page);
     route_get("/chunked", chunked_handler);
     route_get("/echo", echo_handler);
     route_post("/echo", echo_handler);
