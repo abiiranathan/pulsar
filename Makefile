@@ -31,7 +31,7 @@ endif
 # === Compiler Flags ===
 
 DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
-BASE_CFLAGS := -Wall -Werror -Wextra -std=c23 -fPIC -Iinclude $(DEFINES) \
+BASE_CFLAGS := -Wall -Werror -Wextra -std=c11 -fPIC -Iinclude $(DEFINES) \
                -Wno-unused-function -Wno-gnu-zero-variadic-macro-arguments
 
 ifeq ($(BUILD), debug)

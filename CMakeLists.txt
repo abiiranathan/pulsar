@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 3.20)
 
 project(pulsar
     VERSION     1.0.0
@@ -10,7 +10,7 @@ project(pulsar
 # Global settings
 # ------------------------------------------------------------------------------
 
-set(CMAKE_C_STANDARD          23)
+set(CMAKE_C_STANDARD          11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS        ON)
 

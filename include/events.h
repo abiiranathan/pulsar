@@ -1,6 +1,7 @@
 #ifndef EVENTS_H
 #define EVENTS_H
 
+#include <stdbool.h>
 #include <stdlib.h>
 
 // Platform-specific includes
