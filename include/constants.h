@@ -83,16 +83,16 @@
 #define HEADERS_DEFAULT_CAPACITY 4096
 #define CACHE_LINE_SIZE          64
 
-static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
-static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
-static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
-static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
-static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
-static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
-static_assert(WRITE_BUFFER_SIZE >= 1024, "WRITE_BUFFER_SIZE must be at least 1KB");
-static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 seconds");
-static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
-static_assert(MAX_FILE_SIZE > 0, "MAX_FILE_SIZE must be > 0");
-static_assert(MAX_FILE_SIZE <= MAX_BODY_SIZE, "MAX_FILE_SIZE must be <= MAX_BODY_SIZE");
+_Static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
+_Static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
+_Static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
+_Static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
+_Static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
+_Static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
+_Static_assert(WRITE_BUFFER_SIZE >= 1024, "WRITE_BUFFER_SIZE must be at least 1KB");
+_Static_assert(CONNECTION_TIMEOUT >= 5, "CONNECTION_TIMEOUT must be at least 5 seconds");
+_Static_assert(MAX_BODY_SIZE > 0, "MAX_BODY_SIZE must be > 0");
+_Static_assert(MAX_FILE_SIZE > 0, "MAX_FILE_SIZE must be > 0");
+_Static_assert(MAX_FILE_SIZE <= MAX_BODY_SIZE, "MAX_FILE_SIZE must be <= MAX_BODY_SIZE");
 
 #endif /* CONSTANTS_H */
