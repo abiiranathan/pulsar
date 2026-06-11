@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-typedef enum : uint32_t {
+typedef enum {
     StatusContinue = 100,
     StatusSwitchingProtocols = 101,
     StatusProcessing = 102,

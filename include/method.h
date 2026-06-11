@@ -8,7 +8,7 @@ extern "C" {
 #include <stdint.h>
 #include <string.h>
 
-typedef enum : int8_t {
+typedef enum {
     HTTP_INVALID = -1,
     HTTP_GET,
     HTTP_POST,
