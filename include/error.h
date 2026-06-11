@@ -11,8 +11,7 @@
 
 #include <solidc/defer.h>
 #include <stdio.h>  // for fprintf, stderr
-
-#include "form.h"
+#include "forms.h"
 #include "pulsar.h"
 
 /* =========================================================================
