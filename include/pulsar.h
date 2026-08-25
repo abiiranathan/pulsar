@@ -61,13 +61,13 @@ int pulsar_run(const char* addr, int port);
 // Re-arm client socket for another write and yield from
 // on_write callback giving control back to the event loop.
 #define yield_write(conn)                                         \
-    event_mod_write(conn->owner_queue_fd, conn->client_fd, conn); \
+    event_mod_write(conn->owner_queue, conn->client_fd, conn); \
     return;
 
 // Re-arm client socket for another read and yield from
 // on_read callback giving control back to the event loop.
 #define yield_read(conn)                                         \
-    event_mod_read(conn->owner_queue_fd, conn->client_fd, conn); \
+    event_mod_read(conn->owner_queue, conn->client_fd, conn); \
     return;
 
 /** Returns the worker id of the current worker.

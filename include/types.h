@@ -73,7 +73,7 @@ struct response_t {
     http_status status_code;  // HTTP status code (enum)
     int file_fd;              // File descriptor for file to send
     uint32_t file_size;       // Size of file to send
-    uint32_t file_offset;     // Offset in file for sendfile
+    int64_t file_offset;      // Offset in file for sendfile
     uint32_t max_range;       // Maximum range of requested bytes
 
     char* status_buf;         //  Buffer for status line
@@ -132,7 +132,7 @@ struct pulsar_conn {
     int worker_id;                                   // ID of the current worker running the thread.
 
     // Background worker processing
-    int owner_queue_fd;                         // The event queue FD of its current owner
+    struct Poller* owner_queue;                 // The event queue of its current owner
     void* owner_ka_state;                       // Reference to the owner's KeepAliveState
     bool offloaded;                             // Flag indicating ownership transfer
     struct PulsarOffloadHandler offload_hooks;  // Registered lifecycle callbacks

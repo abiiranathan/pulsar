@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 
 #include "../include/events.h"
+#include <solidc/file.h>
 #include "../include/mimetypes.h"
 #include "../include/plog.h"
 #include "../include/pulsar.h"
@@ -34,8 +35,8 @@ typedef struct KeepAliveState {
 static void finalize_response(PulsarConn* conn, HttpMethod method);
 INLINE void free_response_body(response_t* resp);
 static void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state);
-static void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state);
-static void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_state);
+static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
+static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state);
 
 /* ================================================================
  * Slow Worker Pool
@@ -47,16 +48,16 @@ static void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_
  * and therefore no hard cap on the number of simultaneously offloaded clients.
  *
  * Thread-safety contract:
- *   - A SlowWorker's fields (queue_fd, keep_alive_state) are written only
+ *   - A SlowWorker's fields (queue, keep_alive_state) are written only
  *     during initialisation in pulsar_run(), before any worker thread starts.
- *   - After start-up, queue_fd is read-only; keep_alive_state is owned
+ *   - After start-up, queue is read-only; keep_alive_state is owned
  *     exclusively by its worker thread (no cross-thread access).
  *   - The only shared mutable state is next_slow_worker, which is updated
  *     via atomic fetch-add so no mutex is required for round-robin selection.
  * ================================================================ */
 typedef struct SlowWorker {
     pthread_t thread;                /**< OS thread handle. */
-    int queue_fd;                    /**< Kernel event queue (epoll fd / kqueue fd). */
+    event_queue_t* queue;            /**< Event queue (solidc poller). */
     int id;                          /**< Zero-based worker index, useful for debugging. */
     KeepAliveState keep_alive_state; /**< Idle-connection timeout list. */
 } SlowWorker;
@@ -71,15 +72,15 @@ static _Atomic int next_slow_worker = 0;
  * worker.  Runs the user's on_close hook (if registered), removes the fd from
  * the event queue, and frees all resources associated with the connection.
  *
- * @param queue_fd  The slow worker's event queue file descriptor.
+ * @param queue     The slow worker's event queue.
  * @param conn      The connection to tear down.  Must not be NULL.
  * ---------------------------------------------------------------- */
-static void slow_close_offloaded(int queue_fd, PulsarConn* conn) {
+static void slow_close_offloaded(event_queue_t* queue, PulsarConn* conn) {
     /* Notify user code first so it can clean up its own state (e.g. remove
      * the connection from a subscribers list) before the fd is closed. */
     if (conn->offload_hooks.on_close) { conn->offload_hooks.on_close(conn); }
 
-    event_delete(queue_fd, conn->client_fd);
+    event_delete(queue, conn->client_fd);
     close(conn->client_fd);
     conn->client_fd = -1;
 
@@ -105,7 +106,7 @@ static void slow_close_offloaded(int queue_fd, PulsarConn* conn) {
 
 static void* slow_worker_thread(void* arg) {
     SlowWorker* worker = (SlowWorker*)arg;
-    int queue_fd = worker->queue_fd;
+    event_queue_t* queue = worker->queue;
     KeepAliveState* ka = &worker->keep_alive_state;
     event_t events[MAX_EVENTS] = {0};
 
@@ -116,7 +117,7 @@ static void* slow_worker_thread(void* arg) {
          * Block for up to 1 s so the timeout check below fires promptly
          * even when the connection list is quiet.
          */
-        int n = event_wait(queue_fd, events, MAX_EVENTS, 1000);
+        int n = event_wait(queue, events, MAX_EVENTS, 1000);
         if (n < 0) {
             if (errno == EINTR) continue;
             perror("slow_worker event_wait");
@@ -133,7 +134,7 @@ static void* slow_worker_thread(void* arg) {
                 PulsarConn* nxt = cur->next;
                 if (conn_timedout(now, cur->last_activity)) {
                     RemoveKeepAliveConnection(cur, ka);
-                    slow_close_offloaded(queue_fd, cur);
+                    slow_close_offloaded(queue, cur);
                 }
                 cur = nxt;
             }
@@ -186,12 +187,12 @@ static void* slow_worker_thread(void* arg) {
                  * slow pool for keep-alive tracking) remove it first.
                  */
                 if (conn->in_keep_alive) { RemoveKeepAliveConnection(conn, ka); }
-                slow_close_offloaded(queue_fd, conn);
+                slow_close_offloaded(queue, conn);
             }
         }
     }
 
-    close(queue_fd);
+    event_queue_free(queue);
     return NULL;
 }
 
@@ -219,7 +220,7 @@ static void* slow_worker_thread(void* arg) {
  * ---------------------------------------------------------------- */
 bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
     /* deregister from the current (main) worker's event queue. */
-    if (event_delete(conn->owner_queue_fd, conn->client_fd) < 0) return false;
+    if (event_delete(conn->owner_queue, conn->client_fd) < 0) return false;
 
     /* remove from keep-alive tracking if enlisted. */
     if (conn->in_keep_alive && conn->owner_ka_state) {
@@ -234,7 +235,7 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
     int idx = atomic_fetch_add_explicit(&next_slow_worker, 1, memory_order_relaxed) % NUM_SLOW_WORKERS;
     SlowWorker* target = &slow_workers[idx];
 
-    conn->owner_queue_fd = target->queue_fd;
+    conn->owner_queue = target->queue;
     conn->owner_ka_state = &target->keep_alive_state;
 
     /*
@@ -242,8 +243,8 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
      * disconnects (EOF) even for write-only protocols.  If the caller also
      * supplies an on_write hook, upgrade to read+write monitoring.
      */
-    int ret = event_add_read(target->queue_fd, conn->client_fd, conn);
-    if (ret >= 0 && handlers.on_write) { ret = event_mod_write(target->queue_fd, conn->client_fd, conn); }
+    int ret = event_add_read(target->queue, conn->client_fd, conn);
+    if (ret >= 0 && handlers.on_write) { ret = event_mod_write(target->queue, conn->client_fd, conn); }
 
     if (ret < 0) {
         /*
@@ -317,12 +318,12 @@ static void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-static void CheckKeepAliveTimeouts(KeepAliveState* state, int epoll_fd) {
+static void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue) {
     PulsarConn* current = state->head;
     time_t now = time(NULL);
     while (current) {
         PulsarConn* next = current->next;
-        if (conn_timedout(now, current->last_activity)) { close_connection(epoll_fd, current, state); }
+        if (conn_timedout(now, current->last_activity)) { close_connection(queue, current, state); }
         current = next;
     }
 }
@@ -431,10 +432,10 @@ static bool reset_connection(PulsarConn* conn) {
     return (conn->read_buf && req->path && req->headers && res->status_buf && res->headers_buf);
 }
 
-static void close_connection(int queue_fd, PulsarConn* conn, KeepAliveState* ka_state) {
+static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state) {
     if (!conn || conn->client_fd == -1) return;
 
-    event_delete(queue_fd, conn->client_fd);
+    event_delete(queue, conn->client_fd);
     close(conn->client_fd);
     conn->client_fd = -1;
 
@@ -1540,7 +1541,8 @@ INLINE int parse_request_line(const char* input, size_t input_len, char* method,
 /* ================================================================
  * Core Request Processor
  * ================================================================ */
-static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliveState* state, int queue_fd) {
+static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliveState* state,
+                                   event_queue_t* queue) {
     const char* end_of_headers = find_headers_end(conn->read_buf, read_bytes);
     if (!end_of_headers) return StatusBadRequest;
 
@@ -1585,7 +1587,7 @@ static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
         if (conn->keep_alive) {
             AddKeepAliveConnection(conn, state);
             conn->closing = true;
-            if (reset_connection(conn)) conn->closing = (event_mod_read(queue_fd, conn->client_fd, conn) < 0);
+            if (reset_connection(conn)) conn->closing = (event_mod_read(queue, conn->client_fd, conn) < 0);
         }
     } else {
         finalize_response(conn, req->method_type);
@@ -1723,7 +1725,8 @@ INLINE int conn_accept(int worker_id) {
 /* ================================================================
  * Event Loop: Add / Read / Write
  * ================================================================ */
-static void add_connection_to_worker(int queue_fd, int client_fd, int worker_id, KeepAliveState* ka_state) {
+static void add_connection_to_worker(event_queue_t* queue, int client_fd, int worker_id,
+                                     KeepAliveState* ka_state) {
     Arena* arena = arena_create(1 << 20);
     if (!arena) {
         fprintf(stderr, "add_connection_to_worker->arena_create failed\n");
@@ -1748,11 +1751,11 @@ static void add_connection_to_worker(int queue_fd, int client_fd, int worker_id,
         return;
     }
 
-    conn->owner_queue_fd = queue_fd;
+    conn->owner_queue = queue;
     conn->owner_ka_state = ka_state;
     conn->offloaded = false;
 
-    if (event_add_read(queue_fd, client_fd, conn) < 0) {
+    if (event_add_read(queue, client_fd, conn) < 0) {
         perror("event_add_read");
         close(client_fd);
         conn->client_fd = -1;
@@ -1763,7 +1766,7 @@ static void add_connection_to_worker(int queue_fd, int client_fd, int worker_id,
     }
 }
 
-static void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
+static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) { clock_gettime(CLOCK_MONOTONIC, &conn->start); }
 #endif
@@ -1775,15 +1778,15 @@ static void handle_read(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
     }
     conn->read_buf[bytes_read] = '\0';
 
-    http_status status = process_request(conn, (size_t)bytes_read, state, queue_fd);
+    http_status status = process_request(conn, (size_t)bytes_read, state, queue);
     if (status != StatusOK) { write_error(conn, status); }
 
     if (conn->offloaded) { return; }
 
-    if (conn->request.method_type != HTTP_INVALID && !conn->closing) { handle_write(queue_fd, conn, state); }
+    if (conn->request.method_type != HTTP_INVALID && !conn->closing) { handle_write(queue, conn, state); }
 }
 
-static void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) {
+static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
     response_t* res = &conn->response;
     int client_fd = conn->client_fd;
     const bool sending_file = res->file_fd > 0 && res->file_size > 0;
@@ -1816,30 +1819,12 @@ static void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
             } else {
                 off_t chunk = HAS_RANGE_REQUEST(res->flags) ? (off_t)MIN(1 << 20, (size_t)rem) : rem;
 
-#if defined(__linux__)
-                off_t off = res->file_offset;
-                sent = sendfile(client_fd, res->file_fd, &off, (size_t)chunk);
-                if (sent > 0) res->file_offset = off;
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-                off_t len = chunk;
-                int r = sendfile(res->file_fd, client_fd, res->file_offset, &len, NULL, 0);
-                if (r == 0 || (r == -1 && errno == EAGAIN)) {
-                    sent = len;
-                    res->file_offset += sent;
-                } else
-                    sent = -1;
-#else
-                static _Thread_local char fbuf[1 << 20];
-                chunk = MIN(chunk, (off_t)sizeof(fbuf));
-                ssize_t rb = pread(res->file_fd, fbuf, (size_t)chunk, res->file_offset);
-                if (rb <= 0) {
-                    sent = -1;
-                    errno = EIO;
-                } else {
-                    sent = write(client_fd, fbuf, (size_t)rb);
-                    if (sent > 0) res->file_offset += sent;
+                sent = file_sendfile(client_fd, res->file_fd, &res->file_offset, (size_t)chunk);
+                if (sent == -1 && errno == EAGAIN) {
+                    /* Non-blocking socket full: caller retries via the
+                     * poller write event; offset already advanced. */
+                    sent = 0;
                 }
-#endif
                 if (unlikely(sent < 0)) goto handle_error;
                 if (sent == 0) return;
                 complete = (res->file_offset >= (off_t)res->file_size);
@@ -1883,7 +1868,7 @@ static void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
                 AddKeepAliveConnection(conn, state);
                 if (reset_connection(conn)) {
                     if (was_pending) {
-                        if (event_mod_read(queue_fd, conn->client_fd, conn) < 0) { conn->closing = true; }
+                        if (event_mod_read(queue, conn->client_fd, conn) < 0) { conn->closing = true; }
                     }
                 } else {
                     conn->closing = true;
@@ -1898,7 +1883,7 @@ static void handle_write(int queue_fd, PulsarConn* conn, KeepAliveState* state) 
 handle_error:
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
         SET_WRITE_PENDING(res->flags);
-        if (event_mod_write(queue_fd, conn->client_fd, conn) < 0) {
+        if (event_mod_write(queue, conn->client_fd, conn) < 0) {
             if (sending_file) {
                 close(res->file_fd);
                 res->file_fd = -1;
@@ -1921,18 +1906,18 @@ handle_error:
  * Worker Thread
  * ================================================================ */
 typedef struct {
-    int queue_fd;
+    event_queue_t* queue;
     int id;
     KeepAliveState* keep_alive_state;
 } WorkerData;
 
 void* worker_thread(void* arg) {
     WorkerData* worker = (WorkerData*)arg;
-    int queue_fd = worker->queue_fd;
+    event_queue_t* queue = worker->queue;
     int worker_id = worker->id;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
-    if (event_add_server(queue_fd, server_fd) < 0) {
+    if (event_add_server(queue, server_fd) < 0) {
         perror("event_add_server");
         return NULL;
     }
@@ -1942,7 +1927,7 @@ void* worker_thread(void* arg) {
     int loop_counter = 0;
 
     while (server_running) {
-        int n = event_wait(queue_fd, events, MAX_EVENTS, 500);
+        int n = event_wait(queue, events, MAX_EVENTS, 500);
         if (n == -1) {
             if (errno == EINTR) continue;
             perror("event_wait");
@@ -1954,7 +1939,7 @@ void* worker_thread(void* arg) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec - last_timeout_check >= 5) {
-                CheckKeepAliveTimeouts(ka_state, queue_fd);
+                CheckKeepAliveTimeouts(ka_state, queue);
                 last_timeout_check = now.tv_sec;
             }
             loop_counter = 0;
@@ -1965,7 +1950,7 @@ void* worker_thread(void* arg) {
 
             if (event_get_fd(ev) == server_fd) {
                 int client_fd = conn_accept(worker_id);
-                if (client_fd > 0) add_connection_to_worker(queue_fd, client_fd, worker_id, ka_state);
+                if (client_fd > 0) add_connection_to_worker(queue, client_fd, worker_id, ka_state);
             } else {
                 PulsarConn* conn = (PulsarConn*)event_get_data(ev);
                 if (!conn) continue;
@@ -1973,19 +1958,19 @@ void* worker_thread(void* arg) {
                 conn->worker_id = worker_id;
 
                 if (event_is_read(ev))
-                    handle_read(queue_fd, conn, ka_state);
+                    handle_read(queue, conn, ka_state);
                 else if (event_is_write(ev))
-                    handle_write(queue_fd, conn, ka_state);
+                    handle_write(queue, conn, ka_state);
                 else if (event_is_error(ev))
                     conn->closing = true;
 
-                if (conn->closing) close_connection(queue_fd, conn, ka_state);
+                if (conn->closing) close_connection(queue, conn, ka_state);
             }
         }
     }
 
-    event_delete(queue_fd, server_fd);
-    close(queue_fd);
+    event_delete(queue, server_fd);
+    event_queue_free(queue);
     return NULL;
 }
 
@@ -2011,8 +1996,8 @@ int pulsar_run(const char* addr, int port) {
      */
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         slow_workers[i].id = i;
-        slow_workers[i].queue_fd = event_queue_create();
-        if (slow_workers[i].queue_fd < 0) {
+        slow_workers[i].queue = event_queue_create();
+        if (!slow_workers[i].queue) {
             perror("slow event_queue_create");
             exit(EXIT_FAILURE);
         }
@@ -2029,13 +2014,13 @@ int pulsar_run(const char* addr, int port) {
     KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
 
     for (int i = 0; i < NUM_WORKERS; i++) {
-        int queue_fd = event_queue_create();
-        if (queue_fd == -1) {
+        event_queue_t* queue = event_queue_create();
+        if (!queue) {
             perror("event_queue_create");
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].queue_fd = queue_fd;
+        worker_data[i].queue = queue;
         worker_data[i].id = i;
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
