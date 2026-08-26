@@ -69,11 +69,8 @@ set(PULSAR_SOURCES
     src/routing.c
 )
 
-if(PLATFORM_LINUX)
-    list(APPEND PULSAR_SOURCES src/events/epoll.c)
-elseif(PLATFORM_MACOS)
-    list(APPEND PULSAR_SOURCES src/events/kqueue.c)
-endif()
+# Event loop is provided by include/events.h, a thin wrapper over
+# solidc's cross-platform poller (linked via solidc::solidc).
 
 file(GLOB PULSAR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 

@@ -54,7 +54,9 @@ static inline void LocalsInit(Locals* locals) {
 static inline void LocalsClear(Locals* locals) {
     if (locals->managed_count > 0) {
         for (uint8_t i = 0; i < locals->size; ++i) {
-            if (locals->entries[i].free_func != NULL) locals->entries[i].free_func(locals->entries[i].value);
+            if (locals->entries[i].free_func != NULL) {
+                locals->entries[i].free_func(locals->entries[i].value);
+            }
         }
     }
     locals->size = 0;
