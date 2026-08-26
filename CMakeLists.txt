@@ -102,6 +102,12 @@ if(ENABLE_NATIVE_OPTIMIZATION AND PLATFORM_LINUX)
     )
 endif()
 
+# Avoid PLT indirection on libc calls in the hot path (memchr/memcmp/writev);
+# with -fno-plt the compiler emits a direct call via GOT load instead.
+if(PLATFORM_LINUX)
+    target_compile_options(pulsar_objects PRIVATE $<$<CONFIG:Release>:-fno-plt>)
+endif()
+
 target_link_libraries(pulsar_objects PUBLIC solidc::solidc)
 
 # ------------------------------------------------------------------------------

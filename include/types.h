@@ -117,26 +117,33 @@ typedef struct PulsarOffloadHandler {
 
 // Connection state structure
 struct pulsar_conn {
-    int client_fd;                                   // Client socket file descriptor
+    /* ---- Hot: touched on every event/request; kept within the first
+     *      cache lines so per-request dispatch stays cache-local. ---- */
     char* read_buf;                                  // Buffer for incoming data.
+    Arena* arena;                                    // Memory arena for allocations
     size_t pending_len;                              // Bytes of a partial request buffered across reads.
+    int client_fd;                                   // Client socket file descriptor
+    int worker_id;                                   // ID of the current worker running the thread.
+    bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
+    time_t last_activity;                            // Timestamp of last I/O activity
+
+    /* ---- Per-request state ---- */
     Locals locals;                                   // Per-request context variables set by the user.
     struct request_t request;                        // HTTP request data (arena allocated)
     struct response_t response;                      // HTTP response data (arena allocated)
-    Arena* arena;                                    // Memory arena for allocations
+
 #if ENABLE_LOGGING
     struct timespec start;                           // Timestamp of first request
 #endif
-    time_t last_activity;                            // Timestamp of last I/O activity
-    struct pulsar_conn *next, *prev;                 // Linked list nodes for keep-alive tracking.
-    bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
-    int worker_id;                                   // ID of the current worker running the thread.
 
-    // Background worker processing
+    /* ---- Keep-alive list linkage ---- */
+    struct pulsar_conn *next, *prev;                 // Linked list nodes for keep-alive tracking.
+
+    /* ---- Background worker ownership ---- */
     struct Poller* owner_queue;                 // The event queue of its current owner
     void* owner_ka_state;                       // Reference to the owner's KeepAliveState
-    bool offloaded;                             // Flag indicating ownership transfer
     struct PulsarOffloadHandler offload_hooks;  // Registered lifecycle callbacks
+    bool offloaded;                             // Flag indicating ownership transfer
 };
 
 /**
