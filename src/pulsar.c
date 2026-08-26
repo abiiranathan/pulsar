@@ -10,7 +10,8 @@
 #include "../include/plog.h"
 #include "../include/pulsar.h"
 
-static int server_fd = -1;
+static int server_fd = -1;                 /**< Legacy single listener (unused with per-worker sockets). */
+static int worker_listen_fds[NUM_WORKERS]; /**< Per-worker SO_REUSEPORT listeners. */
 volatile sig_atomic_t server_running = 1;
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 static size_t global_mw_count = 0;
@@ -430,9 +431,12 @@ static bool reset_connection(PulsarConn* conn) {
     LocalsClear(&conn->locals);
     arena_reset(arena);
 
+    /* Allocation order MUST match init_connection(): read_buf first keeps
+     * its address stable across resets, which the pipelined-read loop in
+     * handle_read() relies on (it parses buffered requests across a reset). */
+    conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
     req->path = arena_alloc(arena, PATH_MAX);
     req->headers = arena_alloc(arena, sizeof(headers_t));
-    conn->read_buf = arena_alloc(arena, READ_BUFFER_SIZE);
     if (req->headers) headers_init(req->headers);
     response_init(res, arena);
 
@@ -495,8 +499,8 @@ INLINE const char* find_headers_end(const char* buf, size_t len) {
     return NULL;
 }
 
-static bool parse_request_headers(PulsarConn* conn, HttpMethod method, size_t headers_len) {
-    const char* ptr = conn->read_buf;
+static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod method, size_t headers_len) {
+    const char* ptr = hdrs;
     const char* end = ptr + headers_len;
     const bool is_safe = SAFE_METHOD(method);
     request_t* req = &conn->request;
@@ -602,7 +606,7 @@ static bool parse_query_params(PulsarConn* conn, size_t* path_len) {
     return true;
 }
 
-static http_status parse_request_body(PulsarConn* conn, size_t headers_len, size_t read_bytes) {
+static http_status parse_request_body(PulsarConn* conn, const char* buf, size_t headers_len, size_t read_bytes) {
     if (conn->request.content_length == 0) return StatusOK;
 
     request_t* req = &conn->request;
@@ -620,7 +624,7 @@ static http_status parse_request_body(PulsarConn* conn, size_t headers_len, size
         return StatusInternalServerError;
     }
 
-    memcpy(req->body, conn->read_buf + headers_len, body_available);
+    memcpy(req->body, buf + headers_len, body_available);
     req->body[body_available] = '\0';
 
     size_t received = body_available;
@@ -1522,19 +1526,29 @@ INLINE int parse_request_line(const char* input, size_t input_len, char* method,
 /* ================================================================
  * Core Request Processor
  * ================================================================ */
-static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliveState* state, event_queue_t* queue) {
-    const char* end_of_headers = find_headers_end(conn->read_buf, read_bytes);
+/**
+ * Processes one complete request located at @p buf.
+ *
+ * @param consumed Out: bytes of @p buf occupied by the request (headers plus
+ *                 any in-buffer body). Lets the caller iterate over
+ *                 pipelined requests inside a single read().
+ */
+static http_status process_request(PulsarConn* conn, const char* buf, size_t read_bytes, size_t* consumed,
+                                   KeepAliveState* state, event_queue_t* queue) {
+    *consumed = 0;
+
+    const char* end_of_headers = find_headers_end(buf, read_bytes);
     if (!end_of_headers) return StatusBadRequest;
 
     request_t* req = &conn->request;
-    size_t headers_len = (size_t)(end_of_headers - conn->read_buf) + 4;
+    size_t headers_len = (size_t)(end_of_headers - buf) + 4;
 
     char url[MAX_PATH_LEN + 1];
     char http_protocol[16] = {0};
     size_t method_len = 0, url_len = 0, protocol_len = 0;
 
-    if (parse_request_line(conn->read_buf, read_bytes, req->method, sizeof(req->method), &method_len, url, sizeof(url),
-                           &url_len, http_protocol, sizeof(http_protocol), &protocol_len) != 0)
+    if (parse_request_line(buf, read_bytes, req->method, sizeof(req->method), &method_len, url, sizeof(url), &url_len,
+                           http_protocol, sizeof(http_protocol), &protocol_len) != 0)
         return StatusBadRequest;
 
     size_t path_len = url_percent_decode(url, req->path, url_len, MAX_PATH_LEN);
@@ -1545,14 +1559,17 @@ static http_status process_request(PulsarConn* conn, size_t read_bytes, KeepAliv
     if (!METHOD_VALID(req->method_type)) return StatusMethodNotAllowed;
 
     if (!parse_query_params(conn, &path_len)) return StatusInternalServerError;
-    if (!parse_request_headers(conn, req->method_type, headers_len)) return StatusInternalServerError;
+    if (!parse_request_headers(conn, buf, req->method_type, headers_len)) return StatusInternalServerError;
+
+    /* Content-Length is now known: the request occupies headers + body. */
+    *consumed = headers_len + req->content_length;
 
     route_t* route = route_match(req->path, path_len, req->method_type, conn->arena);
     if (!route) return StatusNotFound;
 
     req->route = route;
     http_status status;
-    status = parse_request_body(conn, headers_len, read_bytes);
+    status = parse_request_body(conn, buf, headers_len, read_bytes);
     if (status != StatusOK) {
         return status;
     }
@@ -1652,15 +1669,15 @@ static int create_server_socket(const char* host, int port) {
 /* ================================================================
  * Accept & Per-Connection Socket Options
  * ================================================================ */
-INLINE int conn_accept(int worker_id) {
-    (void)worker_id;
+INLINE int conn_accept(int listen_fd) {
+    (void)listen_fd;
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
 
 #ifdef __linux__
-    int client_fd = accept4(server_fd, (struct sockaddr*)&addr, &addr_len, SOCK_NONBLOCK);
+    int client_fd = accept4(listen_fd, (struct sockaddr*)&addr, &addr_len, SOCK_NONBLOCK);
 #else
-    int client_fd = accept(server_fd, (struct sockaddr*)&addr, &addr_len);
+    int client_fd = accept(listen_fd, (struct sockaddr*)&addr, &addr_len);
 #endif
     if (client_fd < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) perror("accept");
@@ -1756,24 +1773,57 @@ static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
     }
 #endif
 
-    ssize_t bytes_read = read(conn->client_fd, conn->read_buf, READ_BUFFER_SIZE - 1);
+    /*
+     * Edge-triggered drain loop: the fd is registered with EPOLLET, so a
+     * single wake-up must consume everything currently queued. Every
+     * complete request found in the buffer is parsed, dispatched and
+     * answered here — this serves pipelined clients in one pass and
+     * amortises syscall cost across back-to-back requests. A trailing
+     * partial request is preserved across reads (pending_len).
+     */
+    ssize_t bytes_read =
+        read(conn->client_fd, conn->read_buf + conn->pending_len, READ_BUFFER_SIZE - 1 - conn->pending_len);
+    if (bytes_read < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return; /* spurious wakeup */
     if (bytes_read <= 0) {
         conn->closing = true;
         return;
     }
-    conn->read_buf[bytes_read] = '\0';
 
-    http_status status = process_request(conn, (size_t)bytes_read, state, queue);
-    if (status != StatusOK) {
-        write_error(conn, status);
-    }
+    size_t total = conn->pending_len + (size_t)bytes_read;
+    conn->read_buf[total] = '\0';
 
-    if (conn->offloaded) {
-        return;
-    }
+    size_t offset = 0;
+    while (offset < total) {
+        const char* buf = conn->read_buf + offset;
+        size_t avail = total - offset;
 
-    if (conn->request.method_type != HTTP_INVALID && !conn->closing) {
+        /* Incomplete trailing request: keep it buffered for the next event. */
+        if (!find_headers_end(buf, avail)) break;
+
+        size_t consumed = 0;
+        http_status status = process_request(conn, buf, avail, &consumed, state, queue);
+        if (status != StatusOK) {
+            write_error(conn, status);
+        }
+
+        if (conn->offloaded) return;
+
         handle_write(queue, conn, state);
+        if (conn->closing || consumed == 0) return;
+
+        offset += consumed;
+    }
+
+    if (offset < total) {
+        /* Buffer full with no complete request: malformed, give up. */
+        if (offset == 0 && total == (size_t)(READ_BUFFER_SIZE - 1)) {
+            conn->closing = true;
+            return;
+        }
+        memmove(conn->read_buf, conn->read_buf + offset, total - offset);
+        conn->pending_len = total - offset;
+    } else {
+        conn->pending_len = 0;
     }
 }
 
@@ -1903,6 +1953,7 @@ handle_error:
 typedef struct {
     event_queue_t* queue;
     int id;
+    int listen_fd; /**< This worker's own SO_REUSEPORT listener. */
     KeepAliveState* keep_alive_state;
 } WorkerData;
 
@@ -1910,9 +1961,10 @@ void* worker_thread(void* arg) {
     WorkerData* worker = (WorkerData*)arg;
     event_queue_t* queue = worker->queue;
     int worker_id = worker->id;
+    int listen_fd = worker->listen_fd;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
-    if (event_add_server(queue, server_fd) < 0) {
+    if (event_add_server(queue, listen_fd) < 0) {
         perror("event_add_server");
         return NULL;
     }
@@ -1943,11 +1995,11 @@ void* worker_thread(void* arg) {
         for (int i = 0; i < n; i++) {
             const event_t* ev = &events[i];
 
-            if (event_get_fd(ev) == server_fd) {
+            if (event_get_fd(ev) == listen_fd) {
                 /* Edge-triggered listener: drain until EAGAIN or one accept
                  * per wake-up strands the rest of the burst in the backlog. */
                 int client_fd;
-                while ((client_fd = conn_accept(worker_id)) > 0) {
+                while ((client_fd = conn_accept(listen_fd)) > 0) {
                     add_connection_to_worker(queue, client_fd, worker_id, ka_state);
                 }
             } else {
@@ -1968,7 +2020,8 @@ void* worker_thread(void* arg) {
         }
     }
 
-    event_delete(queue, server_fd);
+    event_delete(queue, listen_fd);
+    close(listen_fd);
     event_queue_free(queue);
     return NULL;
 }
@@ -1977,8 +2030,20 @@ void* worker_thread(void* arg) {
  * pulsar_run — public entry point
  * ================================================================ */
 int pulsar_run(const char* addr, int port) {
-    server_fd = create_server_socket(addr, port);
-    set_nonblocking(server_fd);
+    /*
+     * One SO_REUSEPORT listener per worker: the kernel hashes incoming
+     * SYNs across sockets, so each worker accepts from its own queue with
+     * no EPOLLEXCLUSIVE wakeup serialization and no shared listen-queue
+     * cache-line bouncing between cores.
+     */
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        worker_listen_fds[i] = create_server_socket(addr, port);
+        if (worker_listen_fds[i] < 0) {
+            fprintf(stderr, "create_server_socket %d failed\n", i);
+            exit(EXIT_FAILURE);
+        }
+        set_nonblocking(worker_listen_fds[i]);
+    }
 
     install_signal_handler();
     sort_routes();
@@ -2021,6 +2086,7 @@ int pulsar_run(const char* addr, int port) {
 
         worker_data[i].queue = queue;
         worker_data[i].id = i;
+        worker_data[i].listen_fd = worker_listen_fds[i];
         worker_data[i].keep_alive_state = &keep_alive_states[i];
 
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_data[i]) != 0) {
@@ -2040,6 +2106,7 @@ int pulsar_run(const char* addr, int port) {
         pthread_join(slow_workers[i].thread, NULL);
     }
 
-    close(server_fd);
+    for (int i = 0; i < NUM_WORKERS; i++) close(worker_listen_fds[i]);
+    (void)server_fd;
     return 0;
 }

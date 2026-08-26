@@ -119,6 +119,7 @@ typedef struct PulsarOffloadHandler {
 struct pulsar_conn {
     int client_fd;                                   // Client socket file descriptor
     char* read_buf;                                  // Buffer for incoming data.
+    size_t pending_len;                              // Bytes of a partial request buffered across reads.
     Locals locals;                                   // Per-request context variables set by the user.
     struct request_t request;                        // HTTP request data (arena allocated)
     struct response_t response;                      // HTTP response data (arena allocated)
