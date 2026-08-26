@@ -613,7 +613,7 @@ static http_status parse_request_body(PulsarConn* conn, const char* buf, size_t 
     request_t* req = &conn->request;
     size_t content_length = req->content_length;
     size_t body_available = read_bytes - headers_len;
-    ASSERT(body_available <= content_length);
+    if (body_available > content_length) body_available = content_length;
 
     if (content_length > MAX_BODY_SIZE) {
         return StatusRequestEntityTooLarge;
@@ -1878,6 +1878,7 @@ static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState*
                 {(res->heap_allocated ? res->body.heap : res->body.stack) + res->body_sent,
                  res->body_len - res->body_sent},
             };
+
             sent = writev(client_fd, iov, 3);
             if (unlikely(sent < 0)) goto handle_error;
             if (sent == 0) return;

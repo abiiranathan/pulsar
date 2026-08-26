@@ -76,13 +76,13 @@ struct response_t {
     int64_t file_offset;      // Offset in file for sendfile
     uint32_t max_range;       // Maximum range of requested bytes
 
-    char* status_buf;         //  Buffer for status line
+    char* status_buf;  //  Buffer for status line
 
     // 2-Byte Fields
-    uint16_t headers_len;                  // Actual length of headers
-    uint16_t headers_cap;                  // Available capacity for the headers
-    uint16_t headers_sent;                 // Bytes of headers sent
-    char* headers_buf;                     // Buffer for the for headers
+    uint16_t headers_len;   // Actual length of headers
+    uint16_t headers_cap;   // Available capacity for the headers
+    uint16_t headers_sent;  // Bytes of headers sent
+    char* headers_buf;      // Buffer for the for headers
     union {
         uint8_t stack[STACK_BUFFER_SIZE];  // Stack buffer for smaller responses
         uint8_t* heap;                     // Dynamically allocated body buffer (aligned)
@@ -128,16 +128,16 @@ struct pulsar_conn {
     time_t last_activity;                            // Timestamp of last I/O activity
 
     /* ---- Per-request state ---- */
-    Locals locals;                                   // Per-request context variables set by the user.
-    struct request_t request;                        // HTTP request data (arena allocated)
-    struct response_t response;                      // HTTP response data (arena allocated)
+    Locals locals;               // Per-request context variables set by the user.
+    struct request_t request;    // HTTP request data (arena allocated)
+    struct response_t response;  // HTTP response data (arena allocated)
 
 #if ENABLE_LOGGING
-    struct timespec start;                           // Timestamp of first request
+    struct timespec start;  // Timestamp of first request
 #endif
 
     /* ---- Keep-alive list linkage ---- */
-    struct pulsar_conn *next, *prev;                 // Linked list nodes for keep-alive tracking.
+    struct pulsar_conn *next, *prev;  // Linked list nodes for keep-alive tracking.
 
     /* ---- Background worker ownership ---- */
     struct Poller* owner_queue;                 // The event queue of its current owner
@@ -148,7 +148,7 @@ struct pulsar_conn {
 
 /**
  * @brief Transitions a connection from the main worker pool to the slow pool.
- * 
+ *
  * @param conn The current connection context.
  * @param handlers A struct containing lifecycle callbacks for the connection.
  * @return true if the handover succeeded, false otherwise.
