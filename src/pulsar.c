@@ -566,7 +566,8 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
 
 static bool parse_query_params(PulsarConn* conn, size_t* path_len) {
     char* const path = conn->request.path;
-    const char* query = strchr(path, '?');
+    /* Known length: bounded memchr instead of a full strchr scan. */
+    const char* query = memchr(path, '?', *path_len);
     if (!query) return true;
 
     path[query - path] = '\0';

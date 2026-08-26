@@ -75,15 +75,20 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
     // Remember string slices are not guaranteed to be NULL-terminated.
     if (h->count >= HEADERS_CAPACITY) { return false; }
 
-    // Check if header already exists.
+    // Check if header already exists. Prefilter on length + case-folded
+    // first byte before the full comparison; most entries differ in one
+    // of those and never reach ss_equal_nocase.
     header_entry* entry = NULL;
-    for (size_t i = 0; i < h->count; ++i) {
-        if (ss_equal_nocase(h->entries[i].name, name)) {
-            entry = &h->entries[i];
-            break;
+    if (name.len > 0) {
+        unsigned int f0 = (unsigned int)name.data[0] | 32u;
+        for (size_t i = 0; i < h->count; ++i) {
+            if (h->entries[i].name.len == name.len && ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+                ss_equal_nocase(h->entries[i].name, name)) {
+                entry = &h->entries[i];
+                break;
+            }
         }
     }
-
     // Reject duplicate headers unless its a Cookie.
     if (entry != NULL && !ss_equal_nocase(name, SS_LIT("Set-Cookie"))) {
         // Update header in-place

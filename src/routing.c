@@ -70,6 +70,55 @@ static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
 #define ROUTE_MEMCMP(a, b, n) memcmp((a), (b), (n))
 #endif
 
+/*
+ * Exact-match hash table (method + path -> route_t*).
+ *
+ * Exact routes dominate real-world traffic ("GET /", "GET /api/users"), and
+ * the linear scan pays a length compare + first-char compare + memcmp per
+ * candidate. This open-addressed table resolves them in one probe on average.
+ * Built once in sort_routes(); read-only afterwards, so no locking needed.
+ *
+ * ROUTE_TYPE_EXACT routes are removed from the per-method linear arrays so
+ * the fallback scan never re-tests what the hash already ruled out.
+ */
+#define EXACT_TABLE_SIZE 256 /* power of two; >= 2x MAX_ROUTES */
+typedef struct {
+    const char* pattern;
+    route_t* target;
+    uint16_t pattern_len;
+    uint16_t method; /**< HttpMethod, folded into the probe key. */
+} ExactEntry;
+
+static ExactEntry exact_table[EXACT_TABLE_SIZE] = {0};
+
+/** FNV-1a over the path bytes, mixed with the method for bucket spread. */
+static inline size_t exact_hash(const char* path, size_t len, uint16_t method) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char)path[i];
+        h *= 1099511628211ULL;
+    }
+    h ^= (uint64_t)method * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 29;
+    return (size_t)h & (EXACT_TABLE_SIZE - 1);
+}
+
+/**
+ * Looks up an EXACT route by method + path in O(1).
+ * @return Matched route, or NULL.
+ */
+static inline route_t* exact_lookup(const char* path, size_t len, HttpMethod method) {
+    size_t i = exact_hash(path, len, (uint16_t)method);
+    while (exact_table[i].target) {
+        if (exact_table[i].method == (uint16_t)method && exact_table[i].pattern_len == len &&
+            ROUTE_MEMCMP(exact_table[i].pattern, path, len) == 0) {
+            return exact_table[i].target;
+        }
+        i = (i + 1) & (EXACT_TABLE_SIZE - 1);
+    }
+    return NULL;
+}
+
 /**
  * Counts path parameters in a pattern and validates its syntax.
  *
@@ -273,6 +322,7 @@ void sort_routes(void) {
         method_routes[i].routes = method_route_storage[i];
         method_routes[i].count = 0;
     }
+    memset(exact_table, 0, sizeof(exact_table));
 
     /*
      * Build flat contiguous RouteMetadata arrays from the sorted global table.
@@ -281,12 +331,27 @@ void sort_routes(void) {
      * into the metadata array means the inner scan loop in match_method_routes
      * never dereferences route_t* to read those fields — every byte it needs
      * lives in the same cache line as the metadata entry itself.
+     *
+     * EXACT routes are diverted into exact_table[] instead; the linear scan
+     * then only walks STATIC/PARAM candidates.
      */
     for (size_t i = 0; i < global_route_count; i++) {
         route_t* r = &global_routes[i];
         const HttpMethod method = r->method;
 
         ASSERT(method < HTTP_METHOD_COUNT && "Invalid method during sort");
+
+        if (r->route_type == ROUTE_TYPE_EXACT) {
+            size_t slot = exact_hash(r->pattern, r->pattern_len, (uint16_t)method);
+            while (exact_table[slot].target) slot = (slot + 1) & (EXACT_TABLE_SIZE - 1);
+            exact_table[slot] = (ExactEntry){
+                .pattern = r->pattern,
+                .target = r,
+                .pattern_len = r->pattern_len,
+                .method = (uint16_t)method,
+            };
+            continue;
+        }
 
         uint16_t idx = method_routes[method].count;
         ASSERT(idx < MAX_ROUTES && "Too many routes for method");
@@ -386,11 +451,8 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
 /**
  * Searches the per-method RouteMetadata array for the first matching route.
  *
- * Fast bitwise shifts (shl rax, 4) determine directory offsets, replacing 
- * the high-latency integer multiplication (imul) instructions.
- *
- * If no routes exist for a method, this function exits instantly, sparing 
- * the L1 data cache from pulling in unnecessary storage partitions.
+ * Only STATIC and PARAM routes live here; EXACT routes are resolved through
+ * exact_table[] (see route_match). Candidates are ordered by specificity.
  *
  * @param method     HTTP method to search.
  * @param path       Request path.
@@ -414,13 +476,6 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
         const RouteMetadata* meta = &routes[i];
 
         switch (meta->route_type) {
-            case ROUTE_TYPE_EXACT:
-                if (meta->pattern_len == (uint16_t)url_length && meta->first_char == first_url_ch &&
-                    ROUTE_MEMCMP(meta->pattern, path, url_length) == 0) {
-                    return meta->target;
-                }
-                break;
-
             case ROUTE_TYPE_STATIC:
                 if (meta->pattern_len <= (uint16_t)url_length && meta->first_char == first_url_ch &&
                     ROUTE_MEMCMP(meta->pattern, path, meta->pattern_len) == 0) {
@@ -463,16 +518,27 @@ INLINE route_t* match_any_method(const char* path, size_t url_length, Arena* are
 }
 
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
-    route_t* found = match_method_routes(method, path, url_length, arena);
+    /* O(1) exact match — the overwhelmingly common case. */
+    route_t* found = exact_lookup(path, url_length, method);
     if (found) return found;
 
-    /* HEAD falls back to GET routes per RFC 9110 §9.3.2. */
-    if (method == HTTP_HEAD) return match_method_routes(HTTP_GET, path, url_length, arena);
+    /* HEAD falls back to GET routes per RFC 9110 §9.3.2 (exact first). */
+    if (method == HTTP_HEAD) {
+        found = exact_lookup(path, url_length, HTTP_GET);
+        if (found) return found;
+        return match_method_routes(HTTP_GET, path, url_length, arena);
+    }
 
     /* OPTIONS matches any registered route on the path. */
-    if (method == HTTP_OPTIONS) return match_any_method(path, url_length, arena);
+    if (method == HTTP_OPTIONS) {
+        for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+            found = exact_lookup(path, url_length, (HttpMethod)m);
+            if (found) return found;
+        }
+        return match_any_method(path, url_length, arena);
+    }
 
-    return NULL;
+    return match_method_routes(method, path, url_length, arena);
 }
 
 /** Releases PathParams memory allocated during route registration. */
