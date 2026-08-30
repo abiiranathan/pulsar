@@ -26,7 +26,7 @@ endif
 
 # === Compiler Flags ===
 
-DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE
+DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE -DNUM_WORKERS=4
 BASE_CFLAGS := -Wall -Werror -Wextra -std=c11 -fPIC -Iinclude $(DEFINES) \
                -Wno-unused-function -Wno-gnu-zero-variadic-macro-arguments
 
