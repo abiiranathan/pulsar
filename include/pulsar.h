@@ -60,13 +60,13 @@ int pulsar_run(const char* addr, int port);
 
 // Re-arm client socket for another write and yield from
 // on_write callback giving control back to the event loop.
-#define yield_write(conn)                                         \
+#define yield_write(conn)                                      \
     event_mod_write(conn->owner_queue, conn->client_fd, conn); \
     return;
 
 // Re-arm client socket for another read and yield from
 // on_read callback giving control back to the event loop.
-#define yield_read(conn)                                         \
+#define yield_read(conn)                                      \
     event_mod_read(conn->owner_queue, conn->client_fd, conn); \
     return;
 
@@ -109,18 +109,18 @@ void* pulsar_get_handler_userdata(void);
  * @param fd File descriptor for the logger (must be set to enable logging).
  * @note The callback is ideal for logging request latency and other metrics.
  * The callback receives the total processing time in nanoseconds (excluding
- * network I/O) and a pointer to the request context. 
+ * network I/O) and a pointer to the request context.
  * The userdata pointer in the context is the same pointer set via pulsar_set_handler_userdata.
- * @note The callback must be set before starting the server and 
+ * @note The callback must be set before starting the server and
  * can only be set once.
- * @return true If async logger background thread was successfully initialized. 
+ * @return true If async logger background thread was successfully initialized.
  */
 bool pulsar_set_callback(PulsarCallback cb, int fd);
 
 /** Pulsar Async Logger
-* ---------------------
-*
- * This logger is asynchronous and non-blocking as possible: 
+ * ---------------------
+ *
+ * This logger is asynchronous and non-blocking as possible:
  * it formats the log line on the stack and submits it to plog without any locks or syscalls in the hot path.
  *
  * This is called after every request, and is passed the total latency in nanoseconds.
@@ -136,10 +136,6 @@ void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns);
 // free the value. The function may be NULL if the value is not to be freed.
 // Returns true on success.
 bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func);
-
-#include <stddef.h>  // for size_t, NULL (C11)
-#include <stdlib.h>  // for malloc, NULL
-#include <string.h>  // for strlen, memcpy
 
 /**
  * @brief Allocate memory of at least 'size' bytes that is managed by the
@@ -167,7 +163,9 @@ void* pulsar_alloc(PulsarConn* conn, size_t size);
  * is NULL.
  */
 static inline char* pulsar_strdup(PulsarConn* conn, const char* str) {
-    if (str == NULL) { return NULL; }
+    if (str == NULL) {
+        return NULL;
+    }
 
     size_t len = strlen(str);
     char* dup = pulsar_alloc(conn, len + 1);
@@ -198,11 +196,15 @@ Arena* pulsar_get_arena(PulsarConn* conn);
  */
 static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
     /* Guard against overflow in nmemb * size */
-    if (nmemb != 0 && size > SIZE_MAX / nmemb) { return NULL; }
+    if (nmemb != 0 && size > SIZE_MAX / nmemb) {
+        return NULL;
+    }
 
     size_t total = nmemb * size;
     void* ptr = pulsar_alloc(conn, total);
-    if (ptr != NULL) { memset(ptr, 0, total); }
+    if (ptr != NULL) {
+        memset(ptr, 0, total);
+    }
     return ptr;
 }
 
@@ -230,18 +232,26 @@ static inline void* pulsar_calloc(PulsarConn* conn, size_t nmemb, size_t size) {
  */
 static inline void* pulsar_realloc(PulsarConn* conn, void* ptr, size_t old_size, size_t new_size) {
     /* Handle NULL ptr as pure allocation */
-    if (ptr == NULL) { return pulsar_alloc(conn, new_size); }
+    if (ptr == NULL) {
+        return pulsar_alloc(conn, new_size);
+    }
 
     /* Guard against overflow when comparing sizes */
-    if (new_size > SIZE_MAX) { return NULL; }
+    if (new_size > SIZE_MAX) {
+        return NULL;
+    }
 
     void* new_ptr = pulsar_alloc(conn, new_size);
-    if (new_ptr == NULL) { return NULL; }
+    if (new_ptr == NULL) {
+        return NULL;
+    }
 
     /* Determine how many bytes to copy: the minimum of old_size and new_size */
     size_t copy_size = old_size < new_size ? old_size : new_size;
 
-    if (copy_size > 0) { memcpy(new_ptr, ptr, copy_size); }
+    if (copy_size > 0) {
+        memcpy(new_ptr, ptr, copy_size);
+    }
     return new_ptr;
 }
 
@@ -437,10 +447,8 @@ typedef struct {
     StrSlice id;
 } SSEvent;
 
-#define SSE_EVENT_INIT(data_, event_, id_)              \
-    (SSEvent) {                                         \
-        .data = (data_), .event = (event_), .id = (id_) \
-    }
+#define SSE_EVENT_INIT(data_, event_, id_) \
+    (SSEvent) { .data = (data_), .event = (event_), .id = (id_) }
 
 // Start SSE event.
 void conn_start_sse(PulsarConn* conn);
@@ -535,16 +543,16 @@ bool res_header_get_buf(PulsarConn* conn, const char* name, char* dest, size_t d
 http_status res_get_status(PulsarConn* conn);
 
 /**
- * @brief Gets the request body data. 
- * 
+ * @brief Gets the request body data.
+ *
  * @param conn The connection object
  * @return const char* request body or NULL if none
  */
 char* req_body(PulsarConn* conn);
 
 /**
- * @brief Gets the request body string slice. 
- * 
+ * @brief Gets the request body string slice.
+ *
  * @param conn The connection object
  * @return Request body slice or NULL if none
  */

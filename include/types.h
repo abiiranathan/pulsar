@@ -1,10 +1,6 @@
 #ifndef __PULSAR_TYPES_H__
 #define __PULSAR_TYPES_H__
 
-// #if !defined(ALLOW_PULSAR_TYPES) || defined(PulsarConnDef)
-// #error "<pulsar/types.h> should not be included directly. Include <pulsar/pulsar.h> instead!"
-// #endif
-
 #define _FILE_OFFSET_BITS 64
 
 #include <arpa/inet.h>
@@ -62,6 +58,9 @@ struct response_t {
     size_t body_len;       // Actual length of body
     size_t body_capacity;  // Capacity of body buffer
     size_t body_sent;      // Bytes of body sent
+    size_t out_len;        // Total bytes in contiguous output buffer
+    size_t out_sent;       // Bytes sent from contiguous output buffer
+    size_t out_cap;        // Total capacity of contiguous output buffer
 
     // 1-Byte Fields
     bool heap_allocated;  // If heap allocation is used
@@ -76,13 +75,14 @@ struct response_t {
     int64_t file_offset;      // Offset in file for sendfile
     uint32_t max_range;       // Maximum range of requested bytes
 
-    char* status_buf;  //  Buffer for status line
+    char* status_buf;  // Buffer for status line
+    char* out_buf;     // Contiguous buffer for single-write responses
 
     // 2-Byte Fields
     uint16_t headers_len;   // Actual length of headers
     uint16_t headers_cap;   // Available capacity for the headers
     uint16_t headers_sent;  // Bytes of headers sent
-    char* headers_buf;      // Buffer for the for headers
+    char* headers_buf;      // Buffer for the headers
     union {
         uint8_t stack[STACK_BUFFER_SIZE];  // Stack buffer for smaller responses
         uint8_t* heap;                     // Dynamically allocated body buffer (aligned)
@@ -91,7 +91,7 @@ struct response_t {
 
 // HTTP Request structure
 struct request_t {
-    char* path;               // Request path (arena allocated)
+    char* path;               // Request path (fixed buffer allocated)
     char method[8];           // HTTP method (GET, POST etc.)
     HttpMethod method_type;   // MethodType Enum
     char* body;               // Request body (dynamically allocated)
@@ -129,8 +129,8 @@ struct pulsar_conn {
 
     /* ---- Per-request state ---- */
     Locals locals;               // Per-request context variables set by the user.
-    struct request_t request;    // HTTP request data (arena allocated)
-    struct response_t response;  // HTTP response data (arena allocated)
+    struct request_t request;    // HTTP request data
+    struct response_t response;  // HTTP response data
 
 #if ENABLE_LOGGING
     struct timespec start;  // Timestamp of first request
