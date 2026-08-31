@@ -1,4 +1,4 @@
-#include <inttypes.h>        // for PRIu64
+#include <inttypes.h>  // for PRIu64
 #include <solidc/filepath.h>
 #include <string.h>          // for strlen, memset
 #include <time.h>            // for time()
@@ -68,7 +68,7 @@ void echo_handler(PulsarCtx* ctx) {
 /* =========================================================================
  * Server-Sent Events (SSE) - Offloaded Implementation
  *
- * Stream events to the client at 1 ms intervals. The handoff mechanism 
+ * Stream events to the client at 1 ms intervals. The handoff mechanism
  * transfers the connection to a slow event loop, avoiding blocking on the
  * main thread pool.
  * ========================================================================= */
@@ -125,7 +125,9 @@ void sse_handler(PulsarCtx* ctx) {
     };
 
     // Transition the connection to the background slow worker pool
-    if (!pulsar_handoff(conn, handlers)) { conn_set_status(conn, StatusInternalServerError); }
+    if (!pulsar_handoff(conn, handlers)) {
+        conn_set_status(conn, StatusInternalServerError);
+    }
 }
 
 void sse_page(PulsarCtx* ctx) {
@@ -275,7 +277,9 @@ void handle_form(PulsarCtx* ctx) {
     if (file) {
         DEFER_VAR char* dst = filepath_join("test_output", file->filename);
         defer_free(dst);
-        if (multipart_save_file(file, body.data, dst)) { conn_write_string(conn, "File uploaded successfully\n"); }
+        if (multipart_save_file(file, body.data, dst)) {
+            conn_write_string(conn, "File uploaded successfully\n");
+        }
     }
 }
 
@@ -321,7 +325,7 @@ void mw2(PulsarCtx* ctx) {
 /* =========================================================================
  * Entry point
  * ========================================================================= */
-int main(void) {
+int main(int argc, char* argv[]) {
     // Attach the built-in access logger; writes combined-log lines to stdout.
     // pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
@@ -346,5 +350,10 @@ int main(void) {
     // Serve everything under ./ at the /static/ prefix.
     route_static("/static/", "./");
 
-    return pulsar_run("localhost", 8080);
+    int port = 8080;
+    if (argc >= 2) {
+        port = atoi(argv[1]);
+    }
+
+    return pulsar_run("localhost", port);
 }

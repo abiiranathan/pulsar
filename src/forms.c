@@ -25,10 +25,14 @@ typedef enum {
 INLINE bool grow_files_array(MultipartForm* form) {
     size_t new_capacity = form->files_capacity * 2;
     FileHeader** new_files = arena_alloc(form->arena, new_capacity * sizeof(FileHeader*));
-    if (!new_files) return false;
+    if (!new_files) {
+        return false;
+    }
 
     // Copy existing pointers
-    if (form->files && form->num_files > 0) { memcpy(new_files, form->files, form->num_files * sizeof(FileHeader*)); }
+    if (form->files && form->num_files > 0) {
+        memcpy(new_files, form->files, form->num_files * sizeof(FileHeader*));
+    }
 
     form->files = new_files;
     form->files_capacity = new_capacity;
@@ -52,21 +56,29 @@ INLINE bool grow_fields_array(MultipartForm* form) {
 }
 
 MultipartCode multipart_init(MultipartForm* form) {
-    if (!form) { return MEMORY_ALLOC_ERROR; }
+    if (!form) {
+        return MEMORY_ALLOC_ERROR;
+    }
 
     // Zero the form.
     memset(form, 0, sizeof(*form));
 
     // Create arena with default block size.
     form->arena = arena_create(1 << 20);
-    if (!form->arena) { return MEMORY_ALLOC_ERROR; }
+    if (!form->arena) {
+        return MEMORY_ALLOC_ERROR;
+    }
 
     // Allocate initial arrays from arena
     form->files = (FileHeader**)arena_alloc(form->arena, INITIAL_FILE_CAPACITY * sizeof(FileHeader*));
-    if (!form->files) { return ARENA_ALLOC_ERROR; }
+    if (!form->files) {
+        return ARENA_ALLOC_ERROR;
+    }
 
     form->fields = (FormField*)arena_alloc(form->arena, INITIAL_FIELD_CAPACITY * sizeof(FormField));
-    if (!form->fields) { return ARENA_ALLOC_ERROR; }
+    if (!form->fields) {
+        return ARENA_ALLOC_ERROR;
+    }
 
     form->files_capacity = INITIAL_FILE_CAPACITY;
     form->fields_capacity = INITIAL_FIELD_CAPACITY;
@@ -95,7 +107,9 @@ INLINE bool form_insert_header(MultipartForm* form, FileHeader* header) {
  * @returns: MpCode enum value indicating success or failure.
  */
 MultipartCode multipart_parse(const char* data, size_t size, const char* boundary, MultipartForm* form) {
-    if (!data || !boundary || !form || !form->arena) { return MEMORY_ALLOC_ERROR; }
+    if (!data || !boundary || !form || !form->arena) {
+        return MEMORY_ALLOC_ERROR;
+    }
 
     size_t boundary_length = strlen(boundary);
     const char* ptr = data;
@@ -162,12 +176,13 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         state = STATE_FILENAME;
                     } else {
                         // Regular form field - move to value
-                        while (ptr < data + size && *ptr != '\n')
-                            ptr++;
+                        while (ptr < data + size && *ptr != '\n') ptr++;
                         if (ptr < data + size) ptr++;  // Skip newline
 
                         // Consume CRLF before value
-                        if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') { ptr += 2; }
+                        if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
+                            ptr += 2;
+                        }
 
                         value_start = ptr;
                         state = STATE_VALUE;
@@ -227,12 +242,13 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     }
 
                     // Move to end of line
-                    while (ptr < data + size && *ptr != '\n')
-                        ptr++;
+                    while (ptr < data + size && *ptr != '\n') ptr++;
                     if (ptr < data + size) ptr++;  // Skip newline
 
                     // Consume CRLF if present
-                    if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') { ptr += 2; }
+                    if (ptr + 1 < data + size && *ptr == '\r' && *(ptr + 1) == '\n') {
+                        ptr += 2;
+                    }
 
                     state = STATE_FILE_MIME_HEADER;
                 } else {
@@ -267,8 +283,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                 }
 
                 // Move to end of line
-                while (ptr < data + size && *ptr != '\n')
-                    ptr++;
+                while (ptr < data + size && *ptr != '\n') ptr++;
                 if (ptr < data + size) ptr++;  // Skip newline
 
                 // Consume CRLF before file body
@@ -343,7 +358,9 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
     }
 
 cleanup:
-    if (code != MULTIPART_OK) { multipart_cleanup(form); }
+    if (code != MULTIPART_OK) {
+        multipart_cleanup(form);
+    }
     return code;
 }
 
@@ -354,7 +371,9 @@ bool parse_boundary(const char* content_type, char* boundary, size_t size) {
     size_t prefix_len = 2;
     size_t total_length = strlen(content_type);
 
-    if (strncasecmp(content_type, "multipart/form-data", 19) != 0) { return false; }
+    if (strncasecmp(content_type, "multipart/form-data", 19) != 0) {
+        return false;
+    }
 
     char* start = strstr((char*)content_type, "boundary=");
     if (!start) return false;
@@ -393,7 +412,9 @@ const char* multipart_field_value(const MultipartForm* form, const char* name) {
     if (!form || !name) return NULL;
 
     for (size_t i = 0; i < form->num_fields; i++) {
-        if (form->fields[i].name && strcmp(form->fields[i].name, name) == 0) { return form->fields[i].value; }
+        if (form->fields[i].name && strcmp(form->fields[i].name, name) == 0) {
+            return form->fields[i].value;
+        }
     }
     return NULL;
 }
@@ -412,7 +433,9 @@ FileHeader* multipart_file(const MultipartForm* form, const char* field_name) {
 }
 
 size_t multipart_files(const MultipartForm* form, const char* field_name, size_t* out_indices, size_t max_indices) {
-    if (!form || !field_name || !out_indices) { return 0; }
+    if (!form || !field_name || !out_indices) {
+        return 0;
+    }
     size_t found = 0;
     for (size_t i = 0; i < form->num_files && found < max_indices; i++) {
         if (form->files[i]->field_name && strcmp(form->files[i]->field_name, field_name) == 0) {

@@ -97,10 +97,8 @@
     const char* var = query_get((conn), (key)); \
     abort_if_nullptr((var), (conn), StatusBadRequest, "missing required query parameter: " key)
 
-#define defer_form_cleanup(form)                   \
-    defer {                                        \
-        multipart_cleanup((MultipartForm*)(form)); \
-    }
+#define defer_form_cleanup(form) \
+    defer { multipart_cleanup((MultipartForm*)(form)); }
 
 /*
  * PARSE_MULTIPART_FORM(conn, form_ptr, boundary_buf, boundary_buf_size,

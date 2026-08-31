@@ -1,16 +1,15 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <solidc/file.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 
-#include <solidc/file.h>
 #include "../include/events.h"
 #include "../include/mimetypes.h"
 #include "../include/plog.h"
 #include "../include/pulsar.h"
 
-static int server_fd = -1;                 /**< Legacy single listener (unused with per-worker sockets). */
 static int worker_listen_fds[NUM_WORKERS]; /**< Per-worker SO_REUSEPORT listeners. */
 volatile sig_atomic_t server_running = 1;
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
@@ -24,6 +23,7 @@ static int cached_date_len = 0;
 
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
 
+// Keep-Alive state is a linked list of connections.
 typedef struct KeepAliveState {
     PulsarConn* head;
     PulsarConn* tail;
@@ -34,10 +34,10 @@ typedef struct KeepAliveState {
  * Forward Declarations
  * ================================================================ */
 static void finalize_response(PulsarConn* conn, HttpMethod method);
-INLINE void free_response_body(response_t* resp);
-static void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state);
 static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
-static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state);
+INLINE void free_response_body(response_t* resp);
+INLINE void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state);
+INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state);
 
 /* ================================================================
  * Slow Worker Pool
@@ -104,7 +104,7 @@ static void slow_close_offloaded(event_queue_t* queue, PulsarConn* conn) {
  * seconds (default 5 s) and closed if they exceed CONNECTION_TIMEOUT.
  * ---------------------------------------------------------------- */
 #ifndef SLOW_KEEPALIVE_CHECK_S
-#define SLOW_KEEPALIVE_CHECK_S 5
+    #define SLOW_KEEPALIVE_CHECK_S 5
 #endif
 
 static void* slow_worker_thread(void* arg) {
@@ -136,7 +136,7 @@ static void* slow_worker_thread(void* arg) {
             while (cur) {
                 PulsarConn* nxt = cur->next;
                 if (conn_timedout(now, cur->last_activity)) {
-                    RemoveKeepAliveConnection(cur, ka);
+                    remove_keepalive_connection(cur, ka);
                     slow_close_offloaded(queue, cur);
                 }
                 cur = nxt;
@@ -192,7 +192,7 @@ static void* slow_worker_thread(void* arg) {
                  * slow pool for keep-alive tracking) remove it first.
                  */
                 if (conn->in_keep_alive) {
-                    RemoveKeepAliveConnection(conn, ka);
+                    remove_keepalive_connection(conn, ka);
                 }
                 slow_close_offloaded(queue, conn);
             }
@@ -231,7 +231,7 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
 
     /* remove from keep-alive tracking if enlisted. */
     if (conn->in_keep_alive && conn->owner_ka_state) {
-        RemoveKeepAliveConnection(conn, (KeepAliveState*)conn->owner_ka_state);
+        remove_keepalive_connection(conn, (KeepAliveState*)conn->owner_ka_state);
     }
 
     /* mark as offloaded and attach user hooks. */
@@ -291,7 +291,7 @@ INLINE int u64_to_dec(char* buf, uint64_t v) {
     return len;
 }
 
-static void RemoveKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
+static void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state) {
     if (!conn->in_keep_alive) return;
 
     if (conn->prev)
@@ -454,7 +454,7 @@ static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveSt
     close(conn->client_fd);
     conn->client_fd = -1;
 
-    RemoveKeepAliveConnection(conn, ka_state);
+    remove_keepalive_connection(conn, ka_state);
     free_response_body(&conn->response);
     LocalsClear(&conn->locals);
     arena_destroy(conn->arena);
@@ -679,9 +679,6 @@ const char* req_header_get(PulsarConn* conn, const char* name) {
     return arena_strdupn(conn->arena, h.data, h.len);
 }
 
-/* ================================================================
- * Response Status
- * ================================================================ */
 void conn_set_status(PulsarConn* restrict conn, http_status code) {
     StrSlice status = get_http_status(code);
     response_t* res = &conn->response;
@@ -692,9 +689,6 @@ void conn_set_status(PulsarConn* restrict conn, http_status code) {
 
 http_status res_get_status(PulsarConn* conn) { return conn->response.status_code; }
 
-/* ================================================================
- * Response Header Accessors
- * ================================================================ */
 char* res_header_get(PulsarConn* conn, const char* name) {
     response_t* res = &conn->response;
     char* buf = res->headers_buf;
@@ -847,9 +841,9 @@ int conn_notfound(PulsarConn* conn) {
 
 int conn_write_string(PulsarConn* conn, const char* str) { return str ? conn_write(conn, str, strlen(str)) : 0; }
 
-__attribute__((format(printf, 2, 3))) int conn_writef(PulsarConn* conn, const char* restrict fmt, ...) {
+int conn_writef(PulsarConn* conn, const char* restrict fmt, ...) {
     va_list args;
-    char sbuf[1024];
+    char sbuf[4096];
     int len;
 
     va_start(args, fmt);
@@ -1707,18 +1701,18 @@ INLINE int conn_accept(int listen_fd) {
 #if defined(__APPLE__) || defined(__FreeBSD__)
     setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
     setsockopt(client_fd, IPPROTO_TCP, TCP_NOPUSH, &yes, sizeof(yes));
-#ifdef TCP_KEEPIDLE
+    #ifdef TCP_KEEPIDLE
     int ka_idle = 120;
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &ka_idle, sizeof(ka_idle));
-#endif
-#ifdef TCP_KEEPINTVL
+    #endif
+    #ifdef TCP_KEEPINTVL
     int ka_iv = 15;
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_iv, sizeof(ka_iv));
-#endif
-#ifdef TCP_KEEPCNT
+    #endif
+    #ifdef TCP_KEEPCNT
     int ka_cnt = 3;
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &ka_cnt, sizeof(ka_cnt));
-#endif
+    #endif
 #endif
 
     return client_fd;
@@ -2108,7 +2102,8 @@ int pulsar_run(const char* addr, int port) {
         pthread_join(slow_workers[i].thread, NULL);
     }
 
-    for (int i = 0; i < NUM_WORKERS; i++) close(worker_listen_fds[i]);
-    (void)server_fd;
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        close(worker_listen_fds[i]);
+    }
     return 0;
 }
