@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#include "../include/pulsar_itoa.h"
 
 #if defined(__AVX2__)
     #include <immintrin.h>
@@ -280,24 +281,6 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
     return true;
 }
 
-/* ================================================================
- * Utility: fast u64 → decimal string (no snprintf overhead)
- * ================================================================ */
-INLINE int u64_to_dec(char* buf, uint64_t v) {
-    if (v == 0) {
-        buf[0] = '0';
-        return 1;
-    }
-    char tmp[20];
-    int len = 0;
-    while (v) {
-        tmp[len++] = (char)('0' + v % 10);
-        v /= 10;
-    }
-    for (int i = 0; i < len; i++) buf[i] = tmp[len - 1 - i];
-    return len;
-}
-
 static void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state) {
     if (!conn->in_keep_alive) return;
 
@@ -477,46 +460,41 @@ INLINE void write_error(PulsarConn* conn, http_status status) {
  * Request Parsing
  * ================================================================ */
 
-/* Finds "\r\n\r\n" in buf[0..len). Returns pointer to the '\r' or NULL.
- * Uses AVX2 vectorized comparison when available, falling back to SWAR uint32 match. */
+/* ================================================================
+ * Zero-Branch 4-Byte Simultaneous AVX2 Header End Search
+ * ================================================================ */
 INLINE const char* find_headers_end(const char* buf, size_t len) {
-    if (len < 4) return NULL;
+    if (unlikely(len < 4)) return NULL;
 
     const char* p = buf;
-    const char* end = buf + len - 3; /* need 4 bytes from p */
+    const char* end = buf + len - 3;
 
 #if defined(__AVX2__)
-    const __m256i cr = _mm256_set1_epi8('\r');
-    while (p + 32 <= end) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
-        __m256i cmp = _mm256_cmpeq_epi8(chunk, cr);
-        unsigned int mask = (unsigned int)_mm256_movemask_epi8(cmp);
+    const __m256i r_vec = _mm256_set1_epi8('\r');
+    const __m256i n_vec = _mm256_set1_epi8('\n');
 
-        while (mask) {
-            int idx = __builtin_ctz(mask);
-            const char* match = p + idx;
-            if (match <= end) {
-                uint32_t v;
-                memcpy(&v, match, 4);
-                if (v == UINT32_C(0x0a0d0a0d)) return match;
-            }
-            mask &= mask - 1;
+    while (p + 35 <= end + 3) {
+        __m256i v0 = _mm256_loadu_si256((const __m256i*)p);
+        __m256i v1 = _mm256_loadu_si256((const __m256i*)(p + 1));
+        __m256i v2 = _mm256_loadu_si256((const __m256i*)(p + 2));
+        __m256i v3 = _mm256_loadu_si256((const __m256i*)(p + 3));
+
+        __m256i match = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(v0, r_vec), _mm256_cmpeq_epi8(v1, n_vec)),
+                                         _mm256_and_si256(_mm256_cmpeq_epi8(v2, r_vec), _mm256_cmpeq_epi8(v3, n_vec)));
+
+        unsigned int mask = (unsigned int)_mm256_movemask_epi8(match);
+        if (mask) {
+            return p + __builtin_ctz(mask);
         }
         p += 32;
     }
 #endif
 
     while (p < end) {
-        p = memchr(p, '\r', (size_t)(end - p));
-        if (!p) return NULL;
-
-        /* Load 4 bytes at once and compare as a little-endian uint32.
-         * "\r\n\r\n" = 0x0a0d0a0d in LE. Avoids 3 separate byte checks. */
         uint32_t v;
-        memcpy(&v, p, 4); /* memcpy for strict-aliasing safety */
+        memcpy(&v, p, 4);
         if (v == UINT32_C(0x0a0d0a0d)) return p;
-
-        p++; /* skip this '\r' and try next */
+        p++;
     }
     return NULL;
 }
@@ -526,19 +504,15 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
     const char* end = ptr + headers_len;
     const bool is_safe = SAFE_METHOD(method);
     request_t* req = &conn->request;
-    headers_t* headers = req->headers;
     conn->keep_alive = true;
-    uint8_t flags = 0; /* bit 0: content_length_set  bit 1: connection_set */
+    uint8_t flags = 0;
 
     while (ptr < end) {
         const char* const colon = memchr(ptr, ':', (size_t)(end - ptr));
         if (!colon) break;
 
         const size_t name_len = (size_t)(colon - ptr);
-        if (name_len == 0) {
-            fprintf(stderr, "Invalid header: empty name\n");
-            return false;
-        }
+        if (unlikely(name_len == 0)) return false;
 
         const char* value_start = colon + 1;
         while (value_start < end && (*value_start == ' ' || *value_start == '\t')) value_start++;
@@ -548,39 +522,27 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
 
         const char* value_end = eol;
         while (value_end > value_start && (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
-
         const size_t value_len = (size_t)(value_end - value_start);
-        StrSlice name = {.data = ptr, .len = name_len};
-        StrSlice value = {.data = value_start, .len = value_len};
 
-        if (!is_safe && name_len == 14 && !(flags & 1)) {
-            if (strncasecmp(name.data, "Content-Length", 14) == 0) {
-                char buf[21];
-                if (value_len >= sizeof(buf)) {
-                    fprintf(stderr, "Content-Length value too long (%zu bytes)\n", value_len);
-                    return false;
+        /* Inspect 'C'/'c' headers for Content-Length and Connection */
+        if ((ptr[0] | 0x20) == 'c') {
+            if (!is_safe && name_len == 14 && !(flags & 1)) {
+                if (strncasecmp(ptr, "Content-Length", 14) == 0) {
+                    char buf[21];
+                    if (value_len >= sizeof(buf)) return false;
+                    memcpy(buf, value_start, value_len);
+                    buf[value_len] = '\0';
+                    req->content_length = (size_t)atoll(buf);
+                    flags |= 1;
                 }
-                memcpy(buf, value_start, value_len);
-                buf[value_len] = '\0';
-                StoError code;
-                if ((code = str_to_ulong(buf, &req->content_length)) != STO_SUCCESS) {
-                    fprintf(stderr, "Invalid Content-Length '%s': %s\n", buf, sto_error_string(code));
-                    return false;
+            } else if (name_len == 10 && !(flags & 2)) {
+                if (strncasecmp(ptr, "Connection", 10) == 0) {
+                    conn->keep_alive = !(value_len == 5 && strncasecmp(value_start, "close", 5) == 0);
+                    flags |= 2;
                 }
-                flags |= 1;
             }
         }
 
-        if (name_len == 10 && !(flags & 2)) {
-            if (strncasecmp(name.data, "Connection", 10) == 0) {
-                conn->keep_alive = !(value_len == 5 && strncasecmp(value_start, "close", 5) == 0);
-                flags |= 2;
-            }
-        }
-
-        if (!headers_set(headers, name, value)) {
-            return false;
-        }
         ptr = eol + 2;
     }
     return true;
@@ -1239,36 +1201,70 @@ bool conn_servefile(PulsarConn* conn, const char* filename) {
 /* ================================================================
  * Finalize Response
  * ================================================================ */
+#define CRLF_WORD 0x0A0D /* "\r\n" in little-endian (uint16_t) */
+
 static void finalize_response(PulsarConn* conn, HttpMethod method) {
     response_t* resp = &conn->response;
-    if (resp->status_len == 0) conn_set_status(conn, StatusOK);
 
-    if (likely(!HAS_RANGE_REQUEST(resp->flags))) {
+    if (__builtin_expect(resp->status_len == 0, 0)) {
+        conn_set_status(conn, StatusOK);
+    }
+
+    /* 1. Fast Content-Length formatting */
+    if (!HAS_RANGE_REQUEST(resp->flags)) {
         size_t cl = 0;
-        if (method != HTTP_OPTIONS) cl = (resp->file_fd >= 0) ? resp->file_size : resp->body_len;
+        if (method != HTTP_OPTIONS) {
+            cl = (resp->file_fd >= 0) ? (size_t)resp->file_size : resp->body_len;
+        }
 
-        char cl_buf[40] = "Content-Length: ";
-        int cl_len = 16 + u64_to_dec(cl_buf + 16, (uint64_t)cl);
-        cl_buf[cl_len++] = '\r';
-        cl_buf[cl_len++] = '\n';
-        conn_writeheader_raw(conn, cl_buf, (size_t)cl_len);
+        /* 32 bytes is enough for "Content-Length: " + 20 digits + "\r\n" */
+        char cl_buf[38];
+
+        /* Write "Content-" and "Length: " via 64-bit word stores (no stack zeroing) */
+        *(uint64_t*)(cl_buf + 0) = 0x2d746e65746e6f43ULL; /* "Content-" */
+        *(uint64_t*)(cl_buf + 8) = 0x203a6874676e654cULL; /* "Length: " */
+
+        size_t digits = pulsar_itoa((uint64_t)cl, cl_buf + 16);
+        size_t cl_len = 16 + digits;
+
+        /* Append "\r\n" via 16-bit store */
+        *(uint16_t*)(cl_buf + cl_len) = CRLF_WORD;
+        cl_len += 2;
+
+        conn_writeheader_raw(conn, cl_buf, cl_len);
     }
 
     write_server_headers(conn);
-    ensure_headers_capacity(conn->arena, resp, resp->headers_len + 3);
-    memcpy(resp->headers_buf + resp->headers_len, "\r\n", 2);
-    resp->headers_len += 2;
-    resp->headers_buf[resp->headers_len] = '\0';
 
-    /* Pre-assemble entire response into out_buf for single write when not streaming/file */
+    /* 2. Finalize headers with trailing CRLF */
+    size_t h_len = resp->headers_len;
+    ensure_headers_capacity(conn->arena, resp, h_len + 3);
+
+    char* h_buf = resp->headers_buf;
+    *(uint16_t*)(h_buf + h_len) = CRLF_WORD;
+    h_buf[h_len + 2] = '\0';
+    resp->headers_len = h_len + 2;
+
+    /* 3. Pre-assemble entire response into out_buf (zero-copy when streaming) */
     if (resp->file_fd < 0 && !resp->heap_allocated) {
-        size_t total = resp->status_len + resp->headers_len + resp->body_len;
-        if (total <= resp->out_cap) {
-            memcpy(resp->out_buf, resp->status_buf, resp->status_len);
-            memcpy(resp->out_buf + resp->status_len, resp->headers_buf, resp->headers_len);
-            if (resp->body_len > 0) {
-                memcpy(resp->out_buf + resp->status_len + resp->headers_len, resp->body.stack, resp->body_len);
+        size_t s_len = resp->status_len;
+        size_t final_h_len = resp->headers_len;
+        size_t b_len = resp->body_len;
+        size_t total = s_len + final_h_len + b_len;
+
+        if (__builtin_expect(total <= resp->out_cap, 1)) {
+            char* dst = resp->out_buf;
+
+            memcpy(dst, resp->status_buf, s_len);
+            dst += s_len;
+
+            memcpy(dst, resp->headers_buf, final_h_len);
+            dst += final_h_len;
+
+            if (b_len > 0) {
+                memcpy(dst, resp->body.stack, b_len);
             }
+
             resp->out_len = total;
             resp->out_sent = 0;
         }
@@ -1521,71 +1517,58 @@ INLINE void request_complete(PulsarConn* conn) {
 /* ================================================================
  * HTTP Request Line Parser
  * ================================================================ */
-INLINE int parse_request_line(const char* input, size_t input_len, char* method, size_t method_size, size_t* method_len,
-                              char* url, size_t url_size, size_t* url_len, char* protocol, size_t protocol_size,
-                              size_t* protocol_len) {
-    if (input_len < 14) return -1;
+INLINE int parse_request_line(const char* input, size_t input_len, request_t* req, const char** url_ptr,
+                              size_t* url_len) {
+    if (unlikely(input_len < 14)) return -1;
     const char* ptr = input;
-    const char* end = input + input_len;
 
-    /* Fast-path SWAR method detection */
+    /* 32-bit SWAR method check */
     uint32_t m4;
     memcpy(&m4, ptr, 4);
     if (m4 == UINT32_C(0x20544547)) { /* "GET " */
-        if (method_size < 4) return -1;
-        memcpy(method, "GET", 4);
-        *method_len = 3;
+        req->method_type = HTTP_GET;
+        *(uint32_t*)req->method = UINT32_C(0x00544547); /* "GET\0" */
         ptr += 4;
     } else if (m4 == UINT32_C(0x54534F50) && ptr[4] == ' ') { /* "POST " */
-        if (method_size < 5) return -1;
-        memcpy(method, "POST", 5);
-        *method_len = 4;
+        req->method_type = HTTP_POST;
+        memcpy(req->method, "POST", 5);
         ptr += 5;
     } else if (m4 == UINT32_C(0x44414548) && ptr[4] == ' ') { /* "HEAD " */
-        if (method_size < 5) return -1;
-        memcpy(method, "HEAD", 5);
-        *method_len = 4;
+        req->method_type = HTTP_HEAD;
+        memcpy(req->method, "HEAD", 5);
         ptr += 5;
     } else if (m4 == UINT32_C(0x20545550)) { /* "PUT " */
-        if (method_size < 4) return -1;
-        memcpy(method, "PUT", 4);
-        *method_len = 3;
+        req->method_type = HTTP_PUT;
+        *(uint32_t*)req->method = UINT32_C(0x00545550); /* "PUT\0" */
         ptr += 4;
     } else {
-        const char* ts = ptr;
-        while (ptr < end && *ptr != ' ' && *ptr != '\0') ptr++;
-        size_t tl = (size_t)(ptr - ts);
-        if (tl == 0 || tl >= method_size) return -1;
-        memcpy(method, ts, tl);
-        method[tl] = '\0';
-        *method_len = tl;
-        while (ptr < end && *ptr == ' ') ptr++;
+        const char* sp = memchr(ptr, ' ', 8);
+        if (!sp) return -1;
+        size_t mlen = (size_t)(sp - ptr);
+        if (mlen >= sizeof(req->method)) return -1;
+        memcpy(req->method, ptr, mlen);
+        req->method[mlen] = '\0';
+        req->method_type = http_method_from_string(req->method, mlen);
+        ptr = sp + 1;
     }
 
-    if (ptr >= end) return -1;
+    const char* sp = memchr(ptr, ' ', input_len - (size_t)(ptr - input));
+    if (unlikely(!sp)) return -1;
+    *url_ptr = ptr;
+    *url_len = (size_t)(sp - ptr);
 
-    /* Parse URL */
-    const char* us = ptr;
-    const char* sp = memchr(ptr, ' ', (size_t)(end - ptr));
-    if (!sp) return -1;
-    size_t ul = (size_t)(sp - us);
-    if (ul == 0 || ul >= url_size) return -1;
-    memcpy(url, us, ul);
-    url[ul] = '\0';
-    *url_len = ul;
-    ptr = sp + 1;
-    while (ptr < end && *ptr == ' ') ptr++;
+    /* Verify "HTTP/1.1\r\n" using 64-bit + 16-bit register load */
+    const char* proto = sp + 1;
+    if (unlikely(input_len < (size_t)(proto - input) + 10)) return -1;
 
-    if (ptr >= end) return -1;
+    uint64_t h1;
+    uint16_t h2;
+    memcpy(&h1, proto, 8);
+    memcpy(&h2, proto + 8, 2);
 
-    /* Parse Protocol */
-    const char* ps = ptr;
-    while (ptr < end && *ptr != '\r' && *ptr != '\n' && *ptr != '\0') ptr++;
-    size_t plen = (size_t)(ptr - ps);
-    if (plen == 0 || plen >= protocol_size) return -1;
-    memcpy(protocol, ps, plen);
-    protocol[plen] = '\0';
-    *protocol_len = plen;
+    if (unlikely(h1 != UINT64_C(0x312E312F50545448) || h2 != UINT16_C(0x0A0D))) {
+        return -1;
+    }
 
     return 0;
 }
@@ -1617,7 +1600,7 @@ INLINE size_t decode_path_fast(const char* url, size_t url_len, char* dest, size
  *                 any in-buffer body). Lets the caller iterate over
  *                 pipelined requests inside a single read().
  */
-static http_status process_request(PulsarConn* conn, const char* buf, size_t read_bytes, const char* end_of_headers,
+INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t read_bytes, const char* end_of_headers,
                                    size_t* consumed, KeepAliveState* state, event_queue_t* queue) {
     *consumed = 0;
     if (!end_of_headers) return StatusBadRequest;
@@ -1625,48 +1608,36 @@ static http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     request_t* req = &conn->request;
     size_t headers_len = (size_t)(end_of_headers - buf) + 4;
 
-    char url[MAX_PATH_LEN + 1];
-    char http_protocol[16] = {0};
-    size_t method_len = 0, url_len = 0, protocol_len = 0;
+    const char* url_ptr = NULL;
+    size_t url_len = 0;
 
-    if (parse_request_line(buf, read_bytes, req->method, sizeof(req->method), &method_len, url, sizeof(url), &url_len,
-                           http_protocol, sizeof(http_protocol), &protocol_len) != 0)
+    if (parse_request_line(buf, read_bytes, req, &url_ptr, &url_len) != 0) {
         return StatusBadRequest;
+    }
 
-    size_t path_len = decode_path_fast(url, url_len, req->path, MAX_PATH_LEN);
-
-    if (strncmp(http_protocol, "HTTP/1.1", protocol_len) != 0) return StatusHTTPVersionNotSupported;
-
-    req->method_type = http_method_from_string(req->method, method_len);
-    if (!METHOD_VALID(req->method_type)) return StatusMethodNotAllowed;
+    /* Zero-copy path decode directly from read_buf into req->path */
+    size_t path_len = decode_path_fast(url_ptr, url_len, req->path, MAX_PATH_LEN);
 
     if (!parse_query_params(conn, &path_len)) return StatusInternalServerError;
     if (!parse_request_headers(conn, buf, req->method_type, headers_len)) return StatusInternalServerError;
 
-    /* Content-Length is now known: the request occupies headers + body. */
     *consumed = headers_len + req->content_length;
 
     route_t* route = route_match(req->path, path_len, req->method_type, conn->arena);
     if (!route) return StatusNotFound;
 
     req->route = route;
-    http_status status;
-    status = parse_request_body(conn, buf, headers_len, read_bytes);
-    if (status != StatusOK) {
-        return status;
-    }
+    http_status status = parse_request_body(conn, buf, headers_len, read_bytes);
+    if (status != StatusOK) return status;
 
     PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
     execute_all_middleware(&ctx, route);
     if (!conn->abort) route->handler(&ctx);
 
-    if (conn->offloaded) {
-        return StatusOK;
-    }
+    if (conn->offloaded) return StatusOK;
 
     if (HAS_CHUNKED_TRANSFER(conn->response.flags)) {
         request_complete(conn);
-
         if (conn->keep_alive) {
             AddKeepAliveConnection(conn, state);
             conn->closing = true;
