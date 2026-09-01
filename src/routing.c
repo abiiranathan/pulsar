@@ -20,9 +20,20 @@ alignas(64) route_t* fast_root_routes[HTTP_METHOD_COUNT] = {0};
 INLINE uint64_t load_prefix8(const char* s, size_t len) {
     uint64_t v = 0;
     if (len >= 8) {
-        memcpy(&v, s, 8);
+        __builtin_memcpy(&v, s, 8);
     } else if (len > 0) {
-        memcpy(&v, s, len);
+        __builtin_memcpy(&v, s, len);
+    }
+    return v;
+}
+
+/** Safely reads bytes 8..15 into a 64-bit unsigned integer (zero-padded). */
+INLINE uint64_t load_prefix16(const char* s, size_t len) {
+    uint64_t v = 0;
+    if (len >= 16) {
+        __builtin_memcpy(&v, s + 8, 8);
+    } else if (len > 8) {
+        __builtin_memcpy(&v, s + 8, len - 8);
     }
     return v;
 }
@@ -33,13 +44,13 @@ INLINE uint64_t load_prefix8(const char* s, size_t len) {
  * the full route_t is reached via `target` only on a confirmed match.
  *
  * Layout (on LP64):
- *   prefix8    8 B   first 8 bytes of pattern for 1-cycle integer rejection
- *   pattern    8 B   pointer into the permanent pattern string
- *   target     8 B   pointer to the full route_t (cold path)
+ *   prefix8     8 B   first 8 bytes of pattern for 1-cycle integer rejection
+ *   pattern     8 B   pointer into the permanent pattern string
+ *   target      8 B   pointer to the full route_t (cold path)
  *   pattern_len 2 B
  *   route_type  1 B
- *   first_char  1 B  pre-extracted pattern[0] — saves one indirection per iter
- *   _pad        4 B  explicit padding to 32 B / natural alignment
+ *   first_char  1 B   pattern[0], pre-extracted to avoid a pointer chase
+ *   _pad        4 B   explicit padding to 32 B / natural alignment
  */
 typedef struct __attribute__((aligned(32))) RouteMetadata {
     uint64_t prefix8;     /**< First 8 bytes of pattern for 1-cycle rejection. */
@@ -73,19 +84,38 @@ alignas(64) static MethodRoutes method_routes[HTTP_METHOD_COUNT] = {0};
 alignas(64) static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
 
 /*
- * Portable __builtin_memcmp shim.
+ * Fast inline bytes comparison without PLT/memcmp function call overhead.
  *
- * GCC and Clang expand __builtin_memcmp to inline scalar/SIMD comparisons
- * for sizes known at compile time, and to a direct call (no PLT) otherwise.
- * The PLT call to bcmp@plt that appeared in the profiling report is the
- * symptom this shim addresses. On compilers that don't provide the builtin
- * the macro falls back to the standard memcmp, which is correct if slower.
+ * Compares 64-bit words and 32-bit dwords directly using integer registers to
+ * eliminate dynamic linker PLT trampoline stalls (`call memcmp@plt`).
  */
-#if defined(__GNUC__) || defined(__clang__)
-    #define ROUTE_MEMCMP(a, b, n) __builtin_memcmp((a), (b), (n))
-#else
-    #define ROUTE_MEMCMP(a, b, n) memcmp((a), (b), (n))
-#endif
+INLINE bool fast_bytes_equal(const char* a, const char* b, size_t len) {
+    while (len >= 8) {
+        uint64_t va, vb;
+        __builtin_memcpy(&va, a, 8);
+        __builtin_memcpy(&vb, b, 8);
+        if (va != vb) return false;
+        a += 8;
+        b += 8;
+        len -= 8;
+    }
+    if (len >= 4) {
+        uint32_t va, vb;
+        __builtin_memcpy(&va, a, 4);
+        __builtin_memcpy(&vb, b, 4);
+        if (va != vb) return false;
+        a += 4;
+        b += 4;
+        len -= 4;
+    }
+    while (len > 0) {
+        if (*a != *b) return false;
+        a++;
+        b++;
+        len--;
+    }
+    return true;
+}
 
 /*
  * Exact-match hash table (method + path -> route_t*).
@@ -103,26 +133,34 @@ alignas(64) static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROU
 
 typedef struct __attribute__((aligned(32))) ExactEntry {
     uint64_t prefix8;     /**< First 8 bytes of pattern for 1-cycle integer comparison. */
+    uint64_t prefix16;    /**< Bytes 8..15 (allows 16-byte matches without memcmp). */
     const char* pattern;  /**< Full pattern string. */
     route_t* target;      /**< Target route. */
-    uint32_t hash_sig;    /**< 32-bit hash signature to verify collisions. */
     uint16_t pattern_len; /**< Pattern length. */
     uint16_t method;      /**< HttpMethod, folded into the probe key. */
-    uint8_t _pad[4];      /**< Pad to exactly 32 B. */
+    uint32_t hash_sig;    /**< 32-bit hash signature to verify collisions. */
 } ExactEntry;
 
 /* Aligned to 64-byte L1 cache boundaries */
 alignas(64) static ExactEntry exact_table[EXACT_TABLE_SIZE] = {0};
 
-/** 64-bit SWAR Multiplicative Hash over 8-byte chunks, mixed with the method for bucket spread. */
-static inline uint32_t exact_hash(const char* path, size_t len, uint16_t method) {
-    uint64_t h = ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ (len * 0x517CC1B727220A95ULL);
-    const uint8_t* p = (const uint8_t*)path;
-    size_t rem = len;
+/** 64-bit SWAR Multiplicative Hash: 3-cycle branchless hash for <= 8 bytes, SWAR for longer paths. */
+INLINE uint32_t exact_hash(const char* path, size_t len, uint16_t method, uint64_t prefix8) {
+    if (likely(len <= 8)) {
+        uint64_t h = prefix8 ^ ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ ((uint64_t)len * 0x517CC1B727220A95ULL);
+        h ^= (h >> 33);
+        h *= 0xFF51AFD7ED558CCDULL;
+        h ^= (h >> 33);
+        return (uint32_t)h;
+    }
+
+    uint64_t h = ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ (len * 0x517CC1B727220A95ULL) ^ prefix8;
+    const uint8_t* p = (const uint8_t*)path + 8;
+    size_t rem = len - 8;
 
     while (rem >= 8) {
         uint64_t v;
-        memcpy(&v, p, 8);
+        __builtin_memcpy(&v, p, 8);
         h ^= v;
         h *= 0x517CC1B727220A95ULL;
         h ^= (h >> 32);
@@ -132,7 +170,7 @@ static inline uint32_t exact_hash(const char* path, size_t len, uint16_t method)
 
     if (rem >= 4) {
         uint32_t v;
-        memcpy(&v, p, 4);
+        __builtin_memcpy(&v, p, 4);
         h ^= (uint64_t)v;
         h *= 0x517CC1B727220A95ULL;
         p += 4;
@@ -155,19 +193,23 @@ static inline uint32_t exact_hash(const char* path, size_t len, uint16_t method)
  * Looks up an EXACT route by method + path in O(1).
  * @return Matched route, or NULL.
  */
-static inline route_t* exact_lookup(const char* path, size_t len, HttpMethod method, uint64_t prefix8) {
-    const uint32_t sig = exact_hash(path, len, (uint16_t)method);
+INLINE route_t* exact_lookup(const char* path, size_t len, HttpMethod method, uint64_t prefix8) {
+    const uint32_t sig = exact_hash(path, len, (uint16_t)method, prefix8);
     size_t i = sig & EXACT_TABLE_MASK;
 
     while (exact_table[i].target) {
         const ExactEntry* e = &exact_table[i];
         if (e->hash_sig == sig && e->method == (uint16_t)method && e->pattern_len == len && e->prefix8 == prefix8) {
-            if (len > 8) {
-                if (ROUTE_MEMCMP(e->pattern + 8, path + 8, len - 8) == 0) {
+            if (likely(len <= 8)) {
+                return e->target;
+            }
+            if (len <= 16) {
+                uint64_t p16 = load_prefix16(path, len);
+                if (e->prefix16 == p16) return e->target;
+            } else {
+                if (fast_bytes_equal(e->pattern + 8, path + 8, len - 8)) {
                     return e->target;
                 }
-            } else {
-                return e->target;
             }
         }
         i = (i + 1) & EXACT_TABLE_MASK;
@@ -403,16 +445,20 @@ void sort_routes(void) {
         }
 
         if (r->route_type == ROUTE_TYPE_EXACT) {
-            uint32_t sig = exact_hash(r->pattern, r->pattern_len, (uint16_t)method);
+            uint64_t p8 = load_prefix8(r->pattern, r->pattern_len);
+            uint64_t p16 = load_prefix16(r->pattern, r->pattern_len);
+            uint32_t sig = exact_hash(r->pattern, r->pattern_len, (uint16_t)method, p8);
             size_t slot = sig & EXACT_TABLE_MASK;
             while (exact_table[slot].target) slot = (slot + 1) & EXACT_TABLE_MASK;
+
             exact_table[slot] = (ExactEntry){
-                .prefix8 = load_prefix8(r->pattern, r->pattern_len),
+                .prefix8 = p8,
+                .prefix16 = p16,
                 .pattern = r->pattern,
                 .target = r,
-                .hash_sig = sig,
                 .pattern_len = r->pattern_len,
                 .method = (uint16_t)method,
+                .hash_sig = sig,
             };
             continue;
         }
@@ -546,7 +592,7 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
                             return meta->target;
                         }
                     } else if (meta->prefix8 == prefix8 &&
-                               ROUTE_MEMCMP(meta->pattern + 8, path + 8, meta->pattern_len - 8) == 0) {
+                               fast_bytes_equal(meta->pattern + 8, path + 8, meta->pattern_len - 8)) {
                         return meta->target;
                     }
                 }
@@ -587,8 +633,12 @@ INLINE route_t* match_any_method(const char* path, size_t url_length, uint64_t p
 }
 
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
-    /* Fast-Path: direct jump for root route ("/") - 2 CPU cycles */
-    if (url_length == 1 && path[0] == '/') {
+    /* Fast-Path: direct jump for root route ("/") - 1-2 CPU cycles */
+    if (likely(url_length == 1 && path[0] == '/')) {
+        if (likely(method == HTTP_GET)) {
+            route_t* r = fast_root_routes[HTTP_GET];
+            if (likely(r != NULL)) return r;
+        }
         if (method < HTTP_METHOD_COUNT && fast_root_routes[method]) {
             return fast_root_routes[method];
         }
@@ -601,7 +651,7 @@ route_t* route_match(const char* path, size_t url_length, HttpMethod method, Are
 
     /* O(1) exact match — the overwhelmingly common case. */
     route_t* found = exact_lookup(path, url_length, method, prefix8);
-    if (found) return found;
+    if (likely(found != NULL)) return found;
 
     /* HEAD falls back to GET routes per RFC 9110 §9.3.2 (exact first). */
     if (method == HTTP_HEAD) {

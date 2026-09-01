@@ -16,7 +16,10 @@ static const char DIGIT_PAIRS[200] = {
     '0', '8', '1', '8', '2', '8', '3', '8', '4', '8', '5', '8', '6', '8', '7', '8', '8', '8', '9', '9', '0', '9', '1',
     '9', '2', '9', '3', '9', '4', '9', '5', '9', '6', '9', '7', '9', '8', '9', '9'};
 
-static inline void put2(char* dst, uint32_t v) { memcpy(dst, &DIGIT_PAIRS[v * 2], 2); }
+static inline void put2(char* dst, uint32_t v) {
+    dst[0] = (char)('0' + v / 10);
+    dst[1] = (char)('0' + v % 10);
+}
 
 static inline void put4(char* dst, uint32_t v) {
     uint32_t q = (uint32_t)(((uint64_t)v * 1374389535ULL) >> 37);
@@ -68,6 +71,24 @@ static inline char* u32_to_str(char* p, uint32_t v) {
     *p++ = (char)('0' + hi);
     put8(p, lo);
     return p + 8;
+}
+
+/** Fast digit count for 0 <= v <= 9999999999999999 (16 digits max). */
+static inline size_t count_digits(uint64_t v) {
+    if (v < 100000000ULL) {
+        if (v < 10000ULL) {
+            if (v < 100ULL) return v < 10ULL ? 1 : 2;
+            return v < 1000ULL ? 3 : 4;
+        }
+        if (v < 1000000ULL) return v < 100000ULL ? 5 : 6;
+        return v < 10000000ULL ? 7 : 8;
+    }
+    if (v < 1000000000000ULL) {
+        if (v < 10000000000ULL) return v < 1000000000ULL ? 9 : 10;
+        return v < 100000000000ULL ? 11 : 12;
+    }
+    if (v < 100000000000000ULL) return v < 10000000000000ULL ? 13 : 14;
+    return v < 1000000000000000ULL ? 15 : 16;
 }
 
 size_t pulsar_itoa(uint64_t value, char* buf) {
