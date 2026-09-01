@@ -10,14 +10,18 @@
 #include "../include/plog.h"
 #include "../include/pulsar.h"
 
-static int worker_listen_fds[NUM_WORKERS]; /**< Per-worker SO_REUSEPORT listeners. */
-volatile sig_atomic_t server_running = 1;
-static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
-static size_t global_mw_count = 0;
-static void* GLOBAL_HANDLER_USERDATA = NULL;
-static _Atomic time_t cached_date_ts = 0;
-static char cached_date_hdr[64] = {0};
-static int cached_date_len = 0;
+#if defined(__AVX2__)
+    #include <immintrin.h>
+#endif
+
+ALIGN(64) int worker_listen_fds[NUM_WORKERS];
+ALIGN(64) volatile sig_atomic_t server_running = 1;
+ALIGN(64) HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
+ALIGN(64) size_t global_mw_count = 0;
+ALIGN(64) void* GLOBAL_HANDLER_USERDATA = NULL;
+ALIGN(64) _Atomic time_t cached_date_ts = 0;
+ALIGN(64) char cached_date_hdr[64] = {0};
+ALIGN(64) int cached_date_len = 0;
 
 #define SERVER_NAME "PULSAR/1.0 (Unix)"
 
@@ -63,8 +67,8 @@ typedef struct SlowWorker {
     KeepAliveState keep_alive_state; /**< Idle-connection timeout list. */
 } SlowWorker;
 
-static SlowWorker slow_workers[NUM_SLOW_WORKERS];
-static _Atomic int next_slow_worker = 0;
+ALIGN(64) static SlowWorker slow_workers[NUM_SLOW_WORKERS];
+ALIGN(64) static _Atomic int next_slow_worker = 0;
 
 /* ----------------------------------------------------------------
  * slow_close_offloaded
@@ -475,27 +479,49 @@ INLINE void write_error(PulsarConn* conn, http_status status) {
  * Request Parsing
  * ================================================================ */
 
-/* Finds "\r\n\r\n" in buf[0..len). Returns pointer to the '\r' or NULL.
- * Uses memchr to skip non-'\r' bytes in bulk, then checks the 3-byte
- * suffix with a single 32-bit load — no SIMD setup overhead. */
 INLINE const char* find_headers_end(const char* buf, size_t len) {
     if (len < 4) return NULL;
 
     const char* p = buf;
-    const char* end = buf + len - 3; /* need 4 bytes from p */
+    const char* end = buf + len;
 
-    while (p < end) {
-        p = memchr(p, '\r', (size_t)(end - p));
-        if (!p) return NULL;
+#if defined(__AVX2__)
+    const __m256i r_vec = _mm256_set1_epi8('\r');
+    const __m256i n_vec = _mm256_set1_epi8('\n');
 
-        /* Load 4 bytes at once and compare as a little-endian uint32.
-         * "\r\n\r\n" = 0x0a0d0a0d in LE. Avoids 3 separate byte checks. */
-        uint32_t v;
-        memcpy(&v, p, 4); /* memcpy for strict-aliasing safety */
-        if (v == UINT32_C(0x0a0d0a0d)) return p;
+    /* Need 32 + 3 = 35 bytes available for the 4 overlapping 32-byte vector loads */
+    while (p + 35 <= end) {
+        __m256i v0 = _mm256_loadu_si256((const __m256i*)(p + 0));
+        __m256i v1 = _mm256_loadu_si256((const __m256i*)(p + 1));
+        __m256i v2 = _mm256_loadu_si256((const __m256i*)(p + 2));
+        __m256i v3 = _mm256_loadu_si256((const __m256i*)(p + 3));
 
-        p++; /* skip this '\r' and try next */
+        /* Compare: v0=='\r' AND v1=='\n' AND v2=='\r' AND v3=='\n' */
+        __m256i c0 = _mm256_cmpeq_epi8(v0, r_vec);
+        __m256i c1 = _mm256_cmpeq_epi8(v1, n_vec);
+        __m256i c2 = _mm256_cmpeq_epi8(v2, r_vec);
+        __m256i c3 = _mm256_cmpeq_epi8(v3, n_vec);
+
+        __m256i match = _mm256_and_si256(_mm256_and_si256(c0, c1), _mm256_and_si256(c2, c3));
+
+        uint32_t mask = (uint32_t)_mm256_movemask_epi8(match);
+        if (mask != 0) {
+            return p + __builtin_ctz(mask);
+        }
+
+        p += 32;
     }
+#endif
+
+    /* Scalar fallback for remaining bytes (< 35 bytes or non-AVX2) */
+    const char* scalar_end = end - 3;
+    while (p < scalar_end) {
+        uint32_t v;
+        memcpy(&v, p, 4);
+        if (v == UINT32_C(0x0a0d0a0d)) return p;
+        p++;
+    }
+
     return NULL;
 }
 
@@ -514,7 +540,6 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
 
         const size_t name_len = (size_t)(colon - ptr);
         if (name_len == 0) {
-            fprintf(stderr, "Invalid header: empty name\n");
             return false;
         }
 
@@ -1346,14 +1371,16 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
  * Middleware
  * ================================================================ */
 INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
-#define RUN_MW(mw, n)                     \
-    for (size_t _i = 0; _i < (n); _i++) { \
-        (mw)[_i](ctx);                    \
-        if (ctx->conn->abort) return;     \
+    // if no middleware, just return
+    if (!global_mw_count && !route->mw_count) return;
+    for (size_t i = 0; i < global_mw_count; i++) {
+        global_middleware[i](ctx);
+        if (ctx->conn->abort) return;
     }
-    RUN_MW(global_middleware, global_mw_count);
-    RUN_MW(route->middleware, route->mw_count);
-#undef RUN_MW
+    for (size_t i = 0; i < route->mw_count; i++) {
+        route->middleware[i](ctx);
+        if (ctx->conn->abort) return;
+    }
 }
 
 void use_global_middleware(HttpHandler* mw, size_t count) {
@@ -1384,9 +1411,9 @@ Request conn_get_request_metadata(PulsarConn* conn) {
     };
 }
 
-static PlogState PLOG_STATE = {0};
-static int LOG_FD = -1;
-static PulsarCallback LOGGER_CALLBACK = NULL;
+ALIGN(64) PlogState PLOG_STATE = {0};
+ALIGN(64) int LOG_FD = -1;
+ALIGN(64) PulsarCallback LOGGER_CALLBACK = NULL;
 
 bool pulsar_set_callback(PulsarCallback cb, int fd) {
 #if ENABLE_LOGGING
@@ -1398,8 +1425,6 @@ bool pulsar_set_callback(PulsarCallback cb, int fd) {
     LOG_FD = fd;
     return plog_init(&PLOG_STATE, LOG_FD);
 #else
-    LOGGER_CALLBACK = NULL;
-    LOG_FD = -1;
     UNUSED(cb);
     UNUSED(fd);
     return true;
@@ -1484,37 +1509,40 @@ INLINE void request_complete(PulsarConn* conn) {
 /* ================================================================
  * HTTP Request Line Parser
  * ================================================================ */
+
 INLINE int parse_request_line(const char* input, size_t input_len, char* method, size_t method_size, size_t* method_len,
-                              char* url, size_t url_size, size_t* url_len, char* protocol, size_t protocol_size,
-                              size_t* protocol_len) {
-    const char* ptr = input;
+                              char* url, size_t url_size, size_t* url_len) {
+    if (unlikely(input_len < 14)) return -1;
+
+    const char* p = input;
     const char* end = input + input_len;
 
-#define PARSE_TOKEN(out, osz, olen)                             \
-    do {                                                        \
-        const char* ts = ptr;                                   \
-        while (ptr < end && *ptr != ' ' && *ptr != '\0') ptr++; \
-        size_t tl = (size_t)(ptr - ts);                         \
-        if (tl == 0 || tl >= (osz)) return -1;                  \
-        memcpy((out), ts, tl);                                  \
-        (out)[tl] = '\0';                                       \
-        *(olen) = tl;                                           \
-        while (ptr < end && *ptr == ' ') ptr++;                 \
-    } while (0)
+    /* ---- method ---- */
+    const char* sp = (const char*)memchr(p, ' ', end - p);
+    if (unlikely(!sp || sp == p)) return -1;
 
-    PARSE_TOKEN(method, method_size, method_len);
-    if (ptr >= end) return -1;
-    PARSE_TOKEN(url, url_size, url_len);
-    if (ptr >= end) return -1;
+    size_t tl = (size_t)(sp - p);
+    if (unlikely(tl >= method_size)) return -1;
 
-    const char* ps = ptr;
-    while (ptr < end && *ptr != '\r' && *ptr != '\n' && *ptr != '\0') ptr++;
-    size_t plen = (size_t)(ptr - ps);
-    if (plen == 0 || plen >= protocol_size) return -1;
-    memcpy(protocol, ps, plen);
-    protocol[plen] = '\0';
-    *protocol_len = plen;
-#undef PARSE_TOKEN
+    memcpy(method, p, tl);
+    method[tl] = '\0';
+    *method_len = tl;
+    p = sp + 1;
+
+    /* skip extra spaces (very rare) */
+    while (unlikely(p < end && *p == ' ')) ++p;
+
+    /* ---- url ---- */
+    sp = (const char*)memchr(p, ' ', end - p);
+    if (unlikely(!sp || sp == p)) return -1;
+
+    tl = (size_t)(sp - p);
+    if (unlikely(tl >= url_size)) return -1;
+
+    memcpy(url, p, tl);
+    url[tl] = '\0';
+    *url_len = tl;
+
     return 0;
 }
 
@@ -1533,22 +1561,28 @@ static http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     *consumed = 0;
 
     const char* end_of_headers = find_headers_end(buf, read_bytes);
-    if (!end_of_headers) return StatusBadRequest;
+    if (!end_of_headers) {
+        conn->closing = true;
+        return StatusBadRequest;
+    }
 
     request_t* req = &conn->request;
     size_t headers_len = (size_t)(end_of_headers - buf) + 4;
-
     char url[MAX_PATH_LEN + 1];
-    char http_protocol[16] = {0};
-    size_t method_len = 0, url_len = 0, protocol_len = 0;
+    size_t method_len = 0, url_len = 0;
 
-    if (parse_request_line(buf, read_bytes, req->method, sizeof(req->method), &method_len, url, sizeof(url), &url_len,
-                           http_protocol, sizeof(http_protocol), &protocol_len) != 0)
+    if (parse_request_line(buf, read_bytes, req->method, sizeof(req->method), &method_len, url, sizeof(url),
+                           &url_len) != 0)
         return StatusBadRequest;
 
-    size_t path_len = url_percent_decode(url, req->path, url_len, MAX_PATH_LEN);
-
-    if (strncmp(http_protocol, "HTTP/1.1", protocol_len) != 0) return StatusHTTPVersionNotSupported;
+    // Only decode the path if it contains percent-encoded characters or '+'.
+    size_t path_len = url_len;
+    if (memchr(url, '%', (size_t)url_len) || memchr(url, '+', (size_t)url_len)) {
+        path_len = url_percent_decode(url, req->path, (size_t)url_len, sizeof(req->path));
+    } else {
+        memcpy(req->path, url, (size_t)url_len);
+        req->path[url_len] = '\0';
+    }
 
     req->method_type = http_method_from_string(req->method, method_len);
     if (!METHOD_VALID(req->method_type)) return StatusMethodNotAllowed;
@@ -1560,7 +1594,10 @@ static http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     *consumed = headers_len + req->content_length;
 
     route_t* route = route_match(req->path, path_len, req->method_type, conn->arena);
-    if (!route) return StatusNotFound;
+    if (!route) {
+        printf("No route found for %s %.*s\n", req->method, (int)path_len, req->path);
+        return StatusNotFound;
+    }
 
     req->route = route;
     http_status status;
@@ -2026,12 +2063,6 @@ void* worker_thread(void* arg) {
  * pulsar_run — public entry point
  * ================================================================ */
 int pulsar_run(const char* addr, int port) {
-    /*
-     * One SO_REUSEPORT listener per worker: the kernel hashes incoming
-     * SYNs across sockets, so each worker accepts from its own queue with
-     * no EPOLLEXCLUSIVE wakeup serialization and no shared listen-queue
-     * cache-line bouncing between cores.
-     */
     for (int i = 0; i < NUM_WORKERS; i++) {
         worker_listen_fds[i] = create_server_socket(addr, port);
         if (worker_listen_fds[i] < 0) {
@@ -2045,15 +2076,7 @@ int pulsar_run(const char* addr, int port) {
     sort_routes();
     init_mimetypes();
 
-    /*
-     * Slow worker pool initialisation.
-     *
-     * Each slow worker gets its own kernel event queue and runs an
-     * independent event loop capable of handling an unbounded number of
-     * offloaded connections.  Workers are started before the main accept
-     * threads so that pulsar_handoff() can safely register file descriptors
-     * into the slow queues as soon as the first requests arrive.
-     */
+    // Init slow workers.
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         slow_workers[i].id = i;
         slow_workers[i].queue = event_queue_create();

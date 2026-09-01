@@ -1,4 +1,5 @@
 #include "../include/routing.h"
+#include <solidc/arena.h>
 #include <solidc/filepath.h>
 #include <stdalign.h>
 #include <string.h>
@@ -9,22 +10,10 @@
 extern void static_file_handler(PulsarCtx* ctx);
 
 /** Global route storage. */
-static route_t global_routes[MAX_ROUTES] = {0};
-static size_t global_route_count = 0;
+ALIGN(64) route_t global_routes[MAX_ROUTES] = {0};
+ALIGN(64) size_t global_route_count = 0;
 
-/*
- * Compact per-route metadata stored contiguously for cache-friendly linear
- * scan. Only the fields that drive the initial match decision are kept here;
- * the full route_t is reached via `target` only on a confirmed match.
- *
- * Layout (on LP64):
- *   pattern    8 B   pointer into the permanent pattern string
- *   target     8 B   pointer to the full route_t (cold path)
- *   pattern_len 2 B
- *   route_type  1 B
- *   first_char  1 B  pre-extracted pattern[0] — saves one indirection per iter
- *   _pad        4 B  explicit padding to 24 B / natural alignment
- */
+// Metadata for routes.
 typedef struct {
     const char* pattern;  /**< Pointer to pattern string (permanent lifetime). */
     route_t* target;      /**< Pointer to the full route_t (used on match). */
@@ -37,11 +26,11 @@ typedef struct {
 /*
  * Method-specific pointer directory.
  *
- * Struct is exactly 16 bytes (a power of two). This allows the compiler to index 
- * into `method_routes[method]` using a single shift instruction (e.g. `shl rax, 4`) 
+ * Struct is exactly 16 bytes (a power of two). This allows the compiler to index
+ * into `method_routes[method]` using a single shift instruction (e.g. `shl rax, 4`)
  * instead of generating an expensive `imul` integer multiplication.
  *
- * All directories fit within two 64-byte cache lines. Both `routes` and `count` 
+ * All directories fit within two 64-byte cache lines. Both `routes` and `count`
  * are guaranteed to reside in the same cache line.
  */
 typedef struct {
@@ -50,10 +39,10 @@ typedef struct {
     uint16_t _pad[3];      /**< Explicit padding to align to exactly 16 B. */
 } MethodRoutes;
 
-static MethodRoutes method_routes[HTTP_METHOD_COUNT] = {0};
+ALIGN(64) MethodRoutes method_routes[HTTP_METHOD_COUNT] = {0};
 
 /* Flat, contiguous backing storage allocated once statically. */
-static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
+ALIGN(64) RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
 
 /*
  * Portable __builtin_memcmp shim.
@@ -65,9 +54,9 @@ static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
  * the macro falls back to the standard memcmp, which is correct if slower.
  */
 #if defined(__GNUC__) || defined(__clang__)
-#define ROUTE_MEMCMP(a, b, n) __builtin_memcmp((a), (b), (n))
+    #define ROUTE_MEMCMP(a, b, n) __builtin_memcmp((a), (b), (n))
 #else
-#define ROUTE_MEMCMP(a, b, n) memcmp((a), (b), (n))
+    #define ROUTE_MEMCMP(a, b, n) memcmp((a), (b), (n))
 #endif
 
 /*
@@ -78,10 +67,8 @@ static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
  * candidate. This open-addressed table resolves them in one probe on average.
  * Built once in sort_routes(); read-only afterwards, so no locking needed.
  *
- * ROUTE_TYPE_EXACT routes are removed from the per-method linear arrays so
- * the fallback scan never re-tests what the hash already ruled out.
  */
-#define EXACT_TABLE_SIZE 256 /* power of two; >= 2x MAX_ROUTES */
+#define EXACT_TABLE_SIZE MAX_ROUTES * 2 /* power of two; >= 2x MAX_ROUTES */
 typedef struct {
     const char* pattern;
     route_t* target;
@@ -89,7 +76,7 @@ typedef struct {
     uint16_t method; /**< HttpMethod, folded into the probe key. */
 } ExactEntry;
 
-static ExactEntry exact_table[EXACT_TABLE_SIZE] = {0};
+ALIGN(64) static ExactEntry exact_table[EXACT_TABLE_SIZE] = {0};
 
 /** FNV-1a over the path bytes, mixed with the method for bucket spread. */
 static inline size_t exact_hash(const char* path, size_t len, uint16_t method) {
@@ -148,7 +135,7 @@ static size_t count_path_params(const char* pattern, bool* valid) {
                 return 0;
             }
             count++;
-            p++;            /* step past '}' */
+            p++; /* step past '}' */
         } else if (*p == '}') {
             *valid = false; /* unmatched closing brace */
             return 0;
@@ -199,8 +186,7 @@ static void populate_param_names(const char* pattern, PathParams* path_params) {
 
         p++; /* skip '{' */
         const char* name_start = p;
-        while (*p && *p != '}')
-            p++;
+        while (*p && *p != '}') p++;
 
         /* Pattern was validated by count_path_params; '}' is guaranteed. */
         const size_t name_len = (size_t)(p - name_start);
@@ -340,7 +326,6 @@ void sort_routes(void) {
         const HttpMethod method = r->method;
 
         ASSERT(method < HTTP_METHOD_COUNT && "Invalid method during sort");
-
         if (r->route_type == ROUTE_TYPE_EXACT) {
             size_t slot = exact_hash(r->pattern, r->pattern_len, (uint16_t)method);
             while (exact_table[slot].target) slot = (slot + 1) & (EXACT_TABLE_SIZE - 1);
@@ -412,8 +397,7 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
         /* Skip past the {name} token; the name pointer was stored at
          * registration time, so we only need to advance pat here. */
         pat++; /* skip '{' */
-        while (*pat && *pat != '}')
-            pat++;
+        while (*pat && *pat != '}') pat++;
         if (*pat != '}') return false; /* malformed pattern — defensive */
         pat++;                         /* skip '}' */
 
@@ -424,11 +408,9 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
 
         if (stop_pat == '\0') {
             /* Terminal param: consume everything except a trailing slash. */
-            while (*url_ptr && *url_ptr != '/')
-                url_ptr++;
+            while (*url_ptr && *url_ptr != '/') url_ptr++;
         } else {
-            while (*url_ptr && *url_ptr != '/' && *url_ptr != stop_pat)
-                url_ptr++;
+            while (*url_ptr && *url_ptr != '/' && *url_ptr != stop_pat) url_ptr++;
         }
 
         const size_t val_len = (size_t)(url_ptr - val_start);
@@ -437,10 +419,8 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
     }
 
     /* Strip optional trailing slashes before the exhaustion check. */
-    while (*pat == '/')
-        pat++;
-    while (*url_ptr == '/')
-        url_ptr++;
+    while (*pat == '/') pat++;
+    while (*url_ptr == '/') url_ptr++;
 
     path_params->match_count = nparams;
 

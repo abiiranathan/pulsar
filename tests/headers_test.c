@@ -30,7 +30,7 @@
 #define TEST_START(name) printf(COLOR_CYAN "Testing: %s" COLOR_RESET "... ", name)
 
 /* Test counters */
-static int tests_run    = 0;
+static int tests_run = 0;
 static int tests_passed = 0;
 static int tests_failed = 0;
 
@@ -63,10 +63,10 @@ static bool test_set_static_header(void) {
     headers_t headers;
     headers_init(&headers);
 
-    bool pass     = headers_set(&headers, SS_LIT("Host"), SS_LIT("example.com"));
-    pass          = pass && (headers.count == 1);
+    bool pass = headers_set(&headers, SS_LIT("Host"), SS_LIT("example.com"));
+    pass = pass && (headers.count == 1);
     StrSlice host = headers_get(&headers, "Host");
-    pass          = pass && ss_is_valid(host) && ss_equal(host, SS_LIT("example.com"));
+    pass = pass && ss_is_valid(host) && ss_equal(host, SS_LIT("example.com"));
     return pass;
 }
 
@@ -77,8 +77,8 @@ static bool test_update_existing_header(void) {
     headers_set(&headers, SS_LIT("Host"), SS_LIT("newhost.com"));
 
     StrSlice value = headers_get(&headers, "Host");
-    bool pass      = (headers.count == 1);
-    pass           = pass && ss_is_valid(value) && ss_equal(value, SS_LIT("newhost.com"));
+    bool pass = (headers.count == 1);
+    pass = pass && ss_is_valid(value) && ss_equal(value, SS_LIT("newhost.com"));
     return pass;
 }
 
@@ -92,9 +92,9 @@ static bool test_multiple_headers(void) {
     headers_set(&headers, SS_LIT("Content-Type"), SS_LIT("application/json"));
 
     bool pass = (headers.count == 4);
-    pass      = pass && (ss_equal(headers_get(&headers, "Host"), SS_LIT("example.com")));
-    pass      = pass && (ss_equal(headers_get(&headers, "User-Agent"), SS_LIT("TestAgent/1.0")));
-    pass      = pass && (ss_equal(headers_get(&headers, "Accept"), SS_LIT("text/html")));
+    pass = pass && (ss_equal(headers_get(&headers, "Host"), SS_LIT("example.com")));
+    pass = pass && (ss_equal(headers_get(&headers, "User-Agent"), SS_LIT("TestAgent/1.0")));
+    pass = pass && (ss_equal(headers_get(&headers, "Accept"), SS_LIT("text/html")));
     pass = pass && (ss_equal(headers_get(&headers, "Content-Type"), SS_LIT("application/json")));
     return pass;
 }
@@ -121,9 +121,9 @@ static bool test_headers_remove(void) {
     bool removed = headers_remove(&headers, "Host");
 
     bool pass = removed;
-    pass      = pass && (headers.count == 1);
-    pass      = pass && (ss_is_valid(headers_get(&headers, "Host")));
-    pass      = pass && (ss_is_valid(headers_get(&headers, "User-Agent")));
+    pass = pass && (headers.count == 1);
+    pass = pass && (ss_is_valid(headers_get(&headers, "Host")));
+    pass = pass && (ss_is_valid(headers_get(&headers, "User-Agent")));
     return pass;
 }
 
@@ -147,8 +147,8 @@ static bool test_capacity_limit(void) {
 
     // Try to exceed capacity
     bool overflow = headers_set(&headers, SS_LIT("X-Overflow"), SS_LIT("value"));
-    bool pass     = !overflow;
-    pass          = pass && (headers.count == HEADERS_CAPACITY);
+    bool pass = !overflow;
+    pass = pass && (headers.count == HEADERS_CAPACITY);
 
     // Free allocated memory.
     for (size_t i = 0; i < headers.count; ++i) {
@@ -211,8 +211,8 @@ static bool test_headers_foreach(void) {
     headers_foreach(&headers, count_headers_callback, &ctx);
 
     bool pass = (ctx.count == 3);
-    pass      = pass && ctx.found_host;
-    pass      = pass && ctx.found_user_agent;
+    pass = pass && ctx.found_host;
+    pass = pass && ctx.found_user_agent;
     return pass;
 }
 
