@@ -48,6 +48,49 @@ if(APPLE AND ENABLE_UNIVERSAL_BINARY AND NOT DEFINED CMAKE_OSX_ARCHITECTURES)
 endif()
 
 # ------------------------------------------------------------------------------
+# Link-Time Optimization (LTO / IPO)
+# ------------------------------------------------------------------------------
+
+cmake_policy(SET CMP0069 NEW)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
+
+if(IPO_SUPPORTED)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    message(STATUS "Link-Time Optimization (LTO): ENABLED for Release")
+else()
+    message(WARNING "Link-Time Optimization (LTO) NOT supported: ${IPO_ERROR}")
+endif()
+
+# ------------------------------------------------------------------------------
+# Release Optimization Compiler Flags
+# ------------------------------------------------------------------------------
+
+set(PULSAR_RELEASE_OPTS
+    -O3
+    -DNDEBUG
+    -fomit-frame-pointer
+    -fstrict-aliasing
+)
+
+if(PLATFORM_LINUX)
+    list(APPEND PULSAR_RELEASE_OPTS
+        -fno-plt                     # Eliminates PLT stubs for libc calls
+        -fno-semantic-interposition  # Enables direct symbol resolution across files
+    )
+endif()
+
+# Architecture-specific vectorization (AVX2 / BMI2 / Popcnt)
+if(ENABLE_NATIVE_OPTIMIZATION)
+    if(APPLE AND ENABLE_UNIVERSAL_BINARY)
+        # Avoid -march=native when cross-compiling universal binaries
+        message(STATUS "Native optimization skipped for Universal macOS build")
+    else()
+        list(APPEND PULSAR_RELEASE_OPTS -march=native -mtune=native)
+    endif()
+endif()
+
+# ------------------------------------------------------------------------------
 # Dependencies
 # ------------------------------------------------------------------------------
 
@@ -69,9 +112,6 @@ set(PULSAR_SOURCES
     src/routing.c
 )
 
-# Event loop is provided by include/events.h, a thin wrapper over
-# solidc's cross-platform poller (linked via solidc::solidc).
-
 file(GLOB PULSAR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 
 # ------------------------------------------------------------------------------
@@ -91,22 +131,10 @@ target_compile_definitions(pulsar_objects
 )
 
 target_compile_options(pulsar_objects PRIVATE
-    $<$<CONFIG:Debug>:       -O0 -g3 -DDEBUG>
-    $<$<CONFIG:Release>:     -O3>
+    $<$<CONFIG:Debug>:          -O0 -g3 -DDEBUG>
+    $<$<CONFIG:Release>:        ${PULSAR_RELEASE_OPTS}>
     $<$<CONFIG:RelWithDebInfo>: -O2 -g>
 )
-
-if(ENABLE_NATIVE_OPTIMIZATION AND PLATFORM_LINUX)
-    target_compile_options(pulsar_objects PRIVATE
-        -mtune=native -march=native -mavx2
-    )
-endif()
-
-# Avoid PLT indirection on libc calls in the hot path (memchr/memcmp/writev);
-# with -fno-plt the compiler emits a direct call via GOT load instead.
-if(PLATFORM_LINUX)
-    target_compile_options(pulsar_objects PRIVATE $<$<CONFIG:Release>:-fno-plt>)
-endif()
 
 target_link_libraries(pulsar_objects PUBLIC solidc::solidc)
 
@@ -148,6 +176,20 @@ endif()
 # ------------------------------------------------------------------------------
 
 add_executable(server main.c)
+
+target_compile_options(server PRIVATE
+    $<$<CONFIG:Release>:${PULSAR_RELEASE_OPTS}>
+)
+
+if(PLATFORM_LINUX)
+    target_link_options(server PRIVATE
+        $<$<CONFIG:Release>:
+            -Wl,-O1
+            -Wl,--as-needed
+            -Wl,-z,relro,-z,now # Full RELRO: resolves all GOT symbols at startup
+        >
+    )
+endif()
 
 target_link_libraries(server PRIVATE pulsar_objects)
 
@@ -198,7 +240,6 @@ if(BUILD_SHARED_LIBS)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 endif()
-
 
 install(FILES ${PULSAR_HEADERS}
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pulsar
@@ -251,13 +292,14 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pulsar.pc"
 # ------------------------------------------------------------------------------
 message(STATUS "")
 message(STATUS "=== Pulsar Configuration ===")
-message(STATUS "  Build Type  : ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Compiler    : ${CMAKE_C_COMPILER}")
-message(STATUS "  System      : ${CMAKE_SYSTEM_NAME}")
-message(STATUS "  Architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-message(STATUS "  Static lib  : ${BUILD_STATIC_LIBS}")
-message(STATUS "  Shared lib  : ${BUILD_SHARED_LIBS}")
-message(STATUS "  Tests       : ${BUILD_TESTS}")
-message(STATUS "  Native opt  : ${ENABLE_NATIVE_OPTIMIZATION}")
+message(STATUS "  Build Type     : ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Compiler       : ${CMAKE_C_COMPILER}")
+message(STATUS "  System         : ${CMAKE_SYSTEM_NAME}")
+message(STATUS "  Architecture   : ${CMAKE_SYSTEM_PROCESSOR}")
+message(STATUS "  Static lib     : ${BUILD_STATIC_LIBS}")
+message(STATUS "  Shared lib     : ${BUILD_SHARED_LIBS}")
+message(STATUS "  Tests          : ${BUILD_TESTS}")
+message(STATUS "  Native opt     : ${ENABLE_NATIVE_OPTIMIZATION}")
+message(STATUS "  LTO enabled    : ${IPO_SUPPORTED}")
 message(STATUS "============================")
 message(STATUS "")

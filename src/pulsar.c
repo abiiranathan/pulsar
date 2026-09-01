@@ -23,10 +23,6 @@ static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 static size_t global_mw_count = 0;
 static void* GLOBAL_HANDLER_USERDATA = NULL;
 
-static _Atomic time_t cached_date_ts = 0;
-static char cached_date_hdr[64] = {0};
-static int cached_date_len = 0;
-
 #define SERVER_NAME "PULSAR/1.0 (Unix)"
 
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
@@ -399,9 +395,10 @@ static bool reset_connection(PulsarConn* conn) {
     request_t* req = &conn->request;
     Arena* arena = conn->arena;
 
-    free_response_body(res);
+    if (unlikely(res->heap_allocated)) {
+        free_response_body(res);
+    }
 
-    req->method[0] = '\0';
     req->method_type = HTTP_INVALID;
     req->content_length = 0;
     req->body = NULL;
@@ -418,12 +415,13 @@ static bool reset_connection(PulsarConn* conn) {
     res->out_sent = 0;
     res->flags = 0;
     res->file_fd = -1;
-    res->heap_allocated = false;
 
-    LocalsClear(&conn->locals);
+    /* Only clear locals if any were added */
+    if (conn->locals.size > 0) {
+        LocalsClear(&conn->locals);
+    }
+
     arena_reset(arena);
-
-    if (req->headers) headers_init(req->headers);
 
     if (!conn->in_keep_alive) {
         conn->next = NULL;
@@ -462,41 +460,67 @@ INLINE void write_error(PulsarConn* conn, http_status status) {
 
 /* ================================================================
  * Zero-Branch 4-Byte Simultaneous AVX2 Header End Search
+
+ Load memory once into a single vector, extract the \r and \n masks, and use bitwise shifts to detect \r\n\r\n in a
+ single clock cycle.
  * ================================================================ */
 INLINE const char* find_headers_end(const char* buf, size_t len) {
     if (unlikely(len < 4)) return NULL;
 
     const char* p = buf;
-    const char* end = buf + len - 3;
+    const char* end = buf + len;
 
 #if defined(__AVX2__)
     const __m256i r_vec = _mm256_set1_epi8('\r');
     const __m256i n_vec = _mm256_set1_epi8('\n');
 
-    while (p + 35 <= end + 3) {
-        __m256i v0 = _mm256_loadu_si256((const __m256i*)p);
-        __m256i v1 = _mm256_loadu_si256((const __m256i*)(p + 1));
-        __m256i v2 = _mm256_loadu_si256((const __m256i*)(p + 2));
-        __m256i v3 = _mm256_loadu_si256((const __m256i*)(p + 3));
+    uint32_t prev_r = 0;
+    uint32_t prev_n = 0;
 
-        __m256i match = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(v0, r_vec), _mm256_cmpeq_epi8(v1, n_vec)),
-                                         _mm256_and_si256(_mm256_cmpeq_epi8(v2, r_vec), _mm256_cmpeq_epi8(v3, n_vec)));
+    while (p + 32 <= end) {
+        __m256i v = _mm256_loadu_si256((const __m256i*)p);
 
-        unsigned int mask = (unsigned int)_mm256_movemask_epi8(match);
-        if (mask) {
-            return p + __builtin_ctz(mask);
+        uint32_t mask_r = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, r_vec));
+        uint32_t mask_n = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, n_vec));
+
+        /* Combine previous 3 bits across 32-byte vector boundaries */
+        uint64_t full_r = ((uint64_t)mask_r << 3) | prev_r;
+        uint64_t full_n = ((uint64_t)mask_n << 3) | prev_n;
+
+        /* Match pattern: \r at (k-3), \n at (k-2), \r at (k-1), \n at (k) */
+        uint64_t match = (full_n >> 3) & (full_r >> 2) & (full_n >> 1) & full_r;
+
+        if (match & 0xFFFFFFFF) {
+            int idx = __builtin_ctz((unsigned int)match);
+            return p + idx - 3;
         }
+
+        prev_r = mask_r >> 29;
+        prev_n = mask_n >> 29;
         p += 32;
     }
 #endif
 
-    while (p < end) {
+    /* Scalar fallback for remaining bytes */
+    const char* scalar_end = end - 3;
+    while (p < scalar_end) {
         uint32_t v;
         memcpy(&v, p, 4);
         if (v == UINT32_C(0x0a0d0a0d)) return p;
         p++;
     }
     return NULL;
+}
+
+// Fast Integer Parser
+INLINE uint64_t fast_atou64(const char* str, size_t len) {
+    uint64_t val = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = (uint8_t)(str[i] - '0');
+        if (c > 9) break;
+        val = val * 10 + c;
+    }
+    return val;
 }
 
 static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod method, size_t headers_len) {
@@ -528,11 +552,7 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
         if ((ptr[0] | 0x20) == 'c') {
             if (!is_safe && name_len == 14 && !(flags & 1)) {
                 if (strncasecmp(ptr, "Content-Length", 14) == 0) {
-                    char buf[21];
-                    if (value_len >= sizeof(buf)) return false;
-                    memcpy(buf, value_start, value_len);
-                    buf[value_len] = '\0';
-                    req->content_length = (size_t)atoll(buf);
+                    req->content_length = (size_t)fast_atou64(value_start, value_len);
                     flags |= 1;
                 }
             } else if (name_len == 10 && !(flags & 2)) {
@@ -926,22 +946,45 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
 /* ================================================================
  * Cached Server + Date Headers
  * ================================================================ */
-INLINE void write_server_headers(PulsarConn* conn) {
-    const char name[] = "Server: " SERVER_NAME "\r\n";
-    conn_writeheader_raw(conn, name, sizeof(name) - 1);
 
-    time_t now = conn->last_activity;
-    time_t ts = atomic_load_explicit(&cached_date_ts, memory_order_relaxed);
-    if (now != ts) {
-        char buf[64];
-        int n = (int)strftime(buf, sizeof(buf), "Date: %a, %d %b %Y %H:%M:%S GMT\r\n", gmtime(&now));
-        if (n > 0) {
-            memcpy(cached_date_hdr, buf, (size_t)n);
-            cached_date_len = n;
-            atomic_store_explicit(&cached_date_ts, now, memory_order_relaxed);
-        }
+/* ================================================================
+ * Fast Zero-Lock 1-Second Preformatted Server + Date Header
+ * ================================================================ */
+
+static const char DAYS[7][5] = {"Sun,", "Mon,", "Tue,", "Wed,", "Thu,", "Fri,", "Sat,"};
+static const char MONTHS[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+typedef struct __attribute__((aligned(64))) {
+    char header_str[128];
+    uint16_t header_len;
+} PreformattedServerDate;
+
+static PreformattedServerDate g_server_date_hdr;
+static _Atomic time_t g_current_time = 0;
+
+static void update_date_header(time_t t) {
+    struct tm tm;
+    gmtime_r(&t, &tm);
+
+    char buf[128];
+    // Formats: "Server: PULSAR/1.0 (Unix)\r\nDate: Mon, 01 Sep 2026 14:43:00 GMT\r\n"
+    int n =
+        snprintf(buf, sizeof(buf),
+                 "Server: " SERVER_NAME
+                 "\r\n"
+                 "Date: %s %02d %s %04d %02d:%02d:%02d GMT\r\n",
+                 DAYS[tm.tm_wday], tm.tm_mday, MONTHS[tm.tm_mon], tm.tm_year + 1900, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    if (n > 0) {
+        memcpy(g_server_date_hdr.header_str, buf, (size_t)n);
+        g_server_date_hdr.header_len = (uint16_t)n;
+        atomic_store_explicit(&g_current_time, t, memory_order_relaxed);
     }
-    if (cached_date_len > 0) conn_writeheader_raw(conn, cached_date_hdr, (size_t)cached_date_len);
+}
+
+/* Zero-cost inline writer: 1 single memcpy of both Server + Date combined */
+INLINE void write_server_headers(PulsarConn* conn) {
+    conn_writeheader_raw(conn, g_server_date_hdr.header_str, g_server_date_hdr.header_len);
 }
 
 /* ================================================================
@@ -1206,7 +1249,7 @@ bool conn_servefile(PulsarConn* conn, const char* filename) {
 static void finalize_response(PulsarConn* conn, HttpMethod method) {
     response_t* resp = &conn->response;
 
-    if (__builtin_expect(resp->status_len == 0, 0)) {
+    if (unlikely(resp->status_len == 0)) {
         conn_set_status(conn, StatusOK);
     }
 
@@ -1217,17 +1260,12 @@ static void finalize_response(PulsarConn* conn, HttpMethod method) {
             cl = (resp->file_fd >= 0) ? (size_t)resp->file_size : resp->body_len;
         }
 
-        /* 32 bytes is enough for "Content-Length: " + 20 digits + "\r\n" */
         char cl_buf[38];
-
-        /* Write "Content-" and "Length: " via 64-bit word stores (no stack zeroing) */
         *(uint64_t*)(cl_buf + 0) = 0x2d746e65746e6f43ULL; /* "Content-" */
         *(uint64_t*)(cl_buf + 8) = 0x203a6874676e654cULL; /* "Length: " */
 
         size_t digits = pulsar_itoa((uint64_t)cl, cl_buf + 16);
         size_t cl_len = 16 + digits;
-
-        /* Append "\r\n" via 16-bit store */
         *(uint16_t*)(cl_buf + cl_len) = CRLF_WORD;
         cl_len += 2;
 
@@ -1236,23 +1274,21 @@ static void finalize_response(PulsarConn* conn, HttpMethod method) {
 
     write_server_headers(conn);
 
-    /* 2. Finalize headers with trailing CRLF */
+    /* 2. Trailing CRLF for headers */
     size_t h_len = resp->headers_len;
-    ensure_headers_capacity(conn->arena, resp, h_len + 3);
-
+    ensure_headers_capacity(conn->arena, resp, h_len + 2);
     char* h_buf = resp->headers_buf;
     *(uint16_t*)(h_buf + h_len) = CRLF_WORD;
-    h_buf[h_len + 2] = '\0';
     resp->headers_len = h_len + 2;
 
-    /* 3. Pre-assemble entire response into out_buf (zero-copy when streaming) */
+    /* 3. Assemble response directly into out_buf */
     if (resp->file_fd < 0 && !resp->heap_allocated) {
         size_t s_len = resp->status_len;
         size_t final_h_len = resp->headers_len;
         size_t b_len = resp->body_len;
         size_t total = s_len + final_h_len + b_len;
 
-        if (__builtin_expect(total <= resp->out_cap, 1)) {
+        if (likely(total <= resp->out_cap)) {
             char* dst = resp->out_buf;
 
             memcpy(dst, resp->status_buf, s_len);
@@ -1379,14 +1415,18 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
  * Middleware
  * ================================================================ */
 INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
-#define RUN_MW(mw, n)                     \
-    for (size_t _i = 0; _i < (n); _i++) { \
-        (mw)[_i](ctx);                    \
-        if (ctx->conn->abort) return;     \
+    /* Fast-path: Skip immediately if no global or route middleware exists */
+    if (likely((global_mw_count | route->mw_count) == 0)) {
+        return;
     }
-    RUN_MW(global_middleware, global_mw_count);
-    RUN_MW(route->middleware, route->mw_count);
-#undef RUN_MW
+    for (size_t i = 0; i < global_mw_count; i++) {
+        global_middleware[i](ctx);
+        if (ctx->conn->abort) return;
+    }
+    for (size_t i = 0; i < route->mw_count; i++) {
+        route->middleware[i](ctx);
+        if (ctx->conn->abort) return;
+    }
 }
 
 void use_global_middleware(HttpHandler* mw, size_t count) {
@@ -2084,6 +2124,12 @@ void* worker_thread(void* arg) {
             if (errno == EINTR) continue;
             perror("event_wait");
             continue;
+        }
+
+        /* Update global date header once per second if changed */
+        time_t now_sec = time(NULL);
+        if (unlikely(now_sec != atomic_load_explicit(&g_current_time, memory_order_relaxed))) {
+            update_date_header(now_sec);
         }
 
         loop_counter++;
