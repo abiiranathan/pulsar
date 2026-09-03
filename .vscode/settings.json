@@ -2,6 +2,9 @@
     "files.exclude": {
         "**/*.mp4": true,
         "**/*.out": true,
-        "**/perf.data*": true
+        "**/perf.data*": true,
+        "**/build": true,
+        "**/CMakeFiles": true,
+        ".cache": true,
     }
 }
