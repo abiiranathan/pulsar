@@ -32,7 +32,7 @@ extern "C" {
 
 /* Configuration */
 #ifndef HEADERS_CAPACITY
-#define HEADERS_CAPACITY 64
+    #define HEADERS_CAPACITY 64
 #endif
 
 /**
@@ -71,13 +71,11 @@ INLINE void headers_init(headers_t* h) {
  * Note: Set-Cookie allows multiple values; other headers are replaced
  */
 INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
-    // Check if we have space for a new header.
-    // Remember string slices are not guaranteed to be NULL-terminated.
-    if (h->count >= HEADERS_CAPACITY) { return false; }
+    if (h->count >= HEADERS_CAPACITY) {
+        return false;
+    }
 
-    // Check if header already exists. Prefilter on length + case-folded
-    // first byte before the full comparison; most entries differ in one
-    // of those and never reach ss_equal_nocase.
+    // Check if header already exists.
     header_entry* entry = NULL;
     if (name.len > 0) {
         unsigned int f0 = (unsigned int)name.data[0] | 32u;
@@ -89,12 +87,11 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
             }
         }
     }
+
     // Reject duplicate headers unless its a Cookie.
     if (entry != NULL && !ss_equal_nocase(name, SS_LIT("Set-Cookie"))) {
-        // Update header in-place
         entry->value = value;
     } else {
-        // Insert new header entry.
         h->entries[h->count++] = (header_entry){.name = name, .value = value};
     }
     return true;
@@ -158,7 +155,9 @@ typedef bool (*header_iter_fn)(StrSlice name, StrSlice value, void* userdata);
 
 INLINE void headers_foreach(const headers_t* h, header_iter_fn callback, void* userdata) {
     for (size_t i = 0; i < h->count; i++) {
-        if (!callback(h->entries[i].name, h->entries[i].value, userdata)) { break; }
+        if (!callback(h->entries[i].name, h->entries[i].value, userdata)) {
+            break;
+        }
     }
 }
 
