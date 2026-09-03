@@ -40,7 +40,7 @@ else
     $(error Invalid BUILD type: $(BUILD). Use 'debug' or 'release')
 endif
 
-LDFLAGS := -pthread -lsolidc -lm
+LDFLAGS := -pthread -lsolidc -lm -flto=auto
 
 # === Directories and Files ===
 
@@ -67,7 +67,7 @@ SONAME := libpulsar.$(LIBEXT).1
 
 # === Targets ===
 
-TARGET := $(BUILD_DIR)/server
+TARGET := ./build/bin/server
 MAIN_SRC := main.c
 
 .PHONY: all test static shared lib install verify clean debug release
@@ -118,7 +118,7 @@ test: $(TEST_TARGETS)
 
 # Memory check with valgrind
 check:
-	valgrind --leak-check=full --show-leak-kinds=all --suppressions=glibc.supp $(BUILD_DIR)/server
+	valgrind --leak-check=full --show-leak-kinds=all --suppressions=glibc.supp ./build/bin/server
 
 # Install libraries and headers
 install: lib
