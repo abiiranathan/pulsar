@@ -30,7 +30,9 @@ static const char* methods[] = {
 };
 
 static inline const char* http_method_to_string(const HttpMethod method) {
-    if (!METHOD_VALID(method)) { return ""; }
+    if (!METHOD_VALID(method)) {
+        return "";
+    }
     return methods[method];
 }
 

@@ -89,9 +89,9 @@
  */
 
 #if defined(__x86_64__) && defined(__linux__) && !defined(__SANITIZE_ADDRESS__)
-    #define PULSAR_FAST_SYSCALLS 1
+#define PULSAR_FAST_SYSCALLS 1
 #else
-    #define PULSAR_FAST_SYSCALLS 0
+#define PULSAR_FAST_SYSCALLS 0
 #endif
 
 /* ============================================================================

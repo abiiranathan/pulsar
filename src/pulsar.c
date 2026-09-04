@@ -9,7 +9,7 @@
 #include "../include/pulsar_itoa.h"
 
 #if defined(__AVX2__)
-    #include <immintrin.h>
+#include <immintrin.h>
 #endif
 
 #include "../include/events.h"
@@ -95,7 +95,7 @@ static void slow_close_offloaded(event_queue_t* queue, PulsarConn* conn) {
  * seconds (default 5 s) and closed if they exceed CONNECTION_TIMEOUT.
  * ---------------------------------------------------------------- */
 #ifndef SLOW_KEEPALIVE_CHECK_S
-    #define SLOW_KEEPALIVE_CHECK_S 5
+#define SLOW_KEEPALIVE_CHECK_S 5
 #endif
 
 static void* slow_worker_thread(void* arg) {
@@ -1815,11 +1815,11 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
     int defer = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof(defer));
 
-    #ifdef SO_INCOMING_CPU
+#ifdef SO_INCOMING_CPU
     if (worker_cpu_id >= 0) {
         setsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &worker_cpu_id, sizeof(worker_cpu_id));
     }
-    #endif
+#endif
 #endif
 
     if (listen(fd, SOMAXCONN) < 0) {
@@ -1863,18 +1863,18 @@ INLINE int conn_accept(int listen_fd) {
 #if defined(__APPLE__) || defined(__FreeBSD__)
     setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
     setsockopt(client_fd, IPPROTO_TCP, TCP_NOPUSH, &yes, sizeof(yes));
-    #ifdef TCP_KEEPIDLE
+#ifdef TCP_KEEPIDLE
     int ka_idle = 120;
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &ka_idle, sizeof(ka_idle));
-    #endif
-    #ifdef TCP_KEEPINTVL
+#endif
+#ifdef TCP_KEEPINTVL
     int ka_iv = 15;
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_iv, sizeof(ka_iv));
-    #endif
-    #ifdef TCP_KEEPCNT
+#endif
+#ifdef TCP_KEEPCNT
     int ka_cnt = 3;
     setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &ka_cnt, sizeof(ka_cnt));
-    #endif
+#endif
 #endif
 
     return client_fd;

@@ -48,14 +48,14 @@
  *                          submit calls.
  */
 
-#include <inttypes.h>      /* PRIu64                             */
-#include <stdalign.h>      /* alignas                            */
-#include <stdatomic.h>     /* _Atomic, atomic_*                  */
-#include <stdbool.h>       /* bool                               */
-#include <stddef.h>        /* size_t                             */
-#include <stdint.h>        /* uint32_t, uint64_t                 */
-#include <sys/uio.h>       /* struct iovec, writev               */
-#include <unistd.h>        /* STDOUT_FILENO, usleep              */
+#include <inttypes.h>  /* PRIu64                             */
+#include <stdalign.h>  /* alignas                            */
+#include <stdatomic.h> /* _Atomic, atomic_*                  */
+#include <stdbool.h>   /* bool                               */
+#include <stddef.h>    /* size_t                             */
+#include <stdint.h>    /* uint32_t, uint64_t                 */
+#include <sys/uio.h>   /* struct iovec, writev               */
+#include <unistd.h>    /* STDOUT_FILENO, usleep              */
 
 #include <solidc/lock.h>   /* Lock, Condition, lock_*, cond_*   */
 #include <solidc/thread.h> /* Thread, thread_create, thread_join */
@@ -163,9 +163,7 @@ typedef struct {
  * ---------------------------------------------------------------------- */
 
 /** Maps a raw sequence number to a ring index. */
-static inline size_t plog__idx(uint64_t seq) {
-    return (size_t)(seq & (uint64_t)(PLOG_RING_CAPACITY - 1));
-}
+static inline size_t plog__idx(uint64_t seq) { return (size_t)(seq & (uint64_t)(PLOG_RING_CAPACITY - 1)); }
 
 /**
  * plog__drain_thread — background consumer.
@@ -207,7 +205,9 @@ static void* plog__drain_thread(void* arg) {
             PlogSlot* slot = &lg->ring[idx];
 
             /* Peek slot readiness. No CAS on slot read to minimize RMW cycles. */
-            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) { break; }
+            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) {
+                break;
+            }
 
             iov[batch].iov_base = slot->line;
             iov[batch].iov_len = slot->len;
@@ -236,7 +236,9 @@ static void* plog__drain_thread(void* arg) {
     while (true) {
         uint64_t seq = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
         uint64_t end = atomic_load_explicit(&lg->prod_seq, memory_order_acquire);
-        if (seq == end) { break; }
+        if (seq == end) {
+            break;
+        }
 
         int batch = 0;
         while (seq + (uint64_t)batch < end && batch < PLOG_BATCH_MAX) {
@@ -307,14 +309,14 @@ static inline void plog_submit(PlogState* lg, const char* buf, uint32_t len) {
     if (len > PLOG_LINE_MAX) len = PLOG_LINE_MAX;
 
     /* Cache cons_seq in a local variable/register.
-     * By doing so, we completely bypass reloading it on CAS failure retries, 
+     * By doing so, we completely bypass reloading it on CAS failure retries,
      * eliminating unnecessary memory accesses and LSU pressure inside the loop. */
     uint64_t cons = atomic_load_explicit(&lg->cons_seq, memory_order_relaxed);
     uint64_t prod = atomic_load_explicit(&lg->prod_seq, memory_order_relaxed);
 
     while (true) {
         /* Since cons is cached, this check runs entirely in registers.
-         * If the queue appears full, we do a fresh acquire load to check if 
+         * If the queue appears full, we do a fresh acquire load to check if
          * the consumer has indeed advanced. */
         if (prod - cons >= (uint64_t)PLOG_RING_CAPACITY) {
             cons = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
@@ -324,7 +326,7 @@ static inline void plog_submit(PlogState* lg, const char* buf, uint32_t len) {
             }
         }
 
-        /* Try to claim our sequence number. On failure, 'prod' is automatically 
+        /* Try to claim our sequence number. On failure, 'prod' is automatically
          * updated to the latest 'prod_seq' value, and we loop back. */
         if (atomic_compare_exchange_weak_explicit(&lg->prod_seq, &prod, prod + 1, memory_order_relaxed,
                                                   memory_order_relaxed)) {

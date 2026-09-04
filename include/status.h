@@ -153,13 +153,13 @@ static const StrSlice status_info[512] = {
     [511] = SS_LIT("HTTP/1.1 511 Network Authentication Required\r\n"),
 };
 
-INLINE bool http_status_valid(http_status code) {
-    return (code >= STATUS_MIN && code <= STATUS_MAX);
-}
+INLINE bool http_status_valid(http_status code) { return (code >= STATUS_MIN && code <= STATUS_MAX); }
 
 // Direct lookup using status code as index
 INLINE StrSlice get_http_status(http_status code) {
-    if (!http_status_valid(code)) { return SS_LIT("HTTP/1.1 200 OK\r\n"); }
+    if (!http_status_valid(code)) {
+        return SS_LIT("HTTP/1.1 200 OK\r\n");
+    }
     return status_info[code];
 }
 

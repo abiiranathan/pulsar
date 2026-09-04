@@ -29,8 +29,8 @@ extern "C" {
  * in the original request body. (It must not be mutated for that matter)
  */
 typedef struct FileHeader {
-    size_t offset;     ///< Byte offset in original request body
-    size_t size;       ///< File size in bytes
+    size_t offset;  ///< Byte offset in original request body
+    size_t size;    ///< File size in bytes
 
     char* filename;    ///< Original filename (arena-allocated)
     char* mimetype;    ///< MIME type (arena-allocated)
@@ -51,11 +51,11 @@ typedef struct FormField {
  * @brief Container for parsed form data
  */
 typedef struct MultipartForm {
-    Arena* arena;            ///< Memory arena for all allocations
+    Arena* arena;  ///< Memory arena for all allocations
 
-    FileHeader** files;      ///< Array of file pointers (arena-allocated)
-    size_t num_files;        ///< Number of valid files
-    size_t files_capacity;   ///< Current array capacity
+    FileHeader** files;     ///< Array of file pointers (arena-allocated)
+    size_t num_files;       ///< Number of valid files
+    size_t files_capacity;  ///< Current array capacity
 
     FormField* fields;       ///< Array of form fields (arena-allocated)
     size_t num_fields;       ///< Number of valid fields
