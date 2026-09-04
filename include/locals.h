@@ -26,18 +26,6 @@ typedef struct {
 
 /**
  * Flat inline key-value store for per-request context.
- *
- * The common case (0-3 entries, no managed values) costs exactly:
- *   - LocalsClear: one store of size=0, one store of managed_count=0.
- *   - LocalsGetValue: N strcmp calls, N <= 3 in practice.
- *   - No malloc, no arena touch, no pointer chasing.
- *
- * The inline array holds LOCALS_INLINE_CAPACITY entries without any
- * allocation. Overflow beyond that capacity is an assert in debug builds
- * and a silent drop in release — handlers setting 9+ locals is a design
- * problem, not a runtime condition to handle gracefully.
- *
- * NOT safe for concurrent use.
  */
 typedef struct {
     KeyValue entries[LOCALS_INLINE_CAPACITY]; /**< Inline storage. */

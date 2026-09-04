@@ -35,7 +35,10 @@ typedef enum {
     HTTP_CHUNKED_TRANSFER = (1 << 3),  // 0x08 (8)
 
     /* Write-pending flag to track deferred non-blocking writes */
-    HTTP_WRITE_PENDING = (1 << 4)  // 0x10 (16)
+    HTTP_WRITE_PENDING = (1 << 4),  // 0x10 (16)
+
+    /* Body overflowed the inline stack buffer and lives on the heap */
+    HTTP_HEAP_ALLOCATED = (1 << 5)  // 0x20 (32)
 } bit_flags;
 
 #define HAS_CONTENT_TYPE(flags)     (((flags) & HTTP_CONTENT_TYPE_SET) != 0)
@@ -52,42 +55,54 @@ typedef enum {
 #define SET_WRITE_PENDING(flags) ((flags) |= HTTP_WRITE_PENDING)
 #define CLR_WRITE_PENDING(flags) ((flags) &= ~HTTP_WRITE_PENDING)
 
+#define HAS_HEAP_ALLOCATED(flags) (((flags) & HTTP_HEAP_ALLOCATED) != 0)
+#define SET_HEAP_ALLOCATED(flags) ((flags) |= HTTP_HEAP_ALLOCATED)
+#define CLR_HEAP_ALLOCATED(flags) ((flags) &= (uint8_t)~HTTP_HEAP_ALLOCATED)
+
 // HTTP Response structure
 struct response_t {
-    // 8-Byte Fields
-    size_t body_len;       // Actual length of body
-    size_t body_capacity;  // Capacity of body buffer
-    size_t body_sent;      // Bytes of body sent
-    size_t out_len;        // Total bytes in contiguous output buffer
-    size_t out_sent;       // Bytes sent from contiguous output buffer
-    size_t out_cap;        // Total capacity of contiguous output buffer
+    // --- Hot: pointers (24 B) ---
+    char* headers_buf;  // Buffer for the headers
+    char* out_buf;      // Contiguous buffer for single-write responses
+    char* status_buf;   // Buffer for status line
 
-    // 1-Byte Fields
-    bool heap_allocated;  // If heap allocation is used
-    uint8_t status_len;   // Actual length of status line
-    uint8_t flags;        // 4 bytes for all flags
-    uint8_t status_sent;  // Bytes of status line sent
+    // --- Hot: lengths / progress (24 B) ---
+    uint32_t body_len;     // Actual length of body
+    uint32_t out_len;      // Total bytes in contiguous output buffer
+    uint32_t out_sent;     // Bytes sent from contiguous output buffer
+    uint32_t out_cap;      // Total capacity of contiguous output buffer
+    uint32_t headers_len;  // Actual length of headers
+    uint32_t headers_cap;  // Available capacity for the headers
 
-    // 4-Byte Fields
-    http_status status_code;  // HTTP status code (enum)
-    int file_fd;              // File descriptor for file to send
-    uint32_t file_size;       // Size of file to send
-    int64_t file_offset;      // Offset in file for sendfile
-    uint32_t max_range;       // Maximum range of requested bytes
+    // --- Hot: status / flags (4 B) ---
+    uint16_t status_code;  // HTTP status code (all codes < 512)
+    uint8_t status_len;    // Actual length of status line
+    uint8_t flags;         // All bit_flags incl. heap-allocated bit
 
-    char* status_buf;  // Buffer for status line
-    char* out_buf;     // Contiguous buffer for single-write responses
+    // --- Warm: heap body progress (8 B) ---
+    uint32_t body_capacity;  // Capacity of heap body buffer (valid iff heap)
+    uint32_t body_sent;      // Bytes of heap body sent
 
-    // 2-Byte Fields
-    uint16_t headers_len;   // Actual length of headers
-    uint16_t headers_cap;   // Available capacity for the headers
-    uint16_t headers_sent;  // Bytes of headers sent
-    char* headers_buf;      // Buffer for the headers
+    // --- Cold: file-serve state (16 B + 8 B offset) ---
+    int file_fd;          // File descriptor for file to send
+    uint32_t file_size;   // Size of file to send (files > 4 GiB rejected)
+    int64_t file_offset;  // Offset in file for sendfile
+    uint32_t range_end;   // Exclusive end offset for Range sends (== file_size when no range)
+
+    // --- Bulky inline buffer last (512 B) ---
     union {
         uint8_t stack[STACK_BUFFER_SIZE];  // Stack buffer for smaller responses
         uint8_t* heap;                     // Dynamically allocated body buffer (aligned)
     } body;                                // Response body
 };
+
+// Hot prefix (everything before the inline body) must stay within two
+// cache lines so small responses never touch more than that plus the
+// stack buffer actually used. Whole struct must stay comfortably inside
+// L2 (and even L1) working set.
+_Static_assert(sizeof(struct response_t) <= 616, "response_t grew past budget; re-check field sizes");
+_Static_assert(__builtin_offsetof(struct response_t, body) <= 128, "response_t hot fields spilled past 2 cache lines");
+_Static_assert(__builtin_offsetof(struct response_t, body) % 8 == 0, "response_t body union must stay 8-byte aligned");
 
 // HTTP Request structure
 struct request_t {
@@ -99,6 +114,7 @@ struct request_t {
     headers_t* headers;       // Request headers
     headers_t* query_params;  // Query parameters
     struct route_t* route;    // Matched route (has static lifetime)
+    StrSlice range_hdr;       // Range header value view (NULL data when absent)
 };
 
 /* ================================================================
@@ -117,8 +133,6 @@ typedef struct PulsarOffloadHandler {
 
 // Connection state structure
 struct pulsar_conn {
-    /* ---- Hot: touched on every event/request; kept within the first
-     *      cache lines so per-request dispatch stays cache-local. ---- */
     char* read_buf;                                  // Buffer for incoming data.
     Arena* arena;                                    // Memory arena for allocations
     size_t pending_len;                              // Bytes of a partial request buffered across reads.
@@ -136,8 +150,8 @@ struct pulsar_conn {
     struct timespec start;  // Timestamp of first request
 #endif
 
-    /* ---- Keep-alive list linkage ---- */
-    struct pulsar_conn *next, *prev;  // Linked list nodes for keep-alive tracking.
+    /* ----  Linked list nodes for keep-alive tracking ---- */
+    struct pulsar_conn *next, *prev;
 
     /* ---- Background worker ownership ---- */
     struct Poller* owner_queue;                 // The event queue of its current owner

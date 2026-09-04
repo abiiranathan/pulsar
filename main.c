@@ -32,7 +32,8 @@ void hello_world_handler(PulsarCtx* ctx) {
  * ========================================================================= */
 void json_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
+    /* Static storage: `char json[]` copied 55 B onto the stack per request. */
+    static const char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
     conn_send_json(conn, StatusOK, json, sizeof(json) - 1);
 }
 
