@@ -18,15 +18,6 @@
 #include "../include/pulsar.h"
 #include "../include/pulsar_syscall.h"
 
-#ifndef sys_writev_direct
-    #if defined(__linux__) && defined(SYS_writev)
-        #define sys_writev_direct(fd, iov, count) \
-            ((ssize_t)syscall(SYS_writev, (int)(fd), (const struct iovec*)(iov), (int)(count)))
-    #else
-        #define sys_writev_direct(fd, iov, count) writev((fd), (iov), (count))
-    #endif
-#endif
-
 static int worker_listen_fds[NUM_WORKERS]; /**< Per-worker SO_REUSEPORT listeners. */
 volatile sig_atomic_t server_running = 1;
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};

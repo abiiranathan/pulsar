@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define likely(x)   __builtin_expect(!!(x), 1)
@@ -278,6 +279,32 @@ INLINE ssize_t sys_write_direct(int fd, const void* buf, size_t count) {
     return ret;
 #else
     ssize_t r失 = write(fd, buf, count);
+    return (r < 0) ? -errno : r;
+#endif
+}
+
+/**
+ * @brief Direct kernel writev(2) returning -errno on failure.
+ *
+ * Single-syscall gather write for split header + body responses. Same
+ * zero-TLS contract as sys_write_direct: never touches errno.
+ *
+ * @param fd     Target file descriptor.
+ * @param iov    Scatter/gather vector array.
+ * @param iovcnt Number of entries in iov.
+ * @return >= 0: bytes written (may be short; loop on partials).
+ *         < 0:  negative error number (e.g. -EAGAIN, -EPIPE).
+ */
+INLINE ssize_t sys_writev_direct(int fd, const struct iovec* iov, int iovcnt) {
+#if PULSAR_FAST_SYSCALLS && defined(SYS_writev)
+    ssize_t ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"((long)SYS_writev), "D"(fd), "S"(iov), "d"(iovcnt)
+                     : "rcx", "r11", "memory");
+    return ret;
+#else
+    ssize_t r = writev(fd, iov, iovcnt);
     return (r < 0) ? -errno : r;
 #endif
 }
