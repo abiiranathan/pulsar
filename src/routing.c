@@ -633,17 +633,15 @@ INLINE route_t* match_any_method(const char* path, size_t url_length, uint64_t p
 }
 
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
-    /* Fast-Path: direct jump for root route ("/") - 1-2 CPU cycles */
+    /* Fast-Path: direct jump for root route ("/") - single array load. */
     if (likely(url_length == 1 && path[0] == '/')) {
-        if (likely(method == HTTP_GET)) {
-            route_t* r = fast_root_routes[HTTP_GET];
+        if (likely((unsigned)method < HTTP_METHOD_COUNT)) {
+            route_t* r = fast_root_routes[method];
             if (likely(r != NULL)) return r;
         }
-        if (method < HTTP_METHOD_COUNT && fast_root_routes[method]) {
-            return fast_root_routes[method];
-        }
-        if (method == HTTP_HEAD && fast_root_routes[HTTP_GET]) {
-            return fast_root_routes[HTTP_GET];
+        if (method == HTTP_HEAD) {
+            route_t* r = fast_root_routes[HTTP_GET];
+            if (r != NULL) return r;
         }
     }
 

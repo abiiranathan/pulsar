@@ -139,6 +139,7 @@ struct pulsar_conn {
     int client_fd;                                   // Client socket file descriptor
     int worker_id;                                   // ID of the current worker running the thread.
     bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
+    bool arena_dirty;                                // True if conn->arena was used this request (skip reset when false).
     time_t last_activity;                            // Timestamp of last I/O activity
 
     /* ---- Per-request state ---- */
