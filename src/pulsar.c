@@ -1526,8 +1526,8 @@ Request conn_get_request_metadata(PulsarConn* conn) {
 }
 
 static PlogState PLOG_STATE = {0};
-static int LOG_FD = -1;
-static PulsarCallback LOGGER_CALLBACK = NULL;
+int LOG_FD = -1;
+PulsarCallback LOGGER_CALLBACK = NULL;
 
 bool pulsar_set_callback(PulsarCallback cb, int fd) {
 #if ENABLE_LOGGING
@@ -1957,35 +1957,34 @@ static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
     size_t total = conn->pending_len + (size_t)bytes_read;
     conn->read_buf[total] = '\0';
 
-    size_t offset = 0;
-    while (offset < total) {
-        const char* buf = conn->read_buf + offset;
-        size_t avail = total - offset;
+    const char* buf = conn->read_buf;
 
-        const char* end_of_headers = find_headers_end(buf, avail);
-        if (!end_of_headers) break;
-
-        size_t consumed = 0;
-        http_status status = process_request(conn, buf, avail, end_of_headers, &consumed, state, queue);
-        if (status != StatusOK) {
-            write_error(conn, status);
-        }
-
-        if (conn->offloaded) return;
-
-        handle_write(queue, conn, state);
-        if (conn->closing || consumed == 0) return;
-
-        offset += consumed;
-    }
-
-    if (offset < total) {
-        if (offset == 0 && total == (size_t)(READ_BUFFER_SIZE - 1)) {
+    const char* end_of_headers = find_headers_end(buf, total);
+    if (!end_of_headers) {
+        // Headers not complete yet. If the buffer is full and we still
+        // don't have a full header block, the request is too large.
+        if (total == (size_t)(READ_BUFFER_SIZE - 1)) {
             conn->closing = true;
             return;
         }
-        memmove(conn->read_buf, conn->read_buf + offset, total - offset);
-        conn->pending_len = total - offset;
+        conn->pending_len = total;
+        return;
+    }
+
+    size_t consumed = 0;
+    http_status status = process_request(conn, buf, total, end_of_headers, &consumed, state, queue);
+    if (status != StatusOK) {
+        write_error(conn, status);
+    }
+
+    if (conn->offloaded) return;
+
+    handle_write(queue, conn, state);
+    if (conn->closing) return;
+
+    if (consumed < total) {
+        memmove(conn->read_buf, conn->read_buf + consumed, total - consumed);
+        conn->pending_len = total - consumed;
     } else {
         conn->pending_len = 0;
     }
