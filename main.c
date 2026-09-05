@@ -1,21 +1,15 @@
-#include <inttypes.h>  // for PRIu64
+#include <assert.h>
+#include <inttypes.h>
 #include <solidc/filepath.h>
-#include <string.h>          // for strlen, memset
-#include <time.h>            // for time()
-#include <unistd.h>          // for usleep
-#include "include/error.h"   // abort_if*, require_path_param, defer_*, PARSE_MULTIPART_FORM
-#include "include/forms.h"   // MultipartForm processing.
-#include "include/pulsar.h"  // PulsarCtx, PulsarConn, route_*, pulsar_run, conn_*, req_*
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include "include/error.h"
+#include "include/forms.h"
+#include "include/pulsar.h"
 
-/* =========================================================================
- * Hello World
- * Demonstrates raw header injection and a plain HTML response body.
- * ========================================================================= */
 void hello_world_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-
-    // Inject multiple Set-Cookie headers directly into the response.
-    // conn_writeheader_raw appends pre-formatted header lines verbatim.
     StrSlice headers = SS_LIT(
         "Set-Cookie: sessionId=12345; Path=/; HttpOnly\r\n"
         "Set-Cookie: theme=dark; Path=/; Secure\r\n"
@@ -25,24 +19,12 @@ void hello_world_handler(PulsarCtx* ctx) {
     conn_write(conn, "<h1>Hello World</h1>", 20);
 }
 
-/* =========================================================================
- * JSON response
- * Demonstrates conn_send_json: sets status, Content-Type, and body in one
- * call.
- * ========================================================================= */
 void json_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    /* Static storage: `char json[]` copied 55 B onto the stack per request. */
     static const char json[] = "{\"message\": \"Hello from JSON API\", \"status\": \"success\"}";
     conn_send_json(conn, StatusOK, json, sizeof(json) - 1);
 }
 
-/* =========================================================================
- * Echo
- * Reflects the request method, path, and body back to the client as plain
- * text.  Demonstrates multiple conn_write calls — the server buffers them
- * and flushes when the handler returns.
- * ========================================================================= */
 void echo_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
 
@@ -80,6 +62,7 @@ typedef struct SseState {
 
 static void sse_on_write(PulsarConn* conn) {
     if (!conn_is_open(conn)) return;
+
     SseState* state = pulsar_get(conn, "sse_state");
 
     // socket ready to write.
@@ -113,7 +96,7 @@ void sse_handler(PulsarCtx* ctx) {
 
     // Allocate the stream state in the connection's thread-safe arena
     SseState* state = pulsar_alloc(conn, sizeof(SseState));
-    state->total = 5000;
+    state->total = 1000;
 
     // Track the state within the connection locals context
     pulsar_set(conn, "sse_state", state, NULL);
@@ -171,12 +154,13 @@ void chunked_handler(PulsarCtx* ctx) {
             size_t remaining = sizeof(multi_line) - 1;
 
             for (int i = 0; i < 20 && remaining > 100; i++) {
-                int written = snprintf(pos, remaining,
-                                       "Line %d: This is a very long line of text that exceeds normal sizes. "
-                                       "It contains repeated information to make it longer and test large "
-                                       "chunk handling. "
-                                       "Data data data data data data data data data data data data.\n",
-                                       i);
+                int written =
+                    snprintf(pos, remaining,
+                             "Line %d: This is a very long line of text that exceeds normal sizes. "
+                             "It contains repeated information to make it longer and test large "
+                             "chunk handling. "
+                             "Data data data data data data data data data data data data.\n",
+                             i);
                 if (written >= (int)remaining) break;
                 pos += written;
                 remaining -= (size_t)written;
@@ -244,40 +228,38 @@ void chunked_handler(PulsarCtx* ctx) {
 /* =========================================================================
  * Path and query parameters
  * Demonstrates require_path_param (aborts 500 on routing bug) and
- * query_params / DUMP_HEADERS for diagnostic output.
+ * query_params / dump_headers for diagnostic output.
  * ========================================================================= */
 void pathparams_query_params_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
 
-    // require_path_param declares the variable and aborts 500 if the router
-    // somehow failed to populate the segment — safer than assert().
     require_path_param(user_id, conn, "user_id");
     require_path_param(username, conn, "username");
 
     printf("Path params — user_id=%s  username=%s\n", user_id, username);
 
     headers_t* params = query_params(conn);
-    DUMP_HEADERS(params);
+    dump_headers(params);
 
     conn_writef(conn, "Your user_id is %s and username %s\n", user_id, username);
 }
 
 /* =========================================================================
  * Multipart form upload
- * PARSE_MULTIPART_FORM handles init, boundary extraction, body parsing,
+ * parse_multipart_form handles init, boundary extraction, body parsing,
  * and deferred cleanup in one macro call.  `body` holds the raw request
  * body needed by multipart_save_file.
  * ========================================================================= */
 void handle_form(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    MultipartForm form = {0};
-
-    PARSE_MULTIPART_FORM(conn, &form, content_type, body);
+    MultipartForm form;
+    parse_multipart_form(conn, &form, content_type, body);
 
     FileHeader* file = multipart_file(&form, "file");
     if (file) {
         DEFER_VAR char* dst = filepath_join("test_output", file->filename);
         defer_free(dst);
+
         if (multipart_save_file(file, body.data, dst)) {
             conn_write_string(conn, "File uploaded successfully\n");
         }
@@ -290,14 +272,12 @@ void handle_form(PulsarCtx* ctx) {
  * ========================================================================= */
 void serve_movie(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    const char* html =
+    const char html[] =
         "<html><body style='max-width:1000px;margin:20px'>"
         "<video src='/static/FlightRisk.mp4' controls width='720' height='480'>"
         "</video></body></html>";
 
-    conn_set_status(conn, StatusOK);
-    conn_set_content_type(conn, SS_LIT("text/html"));
-    conn_write_string(conn, html);
+    conn_send_html(conn, StatusOK, html, sizeof(html) - 1);
 }
 
 /* =========================================================================
@@ -317,18 +297,13 @@ void mw2(PulsarCtx* ctx) {
     char* name = pulsar_get(conn, "name");
 
     // This assert is intentional: mw2 must never run without mw1 preceding
-    // it in the middleware chain.  A routing misconfiguration is a programmer
-    // error, not a recoverable runtime condition.
+    // it in the middleware chain.
     assert(name && "mw2: 'name' key missing — ensure mw1 runs before mw2");
     (void)name;
 }
 
-/* =========================================================================
- * Entry point
- * ========================================================================= */
 int main(int argc, char* argv[]) {
-    // Attach the built-in access logger; writes combined-log lines to stdout.
-    // pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
+    pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
     // ── Route table ───────────────────────────────────────────────────────
     route_register("/", HTTP_GET, hello_world_handler);

@@ -121,7 +121,8 @@ bool pulsar_set_callback(PulsarCallback cb, int fd);
  * ---------------------
  *
  * This logger is asynchronous and non-blocking as possible:
- * it formats the log line on the stack and submits it to plog without any locks or syscalls in the hot path.
+ * it formats the log line on the stack and submits it to plog without any locks or syscalls in the
+ * hot path.
  *
  * This is called after every request, and is passed the total latency in nanoseconds.
  * It gathers request info from the connection
@@ -405,7 +406,8 @@ void conn_send_xml(PulsarConn* conn, http_status status, const char* xml, size_t
  * @param javascript Null-terminated JS string
  * @param length Length of response body
  */
-void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript, size_t length);
+void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript,
+                          size_t length);
 
 /**
  * @brief Sends a CSS response
@@ -494,8 +496,8 @@ const char* query_get(PulsarConn* conn, const char* name);
  * @brief Gets all query parameters
  *
  * @param conn The connection object
- * @return headers_t* Map of all query parameters. Note that the entries values are not NULL-terminated
- * and are just views into the original URL.
+ * @return headers_t* Map of all query parameters. Note that the entries values are not
+ * NULL-terminated and are just views into the original URL.
  */
 headers_t* query_params(PulsarConn* conn);
 
@@ -585,9 +587,9 @@ const char* get_path_param(PulsarConn* conn, const char* name);
 
 // Read-Only request data.
 typedef struct Request {
-    const char* path;           // Request path
-    const char* method;         // HTTP method (GET, POST etc.)
-    StrSlice body;              // Request body. The body.data ptr is guaranteed to be NULL-terminated.
+    const char* path;    // Request path
+    const char* method;  // HTTP method (GET, POST etc.)
+    StrSlice body;       // Request body. The body.data ptr is guaranteed to be NULL-terminated.
     const char* route_pattern;  // Matched route pattern(has static lifetime)
 } Request;
 

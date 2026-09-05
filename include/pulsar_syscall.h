@@ -157,7 +157,10 @@ INLINE ssize_t raw_read(int fd, void* buf, size_t count) {
 INLINE int raw_close(int fd) {
 #if PULSAR_FAST_SYSCALLS
     int ret;
-    __asm__ volatile("syscall" : "=a"(ret) : "a"((long)SYS_close), "D"(fd) : "rcx", "r11", "memory");
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"((long)SYS_close), "D"(fd)
+                     : "rcx", "r11", "memory");
     if (unlikely((unsigned long)ret >= (unsigned long)-4095)) {
         errno = -ret;
         return -1;
@@ -185,7 +188,8 @@ INLINE ssize_t raw_recv(int fd, void* buf, size_t len, int flags) {
     register long r9 __asm__("r9") = 0; /* addrlen  = 0    */
     __asm__ volatile("syscall"
                      : "=a"(ret)
-                     : "a"((long)SYS_recvfrom), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+                     : "a"((long)SYS_recvfrom), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8),
+                       "r"(r9)
                      : "rcx", "r11", "memory");
     if (unlikely((unsigned long)ret >= (unsigned long)-4095)) {
         errno = (int)(-ret);
@@ -214,7 +218,8 @@ INLINE ssize_t raw_send(int fd, const void* buf, size_t len, int flags) {
     register long r9 __asm__("r9") = 0; /* addrlen   = 0    */
     __asm__ volatile("syscall"
                      : "=a"(ret)
-                     : "a"((long)SYS_sendto), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+                     : "a"((long)SYS_sendto), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8),
+                       "r"(r9)
                      : "rcx", "r11", "memory");
     if (unlikely((unsigned long)ret >= (unsigned long)-4095)) {
         errno = (int)(-ret);
@@ -339,7 +344,10 @@ INLINE ssize_t sys_read_direct(int fd, void* buf, size_t count) {
 INLINE int sys_close_direct(int fd) {
 #if PULSAR_FAST_SYSCALLS
     int ret;
-    __asm__ volatile("syscall" : "=a"(ret) : "a"((long)SYS_close), "D"(fd) : "rcx", "r11", "memory");
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"((long)SYS_close), "D"(fd)
+                     : "rcx", "r11", "memory");
     return ret;
 #else
     int r = close(fd);
@@ -361,7 +369,8 @@ INLINE ssize_t sys_send_direct(int fd, const void* buf, size_t len, int flags) {
     register long r9 __asm__("r9") = 0;
     __asm__ volatile("syscall"
                      : "=a"(ret)
-                     : "a"((long)SYS_sendto), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+                     : "a"((long)SYS_sendto), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8),
+                       "r"(r9)
                      : "rcx", "r11", "memory");
     return ret;
 #else
@@ -385,7 +394,8 @@ INLINE ssize_t sys_recv_direct(int fd, void* buf, size_t len, int flags) {
     register long r9 __asm__("r9") = 0;
     __asm__ volatile("syscall"
                      : "=a"(ret)
-                     : "a"((long)SYS_recvfrom), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+                     : "a"((long)SYS_recvfrom), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8),
+                       "r"(r9)
                      : "rcx", "r11", "memory");
     return ret;
 #else

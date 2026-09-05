@@ -10,8 +10,8 @@
 extern void static_file_handler(PulsarCtx* ctx);
 
 /** Global route storage. */
-alignas(64) route_t global_routes[MAX_ROUTES] = {0};
 alignas(64) size_t global_route_count = 0;
+alignas(64) route_t global_routes[MAX_ROUTES] = {0};
 
 /** Direct O(1) fast-path cache for root route ("/") */
 alignas(64) route_t* fast_root_routes[HTTP_METHOD_COUNT] = {0};
@@ -20,9 +20,9 @@ alignas(64) route_t* fast_root_routes[HTTP_METHOD_COUNT] = {0};
 INLINE uint64_t load_prefix8(const char* s, size_t len) {
     uint64_t v = 0;
     if (len >= 8) {
-        __builtin_memcpy(&v, s, 8);
+        memcpy(&v, s, 8);
     } else if (len > 0) {
-        __builtin_memcpy(&v, s, len);
+        memcpy(&v, s, len);
     }
     return v;
 }
@@ -31,9 +31,9 @@ INLINE uint64_t load_prefix8(const char* s, size_t len) {
 INLINE uint64_t load_prefix16(const char* s, size_t len) {
     uint64_t v = 0;
     if (len >= 16) {
-        __builtin_memcpy(&v, s + 8, 8);
+        memcpy(&v, s + 8, 8);
     } else if (len > 8) {
-        __builtin_memcpy(&v, s + 8, len - 8);
+        memcpy(&v, s + 8, len - 8);
     }
     return v;
 }
@@ -52,7 +52,7 @@ INLINE uint64_t load_prefix16(const char* s, size_t len) {
  *   first_char  1 B   pattern[0], pre-extracted to avoid a pointer chase
  *   _pad        4 B   explicit padding to 32 B / natural alignment
  */
-typedef struct __attribute__((aligned(32))) RouteMetadata {
+typedef struct ALIGN(32) RouteMetadata {
     uint64_t prefix8;     /**< First 8 bytes of pattern for 1-cycle rejection. */
     const char* pattern;  /**< Pointer to pattern string (permanent lifetime). */
     route_t* target;      /**< Pointer to the full route_t (used on match). */
@@ -72,7 +72,7 @@ typedef struct __attribute__((aligned(32))) RouteMetadata {
  * All directories fit within two 64-byte cache lines. Both `routes` and `count`
  * are guaranteed to reside in the same cache line.
  */
-typedef struct __attribute__((aligned(16))) MethodRoutes {
+typedef struct ALIGN(16) MethodRoutes {
     RouteMetadata* routes; /**< Pointer to flat backing storage. */
     uint16_t count;        /**< Number of active entries. */
     uint16_t _pad[3];      /**< Explicit padding to align to exactly 16 B. */
@@ -82,40 +82,6 @@ alignas(64) static MethodRoutes method_routes[HTTP_METHOD_COUNT] = {0};
 
 /* Flat, contiguous backing storage allocated once statically. */
 alignas(64) static RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
-
-/*
- * Fast inline bytes comparison without PLT/memcmp function call overhead.
- *
- * Compares 64-bit words and 32-bit dwords directly using integer registers to
- * eliminate dynamic linker PLT trampoline stalls (`call memcmp@plt`).
- */
-INLINE bool fast_bytes_equal(const char* a, const char* b, size_t len) {
-    while (len >= 8) {
-        uint64_t va, vb;
-        __builtin_memcpy(&va, a, 8);
-        __builtin_memcpy(&vb, b, 8);
-        if (va != vb) return false;
-        a += 8;
-        b += 8;
-        len -= 8;
-    }
-    if (len >= 4) {
-        uint32_t va, vb;
-        __builtin_memcpy(&va, a, 4);
-        __builtin_memcpy(&vb, b, 4);
-        if (va != vb) return false;
-        a += 4;
-        b += 4;
-        len -= 4;
-    }
-    while (len > 0) {
-        if (*a != *b) return false;
-        a++;
-        b++;
-        len--;
-    }
-    return true;
-}
 
 /*
  * Exact-match hash table (method + path -> route_t*).
@@ -131,7 +97,7 @@ INLINE bool fast_bytes_equal(const char* a, const char* b, size_t len) {
 #define EXACT_TABLE_SIZE 256 /* power of two; >= 2x MAX_ROUTES */
 #define EXACT_TABLE_MASK (EXACT_TABLE_SIZE - 1)
 
-typedef struct __attribute__((aligned(32))) ExactEntry {
+typedef struct ALIGN(32) ExactEntry {
     uint64_t prefix8;     /**< First 8 bytes of pattern for 1-cycle integer comparison. */
     uint64_t prefix16;    /**< Bytes 8..15 (allows 16-byte matches without memcmp). */
     const char* pattern;  /**< Full pattern string. */
@@ -144,23 +110,26 @@ typedef struct __attribute__((aligned(32))) ExactEntry {
 /* Aligned to 64-byte L1 cache boundaries */
 alignas(64) static ExactEntry exact_table[EXACT_TABLE_SIZE] = {0};
 
-/** 64-bit SWAR Multiplicative Hash: 3-cycle branchless hash for <= 8 bytes, SWAR for longer paths. */
+/** 64-bit SWAR Multiplicative Hash: 3-cycle branchless hash for <= 8 bytes, SWAR for longer paths.
+ */
 INLINE uint32_t exact_hash(const char* path, size_t len, uint16_t method, uint64_t prefix8) {
     if (likely(len <= 8)) {
-        uint64_t h = prefix8 ^ ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ ((uint64_t)len * 0x517CC1B727220A95ULL);
+        uint64_t h = prefix8 ^ ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^
+                     ((uint64_t)len * 0x517CC1B727220A95ULL);
         h ^= (h >> 33);
         h *= 0xFF51AFD7ED558CCDULL;
         h ^= (h >> 33);
         return (uint32_t)h;
     }
 
-    uint64_t h = ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ (len * 0x517CC1B727220A95ULL) ^ prefix8;
+    uint64_t h =
+        ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ (len * 0x517CC1B727220A95ULL) ^ prefix8;
     const uint8_t* p = (const uint8_t*)path + 8;
     size_t rem = len - 8;
 
     while (rem >= 8) {
         uint64_t v;
-        __builtin_memcpy(&v, p, 8);
+        memcpy(&v, p, 8);
         h ^= v;
         h *= 0x517CC1B727220A95ULL;
         h ^= (h >> 32);
@@ -170,7 +139,7 @@ INLINE uint32_t exact_hash(const char* path, size_t len, uint16_t method, uint64
 
     if (rem >= 4) {
         uint32_t v;
-        __builtin_memcpy(&v, p, 4);
+        memcpy(&v, p, 4);
         h ^= (uint64_t)v;
         h *= 0x517CC1B727220A95ULL;
         p += 4;
@@ -199,7 +168,8 @@ INLINE route_t* exact_lookup(const char* path, size_t len, HttpMethod method, ui
 
     while (exact_table[i].target) {
         const ExactEntry* e = &exact_table[i];
-        if (e->hash_sig == sig && e->method == (uint16_t)method && e->pattern_len == len && e->prefix8 == prefix8) {
+        if (e->hash_sig == sig && e->method == (uint16_t)method && e->pattern_len == len &&
+            e->prefix8 == prefix8) {
             if (likely(len <= 8)) {
                 return e->target;
             }
@@ -207,7 +177,7 @@ INLINE route_t* exact_lookup(const char* path, size_t len, HttpMethod method, ui
                 uint64_t p16 = load_prefix16(path, len);
                 if (e->prefix16 == p16) return e->target;
             } else {
-                if (fast_bytes_equal(e->pattern + 8, path + 8, len - 8)) {
+                if (memcmp(e->pattern + 8, path + 8, len - 8)) {
                     return e->target;
                 }
             }
@@ -324,7 +294,8 @@ static void populate_param_names(const char* pattern, PathParams* path_params) {
  * @param is_static True for static file routes.
  * @return Pointer to the newly registered route_t entry.
  */
-static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler, int is_static) {
+static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler,
+                                      int is_static) {
     ASSERT(global_route_count < MAX_ROUTES && "Route table full");
     ASSERT(METHOD_VALID(method) && "Invalid HTTP method");
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
@@ -396,8 +367,10 @@ static int compare_routes(const void* a, const void* b) {
     if (ra->method != rb->method) return (ra->method < rb->method) ? -1 : 1;
 
     /* Root static routes serve as catch-alls; push them to the end. */
-    const bool ra_root_static = (ra->route_type == ROUTE_TYPE_STATIC && ra->pattern_len == 1 && ra->pattern[0] == '/');
-    const bool rb_root_static = (rb->route_type == ROUTE_TYPE_STATIC && rb->pattern_len == 1 && rb->pattern[0] == '/');
+    const bool ra_root_static =
+        (ra->route_type == ROUTE_TYPE_STATIC && ra->pattern_len == 1 && ra->pattern[0] == '/');
+    const bool rb_root_static =
+        (rb->route_type == ROUTE_TYPE_STATIC && rb->pattern_len == 1 && rb->pattern[0] == '/');
 
     if (ra_root_static != rb_root_static) return ra_root_static ? 1 : -1;
 
@@ -498,7 +471,8 @@ void sort_routes(void) {
  * @param arena       Arena used for value string allocation.
  * @return true if the pattern matches the URL exactly and all params were filled.
  */
-static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params, Arena* arena) {
+static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params,
+                                  Arena* arena) {
     const char* pat = pattern;
     const char* url_ptr = url;
     const uint8_t total_params = path_params->total_params;
@@ -567,8 +541,8 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
  * @param arena       Arena passed through to param matchers.
  * @return Matched route pointer, or NULL if none found.
  */
-INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length, uint64_t prefix8,
-                                    Arena* arena) {
+INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length,
+                                    uint64_t prefix8, Arena* arena) {
     if (method >= HTTP_METHOD_COUNT) return NULL;
 
     const MethodRoutes* mr = &method_routes[method];
@@ -587,12 +561,14 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
             case ROUTE_TYPE_STATIC:
                 if (meta->pattern_len <= (uint16_t)url_length && meta->first_char == first_url_ch) {
                     if (meta->pattern_len <= 8) {
-                        uint64_t mask = (meta->pattern_len == 8) ? ~0ULL : ((1ULL << (meta->pattern_len * 8)) - 1);
+                        uint64_t mask = (meta->pattern_len == 8)
+                                            ? ~0ULL
+                                            : ((1ULL << (meta->pattern_len * 8)) - 1);
                         if ((prefix8 & mask) == meta->prefix8) {
                             return meta->target;
                         }
                     } else if (meta->prefix8 == prefix8 &&
-                               fast_bytes_equal(meta->pattern + 8, path + 8, meta->pattern_len - 8)) {
+                               memcmp(meta->pattern + 8, path + 8, meta->pattern_len - 8)) {
                         return meta->target;
                     }
                 }
@@ -605,7 +581,8 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
                  * here because param patterns virtually always start with '/' and
                  * so do all URL paths — the check would never filter anything.
                  */
-                if (match_path_parameters(meta->pattern, path, meta->target->state.path_params, arena)) {
+                if (match_path_parameters(meta->pattern, path, meta->target->state.path_params,
+                                          arena)) {
                     return meta->target;
                 }
                 break;
@@ -624,7 +601,8 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
  * Used by OPTIONS handling to find any route on the requested path
  * regardless of the registered method.
  */
-INLINE route_t* match_any_method(const char* path, size_t url_length, uint64_t prefix8, Arena* arena) {
+INLINE route_t* match_any_method(const char* path, size_t url_length, uint64_t prefix8,
+                                 Arena* arena) {
     for (size_t method = 0; method < HTTP_METHOD_COUNT; method++) {
         route_t* found = match_method_routes((HttpMethod)method, path, url_length, prefix8, arena);
         if (found) return found;
@@ -633,7 +611,6 @@ INLINE route_t* match_any_method(const char* path, size_t url_length, uint64_t p
 }
 
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
-    /* Fast-Path: direct jump for root route ("/") - single array load. */
     if (likely(url_length == 1 && path[0] == '/')) {
         if (likely((unsigned)method < HTTP_METHOD_COUNT)) {
             route_t* r = fast_root_routes[method];
@@ -646,8 +623,6 @@ route_t* route_match(const char* path, size_t url_length, HttpMethod method, Are
     }
 
     const uint64_t prefix8 = load_prefix8(path, url_length);
-
-    /* O(1) exact match — the overwhelmingly common case. */
     route_t* found = exact_lookup(path, url_length, method, prefix8);
     if (likely(found != NULL)) return found;
 

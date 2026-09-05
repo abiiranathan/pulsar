@@ -84,7 +84,8 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
     if (name.len > 0) {
         unsigned int f0 = (unsigned int)name.data[0] | 32u;
         for (size_t i = 0; i < h->count; ++i) {
-            if (h->entries[i].name.len == name.len && ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+            if (h->entries[i].name.len == name.len &&
+                ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
                 ss_equal_nocase(h->entries[i].name, name)) {
                 entry = &h->entries[i];
                 break;
@@ -167,7 +168,7 @@ INLINE void headers_foreach(const headers_t* h, header_iter_fn callback, void* u
 }
 
 // DEBUG MACRO: Print all headers to stdout
-#define DUMP_HEADERS(h)                                                                            \
+#define dump_headers(h)                                                                            \
     if (h) {                                                                                       \
         do {                                                                                       \
             printf("Headers (count=%zu):\n", (h)->count);                                          \

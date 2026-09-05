@@ -121,10 +121,12 @@ static MimeEntry mime_entries[] = {
     // Documents
     {.ext = "pdf", .mimetype = SS_LIT("application/pdf")},
     {.ext = "doc", .mimetype = SS_LIT("application/msword")},
-    {.ext = "docx", .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    {.ext = "docx",
+     .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
     {
         .ext = "pptx",
-        .mimetype = SS_LIT("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        .mimetype =
+            SS_LIT("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
     },
     {.ext = "xls", .mimetype = SS_LIT("application/vnd.ms-excel")},
     {

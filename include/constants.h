@@ -7,7 +7,7 @@
 
 // Enable logging callback.
 #ifndef ENABLE_LOGGING
-#define ENABLE_LOGGING 0
+#define ENABLE_LOGGING 1
 #endif
 
 // Number of workers. Should be ideally == ncpus.

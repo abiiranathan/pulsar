@@ -100,9 +100,12 @@ struct response_t {
 // cache lines so small responses never touch more than that plus the
 // stack buffer actually used. Whole struct must stay comfortably inside
 // L2 (and even L1) working set.
-_Static_assert(sizeof(struct response_t) <= 616, "response_t grew past budget; re-check field sizes");
-_Static_assert(__builtin_offsetof(struct response_t, body) <= 128, "response_t hot fields spilled past 2 cache lines");
-_Static_assert(__builtin_offsetof(struct response_t, body) % 8 == 0, "response_t body union must stay 8-byte aligned");
+_Static_assert(sizeof(struct response_t) <= 616,
+               "response_t grew past budget; re-check field sizes");
+_Static_assert(__builtin_offsetof(struct response_t, body) <= 128,
+               "response_t hot fields spilled past 2 cache lines");
+_Static_assert(__builtin_offsetof(struct response_t, body) % 8 == 0,
+               "response_t body union must stay 8-byte aligned");
 
 // HTTP Request structure
 struct request_t {
@@ -126,21 +129,22 @@ struct pulsar_conn;  // Forward declaration.
  * @brief User-defined hooks for managing the state of offloaded connections.
  */
 typedef struct PulsarOffloadHandler {
-    void (*on_read)(struct pulsar_conn* conn);   // Invoked when data arrives (useful for WebSockets)
+    void (*on_read)(struct pulsar_conn* conn);  // Invoked when data arrives (useful for WebSockets)
     void (*on_write)(struct pulsar_conn* conn);  // Invoked when the socket is writable
-    void (*on_close)(struct pulsar_conn* conn);  // Invoked when the client disconnects or an error occurs
+    void (*on_close)(
+        struct pulsar_conn* conn);  // Invoked when the client disconnects or an error occurs
 } PulsarOffloadHandler;
 
 // Connection state structure
 struct pulsar_conn {
-    char* read_buf;                                  // Buffer for incoming data.
-    Arena* arena;                                    // Memory arena for allocations
-    size_t pending_len;                              // Bytes of a partial request buffered across reads.
-    int client_fd;                                   // Client socket file descriptor
-    int worker_id;                                   // ID of the current worker running the thread.
+    char* read_buf;      // Buffer for incoming data.
+    Arena* arena;        // Memory arena for allocations
+    size_t pending_len;  // Bytes of a partial request buffered across reads.
+    int client_fd;       // Client socket file descriptor
+    int worker_id;       // ID of the current worker running the thread.
     bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
-    bool arena_dirty;                                // True if conn->arena was used this request (skip reset when false).
-    time_t last_activity;                            // Timestamp of last I/O activity
+    bool arena_dirty;      // True if conn->arena was used this request (skip reset when false).
+    time_t last_activity;  // Timestamp of last I/O activity
 
     /* ---- Per-request state ---- */
     Locals locals;               // Per-request context variables set by the user.
