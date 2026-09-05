@@ -13,6 +13,7 @@
 #include "../include/pulsar.h"
 #include "../include/pulsar_itoa.h"
 #include "../include/pulsar_syscall.h"
+#include "../include/pulsar_time.h"
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -20,9 +21,15 @@
 
 static int worker_listen_fds[NUM_WORKERS]; /**< Per-worker SO_REUSEPORT listeners. */
 volatile sig_atomic_t server_running = 1;
+
 ALIGN(64) static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 ALIGN(64) static size_t global_mw_count = 0;
 ALIGN(64) static void* GLOBAL_HANDLER_USERDATA = NULL;
+
+ALIGN(64) uint64_t g_tsc_mult = 0;
+ALIGN(64) uint64_t g_tsc_base_cycles = 0;
+ALIGN(64) uint64_t g_tsc_base_ns = 0;
+ALIGN(64) uint64_t g_wall_base_ns = 0;
 
 #define SERVER_NAME "PULSAR/1.0 (Unix)"
 
@@ -104,7 +111,7 @@ static void* slow_worker_thread(void* arg) {
     KeepAliveState* ka = &worker->keep_alive_state;
     event_t events[MAX_EVENTS] = {0};
 
-    long last_timeout_check = 0;
+    time_t last_timeout_check = 0;
 
     while (server_running) {
         int n = event_wait(queue, events, MAX_EVENTS, 2000);
@@ -114,20 +121,20 @@ static void* slow_worker_thread(void* arg) {
             continue;
         }
 
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        if (ts.tv_sec - last_timeout_check >= SLOW_KEEPALIVE_CHECK_S) {
+        /* Same monotonic domain as init_connection / fast workers: immune to
+         * wall-clock jumps and consistent across handoff. Zero syscalls. */
+        time_t mono_now = pulsar_mono_sec();
+        if (mono_now - last_timeout_check >= SLOW_KEEPALIVE_CHECK_S) {
             PulsarConn* cur = ka->head;
-            time_t now = time(NULL);
             while (cur) {
                 PulsarConn* nxt = cur->next;
-                if (conn_timedout(now, cur->last_activity)) {
+                if (conn_timedout(mono_now, cur->last_activity)) {
                     remove_keepalive_connection(cur, ka);
                     slow_close_offloaded(queue, cur);
                 }
                 cur = nxt;
             }
-            last_timeout_check = ts.tv_sec;
+            last_timeout_check = mono_now;
         }
 
         for (int i = 0; i < n; i++) {
@@ -135,7 +142,7 @@ static void* slow_worker_thread(void* arg) {
             PulsarConn* conn = (PulsarConn*)ev->data;
             if (!conn) continue;
 
-            conn->last_activity = time(NULL);
+            conn->last_activity = pulsar_mono_sec();
 
             if (ev->error) {
                 conn->closing = true;
@@ -246,9 +253,9 @@ static void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-static void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue) {
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue) {
     PulsarConn* current = state->head;
-    time_t now = time(NULL);
+    time_t now = pulsar_mono_sec(); /* Monotonic domain: matches last_activity */
     while (current) {
         PulsarConn* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
@@ -305,7 +312,7 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     conn->abort = false;
     conn->arena = arena;
     conn->arena_dirty = false;
-    conn->last_activity = time(NULL);
+    conn->last_activity = pulsar_mono_sec();
     conn->pending_len = 0;
     conn->next = NULL;
     conn->prev = NULL;
@@ -994,7 +1001,7 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
 /* ================================================================
  * Fast 1-Second Preformatted Server + Date Header
  * ================================================================ */
-static const char DAYS[7][5] = {"Sun,", "Mon,", "Tue,", "Wed,", "Fri,", "Sat,"};
+static const char DAYS[7][5] = {"Sun,", "Mon,", "Tue,", "Wed,", "Thu,", "Fri,", "Sat,"};
 static const char MONTHS[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
@@ -1005,10 +1012,18 @@ typedef struct __attribute__((aligned(64))) {
 
 static PreformattedServerDate g_server_date_hdr;
 static _Atomic time_t g_current_time = 0;
+/* Seqlock generation: even = stable, odd = writer publishing. Lets readers
+ * detect torn reads without locking the per-request hot path. */
+static _Atomic uint64_t g_date_seq = 0;
 
-static void update_date_header(time_t t) {
+/* Format + publish the Date header for wall-clock second t. Only the thread
+ * that wins the CAS on g_current_time publishes, so concurrent workers never
+ * memcpy over each other. Callers pass WALL-clock seconds. */
+static void try_update_date_header(time_t t) {
     struct tm tm;
-    gmtime_r(&t, &tm);
+    if (gmtime_r(&t, &tm) == NULL) return;
+    if (tm.tm_wday < 0 || tm.tm_wday > 6) return;
+    if (tm.tm_mon < 0 || tm.tm_mon > 11) return;
 
     char buf[128];
     int n = snprintf(buf, sizeof(buf),
@@ -1018,15 +1033,43 @@ static void update_date_header(time_t t) {
                      DAYS[tm.tm_wday], tm.tm_mday, MONTHS[tm.tm_mon], tm.tm_year + 1900, tm.tm_hour,
                      tm.tm_min, tm.tm_sec);
 
-    if (n > 0) {
-        memcpy(g_server_date_hdr.header_str, buf, (size_t)n);
-        g_server_date_hdr.header_len = (uint16_t)n;
-        atomic_store_explicit(&g_current_time, t, memory_order_relaxed);
+    if (n <= 0 || n >= (int)sizeof(buf)) return;
+
+    /* Claim this second before publishing so only one worker writes. */
+    time_t cur = atomic_load_explicit(&g_current_time, memory_order_relaxed);
+    if (cur == t) return;
+    if (!atomic_compare_exchange_strong_explicit(&g_current_time, &cur, t, memory_order_relaxed,
+                                                memory_order_relaxed)) {
+        return; /* lost the race: winner is publishing */
+    }
+
+    uint64_t seq = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
+    atomic_store_explicit(&g_date_seq, seq + 1, memory_order_release); /* -> odd: writing */
+    memcpy(g_server_date_hdr.header_str, buf, (size_t)n);
+    g_server_date_hdr.header_len = (uint16_t)n;
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&g_date_seq, seq + 2, memory_order_release); /* -> even: stable */
+}
+
+/* Lock-free snapshot of the Date header into dst (must hold >= 128 bytes).
+ * Spins only while a 1/sec publish is in flight. Returns header length. */
+INLINE uint16_t snapshot_date_header(char* dst) {
+    for (;;) {
+        uint64_t s0 = atomic_load_explicit(&g_date_seq, memory_order_acquire);
+        if (s0 & 1u) continue; /* writer publishing: retry */
+        atomic_thread_fence(memory_order_acquire);
+        uint16_t len = g_server_date_hdr.header_len;
+        if (len <= 128 && len > 0) memcpy(dst, g_server_date_hdr.header_str, len);
+        atomic_thread_fence(memory_order_acquire);
+        uint64_t s1 = atomic_load_explicit(&g_date_seq, memory_order_acquire);
+        if (s0 == s1) return (len <= 128) ? len : 0;
     }
 }
 
 INLINE void write_server_headers(PulsarConn* conn) {
-    conn_writeheader_raw(conn, g_server_date_hdr.header_str, g_server_date_hdr.header_len);
+    char tmp[128];
+    uint16_t len = snapshot_date_header(tmp);
+    if (len > 0) conn_writeheader_raw(conn, tmp, len);
 }
 
 /* ================================================================
@@ -1394,10 +1437,14 @@ __attribute__((no_stack_protector)) static void finalize_response(PulsarConn* co
         size_t s_len = resp->status_len;
         size_t user_h_len = resp->headers_len;
         size_t b_len = resp->body_len;
-        size_t date_len = g_server_date_hdr.header_len;
+        /* Seqlock snapshot: never memcpy from the global while a 1/sec
+         * publish is in flight (torn Date header). */
+        char date_tmp[128];
+        size_t date_len = snapshot_date_header(date_tmp);
 
         /* Single safe upper-bound capacity check: avoid precomputing count_digits */
-        if (likely(s_len + user_h_len + date_len + b_len + 64 <= resp->out_cap)) {
+        if (likely(date_len > 0 &&
+                   s_len + user_h_len + date_len + b_len + 64 <= resp->out_cap)) {
             char* dst = resp->out_buf;
 
             /* 1. Fast SWAR Status Line Copy */
@@ -1427,18 +1474,18 @@ __attribute__((no_stack_protector)) static void finalize_response(PulsarConn* co
                 dst += 18 + digits;
             }
 
-            /* 4. Vectorized Server + Date Copy */
+            /* 4. Vectorized Server + Date Copy (from stable snapshot) */
 #if defined(__AVX2__)
-            __m256i s0 = _mm256_load_si256((const __m256i*)(g_server_date_hdr.header_str + 0));
-            __m256i s1 = _mm256_load_si256((const __m256i*)(g_server_date_hdr.header_str + 32));
+            __m256i s0 = _mm256_loadu_si256((const __m256i*)(date_tmp + 0));
+            __m256i s1 = _mm256_loadu_si256((const __m256i*)(date_tmp + 32));
             _mm256_storeu_si256((__m256i*)(dst + 0), s0);
             _mm256_storeu_si256((__m256i*)(dst + 32), s1);
             if (date_len > 64) {
-                memcpy(dst + 64, g_server_date_hdr.header_str + 64, date_len - 64);
+                memcpy(dst + 64, date_tmp + 64, date_len - 64);
             }
             dst += date_len;
 #else
-            memcpy(dst, g_server_date_hdr.header_str, date_len);
+            memcpy(dst, date_tmp, date_len);
             dst += date_len;
 #endif
 
@@ -1619,17 +1666,18 @@ alignas(64) static PulsarCallback LOGGER_CALLBACK = NULL;
 bool pulsar_set_callback(PulsarCallback cb, int fd) {
 #if ENABLE_LOGGING
     if ((LOGGER_CALLBACK && cb) || (LOG_FD != -1 && fd != -1)) {
-        LOG_ERROR("Cannot set logger callback: already set");
+        LOG_ERROR("Pulsar callback already set. Only one callback can be registered.");
         return false;
     }
     LOGGER_CALLBACK = cb;
     LOG_FD = fd;
     return plog_init(&PLOG_STATE, LOG_FD);
 #else
-    LOGGER_CALLBACK = NULL;
-    LOG_FD = -1;
     (void)cb;
     (void)fd;
+    (void)PLOG_STATE;
+    (void)LOG_FD;
+    (void)LOGGER_CALLBACK;
     return true;
 #endif
 }
@@ -1704,13 +1752,12 @@ void pulsar_delete(PulsarConn* conn, const char* k) { locals_remove(&conn->local
 INLINE void request_complete(PulsarConn* conn) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
-        struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        uint64_t s_ns =
-            (uint64_t)conn->start.tv_sec * 1000000000ULL + (uint64_t)conn->start.tv_nsec;
-        uint64_t e_ns = (uint64_t)end.tv_sec * 1000000000ULL + (uint64_t)end.tv_nsec;
+        uint64_t s_ns = conn->start;
+        uint64_t e_ns = pulsar_now_ns();
+        uint64_t total_ns = (e_ns > s_ns) ? (e_ns - s_ns) : 0;
+
         PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
-        LOGGER_CALLBACK(&ctx, e_ns - s_ns);
+        LOGGER_CALLBACK(&ctx, total_ns);
     }
 #endif
     UNUSED(conn);
@@ -2047,7 +2094,8 @@ static void add_connection_to_worker(event_queue_t* queue, int client_fd, int wo
 static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
-        clock_gettime(CLOCK_MONOTONIC, &conn->start);
+        /* Store 64-bit nanoseconds directly into tv_sec (~3ns, 0 vDSO calls) */
+        conn->start = pulsar_now_ns();
     }
 #endif
 
@@ -2303,8 +2351,7 @@ void* worker_thread(void* arg) {
     }
 
     event_t events[MAX_EVENTS] = {0};
-    long last_timeout_check = 0;
-    int loop_counter = 0;
+    time_t last_timeout_check = 0;
     time_t last_sync_time = 0;
 
     while (server_running) {
@@ -2315,28 +2362,24 @@ void* worker_thread(void* arg) {
             continue;
         }
 
-        /* Amortized date update check: avoid time() syscall storm */
-        loop_counter++;
-        if (n == 0 || loop_counter >= 128) {
-            time_t now_sec = time(NULL);
-            if (now_sec != last_sync_time) {
-                last_sync_time = now_sec;
-                if (now_sec != atomic_load_explicit(&g_current_time, memory_order_relaxed)) {
-                    update_date_header(now_sec);
-                }
-            }
+        /* Fast hardware TSC time (~3ns, 0 syscalls). Two domains:
+         * wall clock for the Date header, monotonic for timeouts. */
+        time_t wall_now = pulsar_wall_sec();
+        time_t mono_now = pulsar_mono_sec();
 
-            if (now_sec - last_timeout_check >= 5) {
-                CheckKeepAliveTimeouts(ka_state, queue);
-                last_timeout_check = now_sec;
-            }
-            loop_counter = 0;
+        /* Synchronize the Date header once per second (CAS elects writer). */
+        if (wall_now != last_sync_time) {
+            last_sync_time = wall_now;
+            try_update_date_header(wall_now);
+        }
+
+        /* Check keep-alive timeouts every 5 seconds (zero syscalls) */
+        if (mono_now - last_timeout_check >= 5) {
+            CheckKeepAliveTimeouts(ka_state, queue);
+            last_timeout_check = mono_now;
         }
 
         for (int i = 0; i < n; i++) {
-            /* Direct PollerEvent field access: ev->fd/data/readable are public
-             * (solidc/poller.h) and this avoids 3-4 cross-DSO PLT calls per
-             * event (poller_event_fd/data/is_read/... were ~2-3% Self). */
             event_t* ev = &events[i];
             PulsarConn* conn = (PulsarConn*)ev->data;
 
@@ -2383,6 +2426,9 @@ int pulsar_run(const char* addr, int port) {
     install_signal_handler();
     sort_routes();
     init_mimetypes();
+    pulsar_time_init();
+    /* Pre-format the Date header so the first request never sees len == 0. */
+    try_update_date_header(pulsar_wall_sec());
 
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         slow_workers[i].id = i;

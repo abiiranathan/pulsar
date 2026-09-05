@@ -144,7 +144,7 @@ struct pulsar_conn {
     int worker_id;       // ID of the current worker running the thread.
     bool closing, keep_alive, abort, in_keep_alive;  // Connection flags.
     bool arena_dirty;      // True if conn->arena was used this request (skip reset when false).
-    time_t last_activity;  // Timestamp of last I/O activity
+    time_t last_activity;  // Monotonic seconds (pulsar_mono_sec) of last I/O; see conn_timedout
 
     /* ---- Per-request state ---- */
     Locals locals;               // Per-request context variables set by the user.
@@ -152,7 +152,7 @@ struct pulsar_conn {
     struct response_t response;  // HTTP response data
 
 #if ENABLE_LOGGING
-    struct timespec start;  // Timestamp of first request
+    uint64_t start;  // Timestamp counter at the start of request processing.
 #endif
 
     /* ----  Linked list nodes for keep-alive tracking ---- */
