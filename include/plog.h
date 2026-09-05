@@ -150,27 +150,27 @@ static inline size_t plog__format_line(char* dst, const PlogEvent* ev) {
     memcpy(p, "[Pulsar] ", 9);
     p += 9;
 
-    /* 2. Method: %-7s */
+    /* 2. Method: %-4s */
     size_t m_len = 0;
     while (m_len < PLOG_METHOD_MAX && ev->method[m_len] != '\0') {
         p[m_len] = ev->method[m_len];
         m_len++;
     }
     p += m_len;
-    while (m_len < 7) {
+    while (m_len < 4) {
         *p++ = ' ';
         m_len++;
     }
     *p++ = ' ';
 
-    /* 3. Path: %-5s */
+    /* 3. Path: %-3s */
     size_t path_len = 0;
     while (path_len < PLOG_PATH_MAX && ev->path[path_len] != '\0') {
         p[path_len] = ev->path[path_len];
         path_len++;
     }
     p += path_len;
-    while (path_len < 5) {
+    while (path_len < 3) {
         *p++ = ' ';
         path_len++;
     }

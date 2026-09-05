@@ -19,13 +19,12 @@
 #include <immintrin.h>
 #endif
 
-static int worker_listen_fds[NUM_WORKERS]; /**< Per-worker SO_REUSEPORT listeners. */
-volatile sig_atomic_t server_running = 1;
+ALIGN(64) static int worker_listen_fds[NUM_WORKERS];
 
+ALIGN(64) volatile sig_atomic_t server_running = 1;
 ALIGN(64) static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 ALIGN(64) static size_t global_mw_count = 0;
 ALIGN(64) static void* GLOBAL_HANDLER_USERDATA = NULL;
-
 ALIGN(64) uint64_t g_tsc_mult = 0;
 ALIGN(64) uint64_t g_tsc_base_cycles = 0;
 ALIGN(64) uint64_t g_tsc_base_ns = 0;
@@ -45,8 +44,8 @@ typedef struct ALIGN(64) KeepAliveState {
 /* ================================================================
  * Forward Declarations
  * ================================================================ */
-static void finalize_response(PulsarConn* conn, HttpMethod method);
-static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
+INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
+INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
 INLINE void free_response_body(response_t* resp);
 INLINE void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state);
 INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state);
@@ -343,6 +342,7 @@ INLINE bool reset_connection(PulsarConn* conn) {
     conn->request.content_length = 0;
     conn->request.body = NULL;
     conn->request.range_hdr = (StrSlice){.data = NULL, .len = 0};
+    if (conn->request.headers) headers_init(conn->request.headers);
     res->status_len = 0;
     res->headers_len = 0;
     res->body_len = 0;
@@ -534,6 +534,10 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
     conn->keep_alive = true;
     uint8_t flags = 0;
 
+    /* Start with an empty header table so keep-alive reuse never leaks
+     * the previous request's headers into req_headers()/req_header_get(). */
+    if (req->headers) headers_init(req->headers);
+
     while (ptr < end) {
         /* EOL-first scan: one bounded scan per header line finds the line end,
          * then the colon search is bounded to the line (typically < 64 B)
@@ -560,10 +564,15 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
         const size_t value_len = (size_t)(value_end - value_start);
 
         const char fc = (char)(ptr[0] | 0x20);
-        /* Range is the only header the core needs after parsing (static file
-         * serving): extract it as a view instead of storing every header into
-         * request.headers (which cost ~100 cycles/req in headers_set scans).
+
+        /* Store every header so req_headers()/req_header_get() work.
          * Views into read_buf are valid for this request's lifetime. */
+        if (!headers_set(req->headers, (StrSlice){.data = ptr, .len = name_len},
+                         (StrSlice){.data = value_start, .len = value_len})) {
+            return false;
+        }
+
+        /* Range is also captured as a view for static file serving. */
         if (fc == 'r' && name_len == 5 && req->range_hdr.data == NULL) {
             uint64_t w = 0;
             memcpy(&w, ptr, 5);
@@ -1039,7 +1048,7 @@ static void try_update_date_header(time_t t) {
     time_t cur = atomic_load_explicit(&g_current_time, memory_order_relaxed);
     if (cur == t) return;
     if (!atomic_compare_exchange_strong_explicit(&g_current_time, &cur, t, memory_order_relaxed,
-                                                memory_order_relaxed)) {
+                                                 memory_order_relaxed)) {
         return; /* lost the race: winner is publishing */
     }
 
@@ -1443,8 +1452,7 @@ __attribute__((no_stack_protector)) static void finalize_response(PulsarConn* co
         size_t date_len = snapshot_date_header(date_tmp);
 
         /* Single safe upper-bound capacity check: avoid precomputing count_digits */
-        if (likely(date_len > 0 &&
-                   s_len + user_h_len + date_len + b_len + 64 <= resp->out_cap)) {
+        if (likely(date_len > 0 && s_len + user_h_len + date_len + b_len + 64 <= resp->out_cap)) {
             char* dst = resp->out_buf;
 
             /* 1. Fast SWAR Status Line Copy */
@@ -1862,6 +1870,7 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     size_t path_len = decode_path_fast(url_ptr, url_len, req->path, MAX_PATH_LEN);
 
     if (!parse_query_params(conn, &path_len)) return StatusInternalServerError;
+
     /* Start header scan past the request line: the old code re-scanned it as a
      * giant pseudo-header (2 wasted memchrs per request). */
     const size_t hdr_off = (size_t)(line_end - buf);
@@ -1916,6 +1925,7 @@ INLINE void set_nonblocking(int fd) {
 }
 
 static int create_server_socket(const char* host, int port, int worker_cpu_id) {
+    (void)worker_cpu_id;
     if (port <= 0 || port > 65535) {
         fprintf(stderr, "Invalid port: %d\n", port);
         exit(EXIT_FAILURE);
@@ -1944,6 +1954,15 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
             sys_close_direct(fd);
             continue;
         }
+
+        // Allow both IPv4 and IPv6 on the same socket if possible
+#ifdef IPV6_V6ONLY
+        if (rp->ai_family == AF_INET6) {
+            int no = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no));
+        }
+#endif
+
         if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
         sys_close_direct(fd);
         fd = -1;
@@ -1965,12 +1984,6 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
 #ifdef __linux__
     int defer = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof(defer));
-
-#ifdef SO_INCOMING_CPU
-    if (worker_cpu_id >= 0) {
-        setsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &worker_cpu_id, sizeof(worker_cpu_id));
-    }
-#endif
 #endif
 
     if (listen(fd, SOMAXCONN) < 0) {
@@ -2099,8 +2112,16 @@ static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
     }
 #endif
 
-    ssize_t bytes_read = sys_read_direct(conn->client_fd, conn->read_buf + conn->pending_len,
-                                         READ_BUFFER_SIZE - 1 - conn->pending_len);
+    size_t pending = conn->pending_len;
+    char* target_buf = conn->read_buf;
+    size_t max_read = READ_BUFFER_SIZE - 1;
+
+    if (unlikely(pending > 0)) {
+        target_buf += pending;
+        max_read -= pending;
+    }
+
+    ssize_t bytes_read = sys_read_direct(conn->client_fd, target_buf, max_read);
     if (bytes_read < 0 && (bytes_read == -EAGAIN || bytes_read == -EWOULDBLOCK)) return;
     if (bytes_read <= 0) {
         conn->closing = true;
@@ -2380,6 +2401,11 @@ void* worker_thread(void* arg) {
         }
 
         for (int i = 0; i < n; i++) {
+            // Prefetch the next connection's cache line ahead of time
+            if (i + 1 < n && events[i + 1].data) {
+                __builtin_prefetch(events[i + 1].data, 0, 3);  // Read access, high locality
+            }
+
             event_t* ev = &events[i];
             PulsarConn* conn = (PulsarConn*)ev->data;
 
@@ -2390,8 +2416,6 @@ void* worker_thread(void* arg) {
                     add_connection_to_worker(queue, client_fd, worker_id, ka_state);
                 }
             } else {
-                conn->worker_id = worker_id;
-
                 if (likely(ev->readable))
                     handle_read(queue, conn, ka_state);
                 else if (ev->writable)

@@ -10,12 +10,6 @@
 
 void hello_world_handler(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    StrSlice headers = SS_LIT(
-        "Set-Cookie: sessionId=12345; Path=/; HttpOnly\r\n"
-        "Set-Cookie: theme=dark; Path=/; Secure\r\n"
-        "Content-Type: text/html\r\n");
-
-    conn_writeheader_raw(conn, headers.data, headers.len);
     conn_write(conn, "<h1>Hello World</h1>", 20);
 }
 
@@ -303,7 +297,13 @@ void mw2(PulsarCtx* ctx) {
 }
 
 int main(int argc, char* argv[]) {
-    pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
+    // Log to real file. Faster than stdout
+    int log_fd = open("pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (log_fd == -1) {
+        perror("open log file");
+        return 1;
+    }
+    pulsar_set_callback(pulsar_logger, log_fd);
 
     // ── Route table ───────────────────────────────────────────────────────
     route_register("/", HTTP_GET, hello_world_handler);
@@ -331,5 +331,7 @@ int main(int argc, char* argv[]) {
         port = atoi(argv[1]);
     }
 
-    return pulsar_run("localhost", port);
+    int rc = pulsar_run("localhost", port);
+    close(log_fd);
+    return rc;
 }
