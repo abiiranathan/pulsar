@@ -1334,16 +1334,20 @@ __attribute__((no_stack_protector)) static void finalize_response(PulsarConn* co
     /* Handle non-200 status code updates */
     if (unlikely(resp->status_code != StatusOK)) {
         StrSlice st = get_http_status(resp->status_code);
-        if (st.len == 17) {
-            memcpy(resp->buf, st.data, 17);
+        /* status_len is 0 when no status line was pre-populated (e.g. early
+         * error return via write_error where headers start at buf[0]).
+         * In that case old_len must be 0 so the whole header block shifts. */
+        size_t old_len = resp->status_len;
+        if (old_len > resp->headers_len) old_len = 0;
+        if (st.len == old_len) {
+            memcpy(resp->buf, st.data, st.len);
         } else {
-            size_t old_len = resp->status_len ? resp->status_len : 17;
             size_t rest = resp->headers_len - old_len;
             memmove(resp->buf + st.len, resp->buf + old_len, rest);
             memcpy(resp->buf, st.data, st.len);
             resp->headers_len = (uint32_t)(st.len + rest);
-            resp->status_len = (uint8_t)st.len;
         }
+        resp->status_len = (uint8_t)st.len;
     }
 
     /* Content-Length */
