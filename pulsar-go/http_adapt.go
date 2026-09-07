@@ -128,10 +128,12 @@ func (c *Context) buildHTTPRequest() *http.Request {
 		path = "/"
 	}
 
-	// 1. Build query string without intermediate map allocations.
+	// 1. Build query string without intermediate map allocations. Counts
+	// come from the one-call snapshot, so no extra count transition.
 	var rawQuery string
 	if c.conn != nil {
-		if count := int(C.bridge_query_count(c.conn)); count > 0 {
+		c.snapshot()
+		if count := c.snapNquery; count > 0 {
 			var b strings.Builder
 			for i := range count {
 				var cName, cVal *C.char
@@ -156,7 +158,8 @@ func (c *Context) buildHTTPRequest() *http.Request {
 	header := make(http.Header)
 	var host string
 	if c.conn != nil {
-		if count := int(C.bridge_req_headers_count(c.conn)); count > 0 {
+		c.snapshot()
+		if count := c.snapNheaders; count > 0 {
 			header = make(http.Header, count)
 			for i := range count {
 				var cName, cVal *C.char
@@ -307,21 +310,11 @@ func WrapF(f http.HandlerFunc) HandlerFunc { return WrapHandlerFunc(f) }
 //		})
 //	}))
 //
-// WrapMiddleware adapts stdlib middleware of the form
-// func(http.Handler) http.Handler as Pulsar middleware.
-//
-// The remainder of the Pulsar chain runs as the "next" http.Handler: when
-// the middleware invokes it, pending Pulsar handlers execute with Next and
-// their response is captured back into the middleware's ResponseWriter, so
-// the middleware can observe or mutate status, headers and body as usual.
-// Call it like any Pulsar middleware:
-//
-//	app.Use(pulsar.WrapMiddleware(func(next http.Handler) http.Handler {
-//		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//			w.Header().Set("X-From-Std", "1")
-//			next.ServeHTTP(w, r)
-//		})
-//	}))
+// Note: the middleware observes response headers staged at or after this
+// middleware's position in the chain. Headers set by earlier Pulsar
+// middleware are already committed to the C engine and are not visible
+// here; prefer adding new headers from stdlib middleware rather than
+// overwriting Pulsar-set ones (overwrites append live).
 func WrapMiddleware(mw func(http.Handler) http.Handler) HandlerFunc {
 	if mw == nil {
 		panic("pulsar: WrapMiddleware called with nil middleware")
@@ -414,8 +407,9 @@ func WrapMiddleware(mw func(http.Handler) http.Handler) HandlerFunc {
 
 // copyContextToWriter drains the Pulsar Context's staged response into w
 // without flushing to C, for handoff to stdlib middleware writers.
-// Staged headers are mirrored into respHeaders in both live and detached
-// modes (see SetHeader), so the middleware observes the full header set.
+// respHeaders is the single staged-header store in both live and detached
+// modes (SetHeader only stages; flush commits), so the middleware observes
+// the full header set here.
 func copyContextToWriter(c *Context, w *pulsarResponseWriter) {
 	for k := range c.respHeaders {
 		w.header.Set(k, c.respHeaders.Get(k))
@@ -465,10 +459,18 @@ func responseStatus(c *Context) int {
 //	ToHTTPHandler(myHandler).ServeHTTP(rec, req)
 func NewTestContext(r *http.Request, params map[string]string) *Context {
 	c := &Context{index: -1}
+	fillDetachedContext(c, r, params)
+	return c
+}
+
+// fillDetachedContext populates a (possibly pooled and previously used)
+// Context from r and params. Maps are reused across uses: existing buckets
+// are cleared first so no state leaks between requests.
+func fillDetachedContext(c *Context, r *http.Request, params map[string]string) {
 	if r == nil {
 		c.method = http.MethodGet
 		c.path = "/"
-		return c
+		return
 	}
 	c.method = r.Method
 	if c.method == "" {
@@ -478,7 +480,11 @@ func NewTestContext(r *http.Request, params map[string]string) *Context {
 	if c.path == "" {
 		c.path = "/"
 	}
-	c.reqHeaders = make(http.Header)
+	if c.reqHeaders == nil {
+		c.reqHeaders = make(http.Header)
+	} else {
+		clear(c.reqHeaders)
+	}
 	for k, vs := range r.Header {
 		for _, v := range vs {
 			c.reqHeaders.Add(k, v)
@@ -488,7 +494,11 @@ func NewTestContext(r *http.Request, params map[string]string) *Context {
 		c.reqHeaders.Set("Host", r.Host)
 	}
 	if r.URL != nil && len(r.URL.Query()) > 0 {
-		c.queryVals = make(map[string][]string, len(r.URL.Query()))
+		if c.queryVals == nil {
+			c.queryVals = make(map[string][]string, len(r.URL.Query()))
+		} else {
+			clear(c.queryVals)
+		}
 		for k, vs := range r.URL.Query() {
 			cp := make([]string, len(vs))
 			copy(cp, vs)
@@ -501,7 +511,11 @@ func NewTestContext(r *http.Request, params map[string]string) *Context {
 		}
 	}
 	if len(params) > 0 {
-		c.params = make(map[string]string, len(params))
+		if c.params == nil {
+			c.params = make(map[string]string, len(params))
+		} else {
+			clear(c.params)
+		}
 		maps.Copy(c.params, params)
 	}
 	if r.URL != nil {
@@ -510,7 +524,6 @@ func NewTestContext(r *http.Request, params map[string]string) *Context {
 	if r.Context() != nil {
 		c.ctx = r.Context()
 	}
-	return c
 }
 
 // writeTestContextToHTTP renders a detached Context's staged response onto
@@ -541,9 +554,6 @@ func writeTestContextToHTTP(c *Context, w http.ResponseWriter) {
 // Errors returned from the chain go to DefaultErrorHandler (or the custom
 // handler set via WithErrorHandler), mirroring Engine.dispatch. The
 // response is rendered with net/http semantics.
-// ToHTTPHandler converts a Pulsar HandlerFunc chain into an http.Handler,
-// running handlers against a detached Context built from each incoming
-// *http.Request.
 func ToHTTPHandler(h HandlerFunc, opts ...ToHTTPOption) http.Handler {
 	if h == nil {
 		panic("pulsar: ToHTTPHandler called with nil handler")
@@ -559,7 +569,8 @@ func ToHTTPHandler(h HandlerFunc, opts ...ToHTTPOption) http.Handler {
 		if r != nil && r.URL != nil {
 			path = r.URL.Path
 		}
-		c := NewTestContext(r, matchPatternParams(cfg.patternSegments, path))
+		c := acquireDetached()
+		fillDetachedContext(c, r, matchPatternParams(cfg.patternSegments, path))
 		if cfg.pattern != "" {
 			c.routePat = cfg.pattern
 		}
@@ -569,7 +580,33 @@ func ToHTTPHandler(h HandlerFunc, opts ...ToHTTPOption) http.Handler {
 			cfg.errorHandler(err, c)
 		}
 		writeTestContextToHTTP(c, w)
+		releaseDetached(c)
 	})
+}
+
+// detachedPool recycles Contexts for the Pulsar-inside-net/http direction
+// (ToHTTPHandler), where one Context is needed per incoming request but no
+// C connection backs it. Maps and buffers are retained across uses via
+// reset(); request-specific slices (body) are dropped with the request.
+var detachedPool = sync.Pool{
+	New: func() any {
+		return &Context{
+			index: -1,
+			buf:   make([]byte, 0, 1024),
+		}
+	},
+}
+
+func acquireDetached() *Context {
+	c := detachedPool.Get().(*Context)
+	c.index = -1
+	return c
+}
+
+func releaseDetached(c *Context) {
+	c.closeForm()
+	c.reset()
+	detachedPool.Put(c)
 }
 
 type patternSegment struct {
@@ -590,6 +627,10 @@ type ToHTTPOption func(*toHTTPConfig)
 
 // WithPattern sets the route pattern used to extract path params.
 // It supports both Express style (:id) and standard/Go 1.22 style ({id}).
+// Regex-style constraints (":id(...)" / "{id:...}") are accepted but not
+// enforced — they match as plain wildcards, identical to the live C
+// router's normalization — so prod and test agree on both matching and
+// parameter names.
 func WithPattern(pattern string) ToHTTPOption {
 	return func(cfg *toHTTPConfig) {
 		cfg.pattern = cleanPath(pattern)
@@ -691,7 +732,7 @@ func splitPath(p string) []string {
 // (unlike the C engine's zero-copy windows) since there is no request
 // arena to window into. Called by Context.MultipartForm when conn == nil.
 func (c *Context) multipartFormStandalone() (*Form, error) {
-	ct := c.Header("Content-Type")
+	ct := c.cachedContentType()
 	mt, params, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.HasPrefix(mt, "multipart/") {
 		fErr := NewHTTPError(http.StatusBadRequest, "invalid multipart form")

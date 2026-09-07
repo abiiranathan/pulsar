@@ -264,7 +264,9 @@ func (c *Context) FormValue(name string) string {
 	if name == "" {
 		return ""
 	}
-	if ct := c.Header("Content-Type"); strings.HasPrefix(ct, "multipart/form-data") {
+	// cachedContentType crosses cgo at most once per request no matter
+	// how many form/query lookups funnel through here.
+	if ct := c.cachedContentType(); strings.HasPrefix(ct, "multipart/form-data") {
 		if f, err := c.MultipartForm(); err == nil {
 			if v := f.Field(name); v != "" {
 				return v
@@ -303,7 +305,7 @@ func (c *Context) PostForm() map[string][]string {
 	if len(body) == 0 {
 		return nil
 	}
-	ct := c.Header("Content-Type")
+	ct := c.cachedContentType()
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
 	}

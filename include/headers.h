@@ -111,8 +111,18 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
  */
 INLINE StrSlice headers_get(const headers_t* h, const char* name) {
     StrSlice target = {0};
+    if (!h || !name || !*name) {
+        return target;
+    }
+    // Hoist the strlen out of the loop and prefilter on length +
+    // case-folded first byte (same scheme as headers_set); most entries
+    // differ in one of those and never reach ss_equal_nocase.
+    const StrSlice want = ss_from_cstr(name);
+    const unsigned int f0 = (unsigned int)want.data[0] | 32u;
     for (size_t i = 0; i < h->count; ++i) {
-        if (ss_equal_nocase(h->entries[i].name, ss_from_cstr(name))) {
+        if (h->entries[i].name.len == want.len &&
+            ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+            ss_equal_nocase(h->entries[i].name, want)) {
             target = h->entries[i].value;
             break;
         }
@@ -138,8 +148,15 @@ INLINE bool headers_has(const headers_t* h, const char* name) {
  * @return true if header was removed, false if not found
  */
 INLINE bool headers_remove(headers_t* h, const char* name) {
+    if (!h || !name || !*name) {
+        return true;
+    }
+    const StrSlice want = ss_from_cstr(name);
+    const unsigned int f0 = (unsigned int)want.data[0] | 32u;
     for (size_t i = 0; i < h->count; ++i) {
-        if (ss_equal_nocase(h->entries[i].name, ss_from_cstr(name))) {
+        if (h->entries[i].name.len == want.len &&
+            ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+            ss_equal_nocase(h->entries[i].name, want)) {
             // Shift remaining items to delete current entry
             for (size_t j = i; j < h->count - 1; j++) {
                 h->entries[j] = h->entries[j + 1];

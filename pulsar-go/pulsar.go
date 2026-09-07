@@ -163,6 +163,30 @@ type Context struct {
 	formErr        error
 	postForm       map[string][]string
 	postFormParsed bool
+
+	// One-call metadata snapshot (live mode only). snapshot() packs
+	// method, path, body, content-length, route pattern and the
+	// param/query/header counts into a single cgo transition; every
+	// accessor below consults it first so a handler touching several
+	// metadata fields pays ~1 transition instead of one per field.
+	snapDone     bool
+	snapNparams  int
+	snapNquery   int
+	snapNheaders int
+
+	// Scalar caches populated from the snapshot.
+	contentLen        int
+	contentLenCached  bool
+	routePatCached    bool
+	contentTypeCached string
+	contentTypeParsed bool
+
+	// Collection caches: first Queries()/Headers() call enumerates once
+	// (using snapshot counts, no extra count call) and caches the map.
+	queriesCache  map[string]string
+	queriesCached bool
+	headersCache  map[string]string
+	headersCached bool
 }
 
 // DefaultErrorHandler writes a response for an error returned from a
@@ -211,19 +235,23 @@ func (c *Context) Next() error {
 // currently executing handler; callers should return promptly after calling
 // Abort.
 func (c *Context) Abort() {
+	// Latch the Go-side flag first: Aborted() reads it without a cgo
+	// transition. The C call is still required so the C core skips any
+	// remaining native middleware/handlers for this connection.
+	c.abortedFlag = true
 	if c.conn == nil {
-		c.abortedFlag = true
 		return
 	}
 	C.conn_abort(c.conn)
 }
 
 // Aborted reports whether Abort has been called for this request.
+//
+// This is pure Go: conn_abort() is only ever invoked from Abort(), which
+// latches abortedFlag synchronously on the chain's goroutine, and the C
+// core never sets the flag itself — so no cgo poll is needed.
 func (c *Context) Aborted() bool {
-	if c.conn == nil {
-		return c.abortedFlag
-	}
-	return C.bridge_is_aborted(c.conn) != 0
+	return c.abortedFlag
 }
 
 // ResponseWritten reports whether a status code or response body has been
@@ -232,10 +260,61 @@ func (c *Context) ResponseWritten() bool {
 	return c.written
 }
 
+// snapshot fetches scalar request metadata plus param/query/header counts
+// in a single cgo transition (see bridge_req_snapshot) and fans the values
+// out into the Context's caches. It runs at most once per request; later
+// accessors are pure Go. Returns false in detached (conn == nil) mode,
+// where fields are populated directly from the Go-owned request.
+func (c *Context) snapshot() bool {
+	if c.conn == nil || c.snapDone {
+		return c.conn != nil
+	}
+	var snap C.BridgeReqSnapshot
+	if C.bridge_req_snapshot(c.conn, &snap) == 0 {
+		return false
+	}
+	c.snapDone = true
+	if c.method == "" && snap.method != nil && snap.method_len > 0 {
+		c.method = C.GoStringN(snap.method, C.int(snap.method_len))
+	}
+	if c.path == "" && snap.path != nil && snap.path_len > 0 {
+		c.path = C.GoStringN(snap.path, C.int(snap.path_len))
+	}
+	if c.body == nil && snap.body != nil && snap.body_len > 0 {
+		c.body = unsafe.Slice((*byte)(unsafe.Pointer(snap.body)), int(snap.body_len))
+	}
+	if !c.contentLenCached {
+		c.contentLen = int(snap.content_length)
+		c.contentLenCached = true
+	}
+	if !c.routePatCached {
+		if snap.route_pattern != nil && snap.route_pattern_len > 0 {
+			c.routePat = unsafeView(snap.route_pattern, snap.route_pattern_len)
+		}
+		c.routePatCached = true
+	}
+	c.snapNparams = int(snap.nparams)
+	c.snapNquery = int(snap.nquery)
+	c.snapNheaders = int(snap.nheaders)
+	return true
+}
+
+// cachedContentType returns the request's Content-Type, fetching it across
+// cgo at most once per request. FormValue, PostForm and the multipart
+// parsers all funnel through here instead of each paying their own header
+// lookup.
+func (c *Context) cachedContentType() string {
+	if !c.contentTypeParsed {
+		c.contentTypeParsed = true
+		c.contentTypeCached = c.Header("Content-Type")
+	}
+	return c.contentTypeCached
+}
+
 // Method returns the request's HTTP method, e.g. "GET".
 func (c *Context) Method() string {
 	if c.method == "" && c.conn != nil {
-		c.method = C.GoString(C.req_method(c.conn))
+		c.snapshot()
 	}
 	return c.method
 }
@@ -243,7 +322,7 @@ func (c *Context) Method() string {
 // Path returns the request's URL path.
 func (c *Context) Path() string {
 	if c.path == "" && c.conn != nil {
-		c.path = C.GoString(C.req_path(c.conn))
+		c.snapshot()
 	}
 	return c.path
 }
@@ -289,7 +368,8 @@ func (c *Context) Params() map[string]string {
 	if c.conn == nil {
 		return nil
 	}
-	count := int(C.bridge_get_path_params_count(c.conn))
+	c.snapshot()
+	count := c.snapNparams
 	if count == 0 {
 		return nil
 	}
@@ -469,12 +549,19 @@ func (c *Context) Queries() map[string]string {
 		}
 		return out
 	}
-	count := int(C.bridge_query_count(c.conn))
-	if count == 0 {
+	// Enumerated once per request (counts come from the snapshot, so no
+	// extra count transition) and cached; values alias C memory and are
+	// valid only for the current request.
+	if c.queriesCached {
+		return c.queriesCache
+	}
+	c.snapshot()
+	if c.snapNquery == 0 {
+		c.queriesCached = true
 		return nil
 	}
-	out := make(map[string]string, count)
-	for i := 0; i < count; i++ {
+	out := make(map[string]string, c.snapNquery)
+	for i := 0; i < c.snapNquery; i++ {
 		var cName, cVal *C.char
 		var nameLen, valLen C.size_t
 		if C.bridge_query_at(c.conn, C.size_t(i), &cName, &nameLen, &cVal, &valLen) == 0 {
@@ -482,6 +569,8 @@ func (c *Context) Queries() map[string]string {
 		}
 		out[unsafeView(cName, nameLen)] = unsafeView(cVal, valLen)
 	}
+	c.queriesCache = out
+	c.queriesCached = true
 	return out
 }
 
@@ -499,12 +588,18 @@ func (c *Context) Headers() map[string]string {
 		}
 		return out
 	}
-	count := int(C.bridge_req_headers_count(c.conn))
-	if count == 0 {
+	// Enumerated once per request (counts come from the snapshot) and
+	// cached; values alias C memory, valid only for the current request.
+	if c.headersCached {
+		return c.headersCache
+	}
+	c.snapshot()
+	if c.snapNheaders == 0 {
+		c.headersCached = true
 		return nil
 	}
-	out := make(map[string]string, count)
-	for i := 0; i < count; i++ {
+	out := make(map[string]string, c.snapNheaders)
+	for i := 0; i < c.snapNheaders; i++ {
 		var cName, cVal *C.char
 		var nameLen, valLen C.size_t
 		if C.bridge_req_header_at(c.conn, C.size_t(i), &cName, &nameLen, &cVal, &valLen) == 0 {
@@ -512,19 +607,23 @@ func (c *Context) Headers() map[string]string {
 		}
 		out[unsafeView(cName, nameLen)] = unsafeView(cVal, valLen)
 	}
+	c.headersCache = out
+	c.headersCached = true
 	return out
 }
 
 // ContentType returns the request's Content-Type header, or "" if absent.
+// The lookup crosses cgo at most once per request; the value is cached.
 // The returned string is an owned copy safe to retain.
 func (c *Context) ContentType() string {
-	return c.Header("Content-Type")
+	return c.cachedContentType()
 }
 
-// ContentTypeView is the zero-copy variant of ContentType, valid only
-// for the current request.
+// ContentTypeView returns the request's Content-Type. It shares the same
+// once-per-request cache as ContentType; the value is valid at least for
+// the current request.
 func (c *Context) ContentTypeView() string {
-	return c.HeaderView("Content-Type")
+	return c.cachedContentType()
 }
 
 // ContentLength returns the request's Content-Length in bytes, or 0 when
@@ -533,7 +632,10 @@ func (c *Context) ContentLength() int {
 	if c.conn == nil {
 		return len(c.body)
 	}
-	return int(C.bridge_content_length(c.conn))
+	if !c.contentLenCached {
+		c.snapshot()
+	}
+	return c.contentLen
 }
 
 // RoutePattern returns the matched route's pattern (e.g. "/users/:id"),
@@ -544,12 +646,10 @@ func (c *Context) RoutePattern() string {
 	if c.conn == nil {
 		return c.routePat
 	}
-	var cData *C.char
-	var cLen C.size_t
-	if C.bridge_route_pattern(c.conn, &cData, &cLen) == 0 {
-		return ""
+	if !c.routePatCached {
+		c.snapshot()
 	}
-	return unsafeView(cData, cLen)
+	return c.routePat
 }
 
 // Body returns the raw request body as a zero-copy slice into the
@@ -563,11 +663,7 @@ func (c *Context) Body() []byte {
 	if c.conn == nil {
 		return nil
 	}
-	slice := C.req_body_slice(c.conn)
-	if slice.data == nil || slice.len == 0 {
-		return nil
-	}
-	c.body = unsafe.Slice((*byte)(unsafe.Pointer(slice.data)), int(slice.len))
+	c.snapshot()
 	return c.body
 }
 
@@ -622,27 +718,59 @@ func (c *Context) Get(key string) (any, bool) {
 // SetHeader sets a response header. It may be called at any point before
 // the response is flushed, including after Write has begun accumulating a
 // body. Returns c to allow chaining.
+//
+// Headers are staged in pure Go (no cgo) and committed to the C engine in
+// a single pre-formatted block by flush, so H headers cost zero
+// transitions here and one shared transition at flush time instead of H.
+// WrapMiddleware observes the same staged map, so no separate mirror is
+// needed.
 func (c *Context) SetHeader(key, value string) *Context {
 	if key == "" {
 		return c
 	}
-	if c.conn == nil {
-		if c.respHeaders == nil {
-			c.respHeaders = make(http.Header)
-		}
-		c.respHeaders.Set(key, value)
-		return c
-	}
-	// Mirror into respHeaders as well so WrapMiddleware can observe and
-	// forward staged headers without reading them back from C.
 	if c.respHeaders == nil {
 		c.respHeaders = make(http.Header)
 	}
 	c.respHeaders.Set(key, value)
-	kSlice := C.StrSlice{data: (*C.char)(strPtr(key)), len: C.size_t(len(key))}
-	vSlice := C.StrSlice{data: (*C.char)(strPtr(value)), len: C.size_t(len(value))}
-	C.conn_writeheader(c.conn, kSlice, vSlice)
 	return c
+}
+
+// commitStagedHeaders appends every staged response header to the C
+// response buffer in one cgo call, as a single pre-formatted
+// "Name: value\r\n" block, then retains the map buckets for reuse. It is
+// a no-op when nothing is staged or the Context is detached. When a
+// Content-Type was staged, the C CONTENT_TYPE flag is marked as well so
+// conn_servefile keeps its "don't override an explicit Content-Type"
+// behavior for headers staged before ServeFile.
+func (c *Context) commitStagedHeaders() {
+	if c.conn == nil || len(c.respHeaders) == 0 {
+		return
+	}
+	total := 0
+	hasCT := false
+	for k, vs := range c.respHeaders {
+		if k == "Content-Type" {
+			hasCT = true
+		}
+		for _, v := range vs {
+			total += len(k) + len(v) + 4 // "k: v\r\n"
+		}
+	}
+	buf := make([]byte, 0, total)
+	for k, vs := range c.respHeaders {
+		for _, v := range vs {
+			buf = append(buf, k...)
+			buf = append(buf, ':', ' ')
+			buf = append(buf, v...)
+			buf = append(buf, '\r', '\n')
+		}
+	}
+	var ct C.int
+	if hasCT {
+		ct = 1
+	}
+	C.bridge_commit_headers(c.conn, (*C.char)(bytesPtr(buf)), C.size_t(len(buf)), ct)
+	clear(c.respHeaders)
 }
 
 // WriteHeader sets the response status code. It is a no-op returning
@@ -748,6 +876,11 @@ func (c *Context) ServeFile(filename string) error {
 		return nil
 	}
 
+	// Headers are staged in Go and flush() is skipped for sendfile
+	// responses, so commit anything staged so far now: conn_servefile
+	// reads the C-side header state (range handling, Content-Type
+	// detection) and must observe them.
+	c.commitStagedHeaders()
 	c.status = http.StatusOK
 	c.written = true
 	c.serveFile = true
@@ -830,13 +963,16 @@ func (c *Context) Redirect(status int, location string) error {
 // of the single-shot response methods. It is invoked once by the Engine
 // after the handler chain completes; handlers must not call it directly.
 //
-// flush is a no-op if no response was committed (c.written is false), if
-// the Context is detached from C (conn == nil, see NewTestContext), or if
-// ServeFile set up a sendfile response: the file descriptor, status
-// (including 206 for range requests) and headers already live on the C
-// side, and a conn_send here would overwrite the status with the Go-side
-// placeholder. Redirect travels the normal buffered path (Location header
-// plus status, empty body) and IS flushed here.
+// Staged headers are committed first as one pre-formatted block (a single
+// shared cgo call no matter how many headers were set), then the body goes
+// out via conn_send. flush is a no-op if no response was committed
+// (c.written is false) or the Context is detached from C (conn == nil, see
+// NewTestContext). For ServeFile responses only headers staged after the
+// ServeFile call are committed here — the file descriptor, status
+// (including 206 for range requests) and earlier headers already live on
+// the C side, and a conn_send here would overwrite the status with the
+// Go-side placeholder. Redirect travels the normal buffered path (Location
+// header plus status, empty body) and IS flushed here.
 func (c *Context) flush() {
 	if c.conn == nil {
 		return
@@ -845,8 +981,10 @@ func (c *Context) flush() {
 		return
 	}
 	if c.serveFile {
+		c.commitStagedHeaders()
 		return
 	}
+	c.commitStagedHeaders()
 	C.conn_send(c.conn, C.http_status(c.status), bytesPtr(c.buf), C.size_t(len(c.buf)))
 }
 
@@ -947,6 +1085,22 @@ func (c *Context) reset() {
 	c.formErr = nil
 	c.postForm = nil
 	c.postFormParsed = false
+
+	c.snapDone = false
+	c.snapNparams = 0
+	c.snapNquery = 0
+	c.snapNheaders = 0
+	c.contentLen = 0
+	c.contentLenCached = false
+	c.routePatCached = false
+	c.contentTypeCached = ""
+	c.contentTypeParsed = false
+	// Retain enumeration buckets like the maps above; values alias
+	// per-request C memory and must not survive the reset.
+	clear(c.queriesCache)
+	clear(c.headersCache)
+	c.queriesCached = false
+	c.headersCached = false
 }
 
 // SetErrorHandler installs a custom ErrorHandler, replacing
@@ -1261,6 +1415,10 @@ func methodStringToInt(method string) int {
 
 // cleanPath normalizes p to start with exactly one leading slash and have
 // no trailing slash, except that the root path is always returned as "/".
+// Because every registration passes through here, "/users/" and "/users"
+// are the same route from Go: distinct trailing-slash routes cannot be
+// registered via this binding (the C router itself distinguishes them for
+// static routes).
 func cleanPath(p string) string {
 	if p == "" || p == "/" {
 		return "/"

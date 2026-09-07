@@ -32,9 +32,14 @@ typedef struct FileHeader {
     size_t offset;  ///< Byte offset in original request body
     size_t size;    ///< File size in bytes
 
-    char* filename;    ///< Original filename (arena-allocated)
-    char* mimetype;    ///< MIME type (arena-allocated)
-    char* field_name;  ///< Form field name (arena-allocated)
+    char* filename;    ///< Original filename (arena-allocated, NUL-terminated)
+    char* mimetype;    ///< MIME type (arena-allocated, NUL-terminated)
+    char* field_name;  ///< Form field name (arena-allocated, NUL-terminated)
+
+    /* Lengths (excluding NUL), stored so readers avoid strlen() per item. */
+    size_t filename_len;
+    size_t mimetype_len;
+    size_t field_name_len;
 } FileHeader;
 
 /**
@@ -42,8 +47,12 @@ typedef struct FileHeader {
  * @brief Key-value pair for regular form fields
  */
 typedef struct FormField {
-    char* name;   ///< Field name (arena-allocated)
-    char* value;  ///< Field value (arena-allocated)
+    char* name;   ///< Field name (arena-allocated, NUL-terminated)
+    char* value;  ///< Field value (arena-allocated, NUL-terminated)
+
+    /* Lengths (excluding NUL), stored so readers avoid strlen() per item. */
+    size_t name_len;
+    size_t value_len;
 } FormField;
 
 /**

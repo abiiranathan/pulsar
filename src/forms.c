@@ -169,6 +169,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
                         }
+                        current_header.field_name_len = key_length;
                         ptr = memmem(ptr, size - (size_t)(ptr - data), "\"; filename=\"", 13);
                         if (!ptr) {
                             code = INVALID_FORM_BOUNDARY;
@@ -204,6 +205,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                             code = ARENA_ALLOC_ERROR;
                             goto cleanup;
                         }
+                        form->fields[form->num_fields].name_len = key_length;
                     }
                 } else {
                     ptr++;
@@ -223,6 +225,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         code = ARENA_ALLOC_ERROR;
                         goto cleanup;
                     }
+                    form->fields[form->num_fields].value_len = value_length;
 
                     form->num_fields++;
 
@@ -247,6 +250,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                         code = ARENA_ALLOC_ERROR;
                         goto cleanup;
                     }
+                    current_header.filename_len = filename_length;
 
                     // Move to end of line
                     while (ptr < data + size && *ptr != '\n') ptr++;
@@ -288,6 +292,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
                     code = ARENA_ALLOC_ERROR;
                     goto cleanup;
                 }
+                current_header.mimetype_len = mimetype_len;
 
                 // Move to end of line
                 while (ptr < data + size && *ptr != '\n') ptr++;
@@ -300,7 +305,7 @@ MultipartCode multipart_parse(const char* data, size_t size, const char* boundar
 
                 // Check for empty file
                 if (memcmp(ptr, boundary, boundary_length) == 0) {
-                    if (strlen(current_header.filename) == 0) {
+                    if (current_header.filename_len == 0) {
                         // Reset current header and continue
                         memset(&current_header, 0, sizeof(FileHeader));
                         state = STATE_BOUNDARY;

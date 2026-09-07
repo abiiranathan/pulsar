@@ -386,6 +386,7 @@ static bool match_path_parameters(const char* pattern, const char* url, PathPara
         const size_t val_len = (size_t)(url_ptr - val_start);
         param->value = arena_strdupn(arena, val_start, val_len);
         if (!param->value) return false;
+        param->value_len = val_len;
     }
 
     while (*pat == '/') pat++;

@@ -55,6 +55,41 @@ int bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t
 int bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_len);
 size_t bridge_content_length(PulsarConn* conn);
 
+/* Single-call snapshot of scalar request metadata plus collection counts.
+ *
+ * Handlers that touch several metadata fields (method, path, body,
+ * content-length, route pattern, param/query/header counts) would otherwise
+ * pay one cgo transition per field. This packs them all into one call; all
+ * returned pointers are request-scoped views (method/path/pattern point at
+ * NUL-terminated C storage with explicit lengths so the caller can skip
+ * strlen; body points at the receive buffer and may be NULL when empty).
+ */
+typedef struct {
+    const char* method;
+    size_t method_len;
+    const char* path;
+    size_t path_len;
+    const char* route_pattern;
+    size_t route_pattern_len; /* 0 (and NULL pattern) when no route matched */
+    const char* body;
+    size_t body_len; /* 0 (and NULL body) when the request has no body */
+    size_t content_length;
+    size_t nparams;
+    size_t nquery;
+    size_t nheaders;
+} BridgeReqSnapshot;
+
+int bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out);
+
+/* Commits a pre-formatted "Name: value\r\n" block to the response header
+ * buffer in a single call, so the Go side can stage H headers in pure Go
+ * and flush them with one transition instead of H conn_writeheader calls.
+ * When content_type_set is non-zero the response CONTENT_TYPE flag is
+ * marked as well, keeping conn_servefile's "don't override an explicit
+ * Content-Type" check correct for headers staged before ServeFile.
+ */
+void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, int content_type_set);
+
 /* Multipart form support (see forms.h).
  *
  * bridge_parse_multipart() heap-allocates a MultipartForm, parses the

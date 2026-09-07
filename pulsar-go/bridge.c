@@ -74,11 +74,29 @@ static int param_name_len(const char* s, size_t remaining) {
 }
 
 /**
- * Allocates a GoBinding whose pattern is `pattern` with every Express-style
- * ":name" segment rewritten to "{name}", the form the C router expects.
+ * Allocates a GoBinding whose pattern is `pattern` normalized to the
+ * "{name}" form the C router expects.
  *
- * @param pattern Route pattern as supplied by Go, e.g. "/users/:id". Must
- *                start with '/' and be shorter than MAX_PATH_LEN.
+ * Both styles are accepted and equivalent:
+ *   - Express-style ":name" segments (at a segment start) become "{name}".
+ *   - "{name}" segments pass through unchanged.
+ *
+ * Regex-style constraints are NOT enforced by the C router, so they are
+ * stripped for parity with the Go-side test matcher (WithPattern), which
+ * ignores them as well: ":id(\d+)" and "{id:[0-9]+}" both register "{id}"
+ * (plain wildcard). Previously ":id(...)" emitted "{id}(...)" with literal
+ * trailing parens that could never match, and "{id:...}" registered under
+ * the literal name "id:..." so Param("id") missed.
+ *
+ * Malformed patterns are rejected (NULL): unclosed "{" or stray "}",
+ * nested "{{", empty names ("{}" or bare ":"), or an unterminated "(...)"
+ * constraint. Note classify_route() only ASSERTs validity, which is a
+ * no-op in NDEBUG builds, so validation must happen here.
+ *
+ * @param pattern Route pattern as supplied by Go, e.g. "/users/:id" or
+ *                "/users/{id}". Must start with '/' and be shorter than
+ *                MAX_PATH_LEN. The Go layer strips trailing slashes first,
+ *                so "/users/" and "/users" register identically.
  * @param go_id Route ID to store in the binding for later dispatch.
  * @return Newly allocated GoBinding on success, or NULL if pattern is
  *         invalid or allocation fails. Caller owns the result and must
@@ -95,44 +113,91 @@ static GoBinding* binding_new(const char* pattern, int go_id) {
         return NULL;
     }
 
-    // First pass: compute the output length. Each ":name" becomes "{name}",
-    // net +1 byte (the leading ':' is replaced by both '{' and '}').
-    size_t extra = 0;
-    for (size_t i = 0; i < in_len;) {
-        int namelen = 0;
-        if (pattern[i] == ':' && (i == 0 || pattern[i - 1] == '/') &&
-            (namelen = param_name_len(pattern + i + 1, in_len - (i + 1))) > 0) {
-            extra += 1;
-            i += 1 + (size_t)namelen;
-        } else {
-            i++;
-        }
-    }
-
-    GoBinding* b = malloc(sizeof(*b) + in_len + extra + 1);
+    // Output never exceeds in_len + nparams + 1: each ":name" gains exactly
+    // one byte ("{name}"), while "{name}" passes through and constraints
+    // only shrink the output. One allocation sized for the worst case.
+    GoBinding* b = malloc(sizeof(*b) + in_len + in_len + 1);
     if (!b) {
         return NULL;
     }
     b->magic = GO_BINDING_MAGIC;
     b->go_id = go_id;
 
-    // Second pass: rewrite into the freshly sized buffer.
     size_t o = 0;
     for (size_t i = 0; i < in_len;) {
-        int namelen = 0;
-        if (pattern[i] == ':' && (i == 0 || pattern[i - 1] == '/') &&
-            (namelen = param_name_len(pattern + i + 1, in_len - (i + 1))) > 0) {
+        char ch = pattern[i];
+
+        // Brace style: "{name}" or "{name:constraint}". The C router
+        // accepts any "}"-free name here, so only emptiness is rejected
+        // (":" style below is stricter: its name must be scannable).
+        if (ch == '{') {
+            size_t j = i + 1;
+            while (j < in_len && pattern[j] != '}' && pattern[j] != '{' && pattern[j] != ':') {
+                j++;
+            }
+            if (j >= in_len || pattern[j] == '{') {
+                goto invalid;  // Unclosed "{" or nested "{{".
+            }
+            size_t namelen = j - (i + 1);
+            if (namelen == 0) {
+                goto invalid;  // Empty "{}".
+            }
+            if (pattern[j] == ':') {
+                // Skip the constraint up to the closing brace.
+                size_t k = j + 1;
+                while (k < in_len && pattern[k] != '}') {
+                    if (pattern[k] == '{') {
+                        goto invalid;  // Nested "{" inside constraint.
+                    }
+                    k++;
+                }
+                if (k >= in_len) {
+                    goto invalid;  // Unterminated constraint.
+                }
+                j = k;
+            }
+            // j now points at the closing "}".
+            b->pattern[o++] = '{';
+            memcpy(b->pattern + o, pattern + i + 1, namelen);
+            o += namelen;
+            b->pattern[o++] = '}';
+            i = j + 1;
+        } else if (ch == '}') {
+            goto invalid;  // Stray "}" outside braces.
+        } else if (ch == ':' && (i == 0 || pattern[i - 1] == '/')) {
+            int namelen = param_name_len(pattern + i + 1, in_len - (i + 1));
+            if (namelen <= 0) {
+                goto invalid;  // Bare ":" with no parameter name.
+            }
+            size_t k = i + 1 + (size_t)namelen;
+            if (k < in_len && pattern[k] == '(') {
+                // Skip a balanced "(...)" constraint (not enforceable).
+                int depth = 0;
+                do {
+                    if (pattern[k] == '(') depth++;
+                    else if (pattern[k] == ')') depth--;
+                    k++;
+                } while (k < in_len && depth > 0);
+                if (depth != 0) {
+                    goto invalid;  // Unterminated constraint.
+                }
+            }
             b->pattern[o++] = '{';
             memcpy(b->pattern + o, pattern + i + 1, (size_t)namelen);
             o += (size_t)namelen;
             b->pattern[o++] = '}';
-            i += 1 + (size_t)namelen;
+            i = k;
         } else {
+            // Literal byte, including mid-segment ":" (e.g. "/files/a:b").
             b->pattern[o++] = pattern[i++];
         }
     }
     b->pattern[o] = '\0';
     return b;
+
+invalid:
+    free(b);
+    return NULL;
 }
 
 /**
@@ -165,9 +230,18 @@ void pulsar_c_trampoline(PulsarCtx* ctx) {
  * to route_id via the trampoline.
  *
  * @param method One of the HTTP_* constants from method.h.
- * @param pattern Route pattern using Express-style ":name" path parameters,
- *                e.g. "/users/:id". Normalized internally before being
- *                installed in the C router.
+ * @param pattern Route pattern with ":name" (Express-style) and/or
+ *                "{name}" path parameters, e.g. "/users/:id". Both styles
+ *                are equivalent and normalized to "{name}" before being
+ *                installed in the C router. Regex-style constraints
+ *                (":id(...)" / "{id:...}") are accepted but not enforced:
+ *                they register as plain wildcards, matching the Go-side
+ *                test matcher. Malformed patterns (unclosed/stray/nested
+ *                braces, bare ":", unterminated constraints) are rejected.
+ *                The duplicate check compares normalized patterns, so ":id"
+ *                and "{id}" collide as they should; it covers Go routes
+ *                only — a Go route shadowing a static prefix is resolved by
+ *                the C router's sort order.
  * @param route_id Non-negative identifier the Go side uses to look up the
  *                 corresponding handler chain.
  * @return 0 on success. -1 if route_id is negative, method is invalid, the
@@ -315,7 +389,7 @@ int bridge_get_path_param(PulsarConn* conn, const char* name, size_t name_len,
         if (p->name_len == name_len && p->name && p->value &&
             memcmp(p->name, name, name_len) == 0) {
             *out_data = p->value;
-            *out_len = strlen(p->value);
+            *out_len = p->value_len;
             return 1;
         }
     }
@@ -380,7 +454,7 @@ void bridge_get_path_param_at(PulsarConn* conn, size_t idx, const char** name, s
     *name = p->name;
     *name_len = p->name_len;
     *val = p->value;
-    *val_len = p->value ? strlen(p->value) : 0;
+    *val_len = p->value ? p->value_len : 0;
 }
 
 /**
@@ -526,7 +600,7 @@ int bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_le
         return 0;
     }
     *out_data = route->pattern;
-    *out_len = strlen(route->pattern);
+    *out_len = route->pattern_len;
     return 1;
 }
 
@@ -538,6 +612,62 @@ size_t bridge_content_length(PulsarConn* conn) {
         return 0;
     }
     return conn->request.content_length;
+}
+
+/**
+ * Packs scalar request metadata and collection counts in one call.
+ *
+ * Method and path are NUL-terminated interior pointers; their lengths are
+ * measured once here so the caller can use length-bounded copies instead of
+ * paying strlen again. Route pattern uses the stored pattern_len (never
+ * re-scanned). Body is a direct view into the receive buffer. Counts let
+ * the caller size enumeration loops without extra count calls.
+ *
+ * Returns 1 on success, 0 when conn/out is NULL.
+ */
+int bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out) {
+    if (!conn || !out) {
+        return 0;
+    }
+    const char* method = conn->request.method;
+    const char* path = conn->request.path;
+    out->method = method;
+    out->method_len = method ? strlen(method) : 0;
+    out->path = path;
+    out->path_len = path ? strlen(path) : 0;
+
+    route_t* route = conn->request.route;
+    if (route && route->pattern) {
+        out->route_pattern = route->pattern;
+        out->route_pattern_len = route->pattern_len;
+    } else {
+        out->route_pattern = NULL;
+        out->route_pattern_len = 0;
+    }
+
+    out->body = conn->request.body;
+    out->body_len = conn->request.body ? conn->request.content_length : 0;
+    out->content_length = conn->request.content_length;
+
+    out->nparams = bridge_get_path_params_count(conn);
+    out->nquery = bridge_query_count(conn);
+    out->nheaders = bridge_req_headers_count(conn);
+    return 1;
+}
+
+/**
+ * Appends a pre-formatted header block and optionally marks Content-Type.
+ */
+void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, int content_type_set) {
+    if (!conn) {
+        return;
+    }
+    if (data && len > 0) {
+        conn_writeheader_raw(conn, data, len);
+    }
+    if (content_type_set) {
+        SET_CONTENT_TYPE(conn->response.flags);
+    }
 }
 
 /**
@@ -637,9 +767,9 @@ int bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, siz
         return 0;
     }
     *name = f->name;
-    *name_len = strlen(f->name);
+    *name_len = f->name_len;
     *val = f->value;
-    *val_len = strlen(f->value);
+    *val_len = f->value_len;
     return 1;
 }
 
@@ -659,11 +789,11 @@ int bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, siz
         return 0;
     }
     if (field) *field = fh->field_name;
-    if (field_len) *field_len = fh->field_name ? strlen(fh->field_name) : 0;
+    if (field_len) *field_len = fh->field_name ? fh->field_name_len : 0;
     if (filename) *filename = fh->filename;
-    if (filename_len) *filename_len = fh->filename ? strlen(fh->filename) : 0;
+    if (filename_len) *filename_len = fh->filename ? fh->filename_len : 0;
     if (mimetype) *mimetype = fh->mimetype;
-    if (mimetype_len) *mimetype_len = fh->mimetype ? strlen(fh->mimetype) : 0;
+    if (mimetype_len) *mimetype_len = fh->mimetype ? fh->mimetype_len : 0;
     if (offset) *offset = fh->offset;
     if (size) *size = fh->size;
     return 1;
