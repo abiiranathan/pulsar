@@ -16,9 +16,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -34,13 +38,13 @@ var (
 	// now" rather than "append to the body".
 	ErrResponseAlreadyWritten = errors.New("pulsar: response already committed")
 
-	// activeEngineMu guards activeEngine.
-	activeEngineMu sync.Mutex
-
 	// activeEngine is the process-wide Engine instance reachable from the cgo
 	// dispatch trampoline. Pulsar supports exactly one running Engine per
-	// process; Listen sets this before entering the C event loop.
-	activeEngine *Engine
+	// process; Listen stores this before entering the C event loop. An
+	// atomic.Pointer gives goPulsarDispatcher's read a happens-before
+	// relationship with Listen's store without needing a mutex for what is
+	// otherwise a publish-once, read-many value.
+	activeEngine atomic.Pointer[Engine]
 
 	// zeroByte backs zero-length buffers passed across cgo. Taking the address
 	// of a zero-length Go slice's data pointer is not guaranteed safe to pass
@@ -138,6 +142,19 @@ type Context struct {
 	store  map[string]any
 	ctx    context.Context
 
+	// Standalone (net/http) mode state. When conn == nil the Context is
+	// detached from the C engine (see NewTestContext and ToHTTPHandler) and
+	// every accessor below falls back to these Go-owned fields instead of
+	// crossing into C, so Pulsar handlers can run under net/http/httptest
+	// without a live server.
+	reqHeaders  http.Header // Request headers for conn == nil mode.
+	queryVals   map[string][]string
+	respHeaders http.Header // Response headers staged for conn == nil mode.
+	routePat    string      // Matched route pattern for conn == nil mode.
+	abortedFlag bool        // Abort flag for conn == nil mode.
+	serveFile   bool        // True once ServeFile set up a file response; flush skips conn_send.
+	redirected  bool        // True once Redirect dispatched; flush skips conn_send.
+
 	// Lazily parsed request bodies. form caches the multipart parse
 	// (freed automatically when the request completes); formErr caches
 	// a parse failure so it is not retried. postForm caches the
@@ -194,11 +211,18 @@ func (c *Context) Next() error {
 // currently executing handler; callers should return promptly after calling
 // Abort.
 func (c *Context) Abort() {
+	if c.conn == nil {
+		c.abortedFlag = true
+		return
+	}
 	C.conn_abort(c.conn)
 }
 
 // Aborted reports whether Abort has been called for this request.
 func (c *Context) Aborted() bool {
+	if c.conn == nil {
+		return c.abortedFlag
+	}
 	return C.bridge_is_aborted(c.conn) != 0
 }
 
@@ -210,7 +234,7 @@ func (c *Context) ResponseWritten() bool {
 
 // Method returns the request's HTTP method, e.g. "GET".
 func (c *Context) Method() string {
-	if c.method == "" {
+	if c.method == "" && c.conn != nil {
 		c.method = C.GoString(C.req_method(c.conn))
 	}
 	return c.method
@@ -218,7 +242,7 @@ func (c *Context) Method() string {
 
 // Path returns the request's URL path.
 func (c *Context) Path() string {
-	if c.path == "" {
+	if c.path == "" && c.conn != nil {
 		c.path = C.GoString(C.req_path(c.conn))
 	}
 	return c.path
@@ -237,6 +261,9 @@ func (c *Context) Param(name string) string {
 	}
 	if c.params != nil {
 		return c.params[name]
+	}
+	if c.conn == nil {
+		return ""
 	}
 	var cData *C.char
 	var cLen C.size_t
@@ -258,6 +285,9 @@ func (c *Context) Param(name string) string {
 func (c *Context) Params() map[string]string {
 	if c.params != nil {
 		return c.params
+	}
+	if c.conn == nil {
+		return nil
 	}
 	count := int(C.bridge_get_path_params_count(c.conn))
 	if count == 0 {
@@ -285,6 +315,16 @@ func (c *Context) Query(name string) string {
 	if name == "" {
 		return ""
 	}
+	if c.conn == nil {
+		if c.queryVals == nil {
+			return ""
+		}
+		vals := c.queryVals[name]
+		if len(vals) == 0 {
+			return ""
+		}
+		return vals[0]
+	}
 	var cData *C.char
 	var cLen C.size_t
 	if C.bridge_query_get(
@@ -307,6 +347,12 @@ func (c *Context) Query(name string) string {
 func (c *Context) Header(name string) string {
 	if name == "" {
 		return ""
+	}
+	if c.conn == nil {
+		if c.reqHeaders == nil {
+			return ""
+		}
+		return c.reqHeaders.Get(name)
 	}
 	var cData *C.char
 	var cLen C.size_t
@@ -341,6 +387,9 @@ func (c *Context) ParamView(name string) string {
 	if name == "" {
 		return ""
 	}
+	if c.conn == nil {
+		return c.Param(name)
+	}
 	var cData *C.char
 	var cLen C.size_t
 	if C.bridge_get_path_param(
@@ -363,6 +412,9 @@ func (c *Context) QueryView(name string) string {
 	if name == "" {
 		return ""
 	}
+	if c.conn == nil {
+		return c.Query(name)
+	}
 	var cData *C.char
 	var cLen C.size_t
 	if C.bridge_query_get(
@@ -384,6 +436,9 @@ func (c *Context) HeaderView(name string) string {
 	if name == "" {
 		return ""
 	}
+	if c.conn == nil {
+		return c.Header(name)
+	}
 	var cData *C.char
 	var cLen C.size_t
 	if C.bridge_req_header_get(
@@ -402,6 +457,18 @@ func (c *Context) HeaderView(name string) string {
 // (zero-copy) and are valid only for the current request; copy them to
 // retain. Returns nil when the URL carries no query string.
 func (c *Context) Queries() map[string]string {
+	if c.conn == nil {
+		if len(c.queryVals) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(c.queryVals))
+		for k, vals := range c.queryVals {
+			if len(vals) > 0 {
+				out[k] = vals[0]
+			}
+		}
+		return out
+	}
 	count := int(C.bridge_query_count(c.conn))
 	if count == 0 {
 		return nil
@@ -422,6 +489,16 @@ func (c *Context) Queries() map[string]string {
 // (zero-copy) and are valid only for the current request; copy them to
 // retain. Returns nil when the request carries no headers.
 func (c *Context) Headers() map[string]string {
+	if c.conn == nil {
+		if len(c.reqHeaders) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(c.reqHeaders))
+		for k := range c.reqHeaders {
+			out[k] = c.reqHeaders.Get(k)
+		}
+		return out
+	}
 	count := int(C.bridge_req_headers_count(c.conn))
 	if count == 0 {
 		return nil
@@ -453,6 +530,9 @@ func (c *Context) ContentTypeView() string {
 // ContentLength returns the request's Content-Length in bytes, or 0 when
 // the request has no body.
 func (c *Context) ContentLength() int {
+	if c.conn == nil {
+		return len(c.body)
+	}
 	return int(C.bridge_content_length(c.conn))
 }
 
@@ -461,6 +541,9 @@ func (c *Context) ContentLength() int {
 // lifetime on the C side, so the returned view stays valid beyond the
 // request; it is returned as a zero-copy view regardless.
 func (c *Context) RoutePattern() string {
+	if c.conn == nil {
+		return c.routePat
+	}
 	var cData *C.char
 	var cLen C.size_t
 	if C.bridge_route_pattern(c.conn, &cData, &cLen) == 0 {
@@ -476,6 +559,9 @@ func (c *Context) RoutePattern() string {
 func (c *Context) Body() []byte {
 	if c.body != nil {
 		return c.body
+	}
+	if c.conn == nil {
+		return nil
 	}
 	slice := C.req_body_slice(c.conn)
 	if slice.data == nil || slice.len == 0 {
@@ -540,6 +626,19 @@ func (c *Context) SetHeader(key, value string) *Context {
 	if key == "" {
 		return c
 	}
+	if c.conn == nil {
+		if c.respHeaders == nil {
+			c.respHeaders = make(http.Header)
+		}
+		c.respHeaders.Set(key, value)
+		return c
+	}
+	// Mirror into respHeaders as well so WrapMiddleware can observe and
+	// forward staged headers without reading them back from C.
+	if c.respHeaders == nil {
+		c.respHeaders = make(http.Header)
+	}
+	c.respHeaders.Set(key, value)
 	kSlice := C.StrSlice{data: (*C.char)(strPtr(key)), len: C.size_t(len(key))}
 	vSlice := C.StrSlice{data: (*C.char)(strPtr(value)), len: C.size_t(len(value))}
 	C.conn_writeheader(c.conn, kSlice, vSlice)
@@ -611,7 +710,11 @@ func (c *Context) JSON(status int, v any) error {
 	c.SetHeader("Content-Type", "application/json")
 	c.status = status
 	c.written = true
-	c.buf = append(c.buf, data...)
+	if len(c.buf) == 0 {
+		c.buf = data // zero-copy adoption of the marshaled buffer
+	} else {
+		c.buf = append(c.buf, data...)
+	}
 	return nil
 }
 
@@ -629,8 +732,25 @@ func (c *Context) ServeFile(filename string) error {
 		return ErrResponseAlreadyWritten
 	}
 
+	if c.conn == nil {
+		data, err := os.ReadFile(filename)
+		if err != nil {
+			return fmt.Errorf("pulsar: serve file: could not open %s", filename)
+		}
+		if ct := mime.TypeByExtension(filepath.Ext(filename)); ct != "" {
+			c.SetHeader("Content-Type", ct)
+		} else if len(data) > 0 {
+			c.SetHeader("Content-Type", http.DetectContentType(data))
+		}
+		c.status = http.StatusOK
+		c.written = true
+		c.buf = append(c.buf, data...)
+		return nil
+	}
+
 	c.status = http.StatusOK
 	c.written = true
+	c.serveFile = true
 	cFile := C.CString(filename)
 	defer C.free(unsafe.Pointer(cFile))
 
@@ -664,7 +784,11 @@ func (c *Context) Send(status int, data []byte) error {
 	}
 	c.status = status
 	c.written = true
-	c.buf = append(c.buf, data...)
+	if len(c.buf) == 0 {
+		c.buf = data // zero-copy adoption
+	} else {
+		c.buf = append(c.buf, data...)
+	}
 	return nil
 }
 
@@ -680,21 +804,24 @@ func (c *Context) NoContent(status int) error {
 	return nil
 }
 
-// Redirect sends an HTTP redirect to location. status must be a 3xx code;
-// StatusMovedPermanently and StatusPermanentRedirect are sent as permanent
-// redirects. Redirect bypasses the buffered body path and is dispatched to
-// C immediately, since a redirect carries no body of its own. Returns
-// ErrResponseAlreadyWritten if a response has already been committed for
-// this request.
+// Redirect sends an HTTP redirect to location. status should be a 3xx code
+// and is sent verbatim (301, 302, 303, 307 and 308 are all preserved), with
+// the Location header staged alongside it. The redirect travels the normal
+// buffered path — headers staged via SetHeader plus an empty body — and is
+// flushed once the handler chain completes, so any 3xx status round-trips
+// exactly. Returns ErrResponseAlreadyWritten if a response has already been
+// committed for this request.
 func (c *Context) Redirect(status int, location string) error {
 	if c.written {
 		return ErrResponseAlreadyWritten
 	}
+	if status == 0 {
+		status = http.StatusFound
+	}
+	c.SetHeader("Location", location)
+	c.status = status
 	c.written = true
-	cLoc := C.CString(location)
-	defer C.free(unsafe.Pointer(cLoc))
-	permanent := status == http.StatusMovedPermanently || status == http.StatusPermanentRedirect
-	C.conn_send_redirect(c.conn, cLoc, C.bool(permanent))
+	c.redirected = true
 	return nil
 }
 
@@ -703,11 +830,21 @@ func (c *Context) Redirect(status int, location string) error {
 // of the single-shot response methods. It is invoked once by the Engine
 // after the handler chain completes; handlers must not call it directly.
 //
-// flush is a no-op if no response was committed (c.written is false) or if
-// Redirect already dispatched its own response, since Redirect sets
-// c.written without populating c.buf or c.status via the buffered path.
+// flush is a no-op if no response was committed (c.written is false), if
+// the Context is detached from C (conn == nil, see NewTestContext), or if
+// ServeFile set up a sendfile response: the file descriptor, status
+// (including 206 for range requests) and headers already live on the C
+// side, and a conn_send here would overwrite the status with the Go-side
+// placeholder. Redirect travels the normal buffered path (Location header
+// plus status, empty body) and IS flushed here.
 func (c *Context) flush() {
+	if c.conn == nil {
+		return
+	}
 	if !c.written {
+		return
+	}
+	if c.serveFile {
 		return
 	}
 	C.conn_send(c.conn, C.http_status(c.status), bytesPtr(c.buf), C.size_t(len(c.buf)))
@@ -741,13 +878,75 @@ type Engine struct {
 	middleware   []HandlerFunc   // Global middleware, applied to every route registered from this point on.
 	chains       [][]HandlerFunc // Per-route handler chains, indexed by routeID.
 	errorHandler ErrorHandler    // Invoked when a handler in the chain returns an error.
+	pool         sync.Pool
 }
 
 // New creates an Engine with DefaultErrorHandler installed.
 func New() *Engine {
-	return &Engine{
+	e := &Engine{
 		errorHandler: DefaultErrorHandler,
 	}
+	e.pool.New = func() any {
+		return &Context{
+			index: -1,
+			buf:   make([]byte, 0, 1024),
+		}
+	}
+	return e
+}
+
+func (e *Engine) acquireContext(connPtr unsafe.Pointer, routeID int) *Context {
+	c := e.pool.Get().(*Context)
+	c.conn = (*C.PulsarConn)(connPtr)
+	c.engine = e
+	c.chain = e.chains[routeID]
+	c.index = -1
+	return c
+}
+
+func (e *Engine) releaseContext(c *Context) {
+	c.closeForm()
+	c.reset()
+	e.pool.Put(c)
+}
+
+func (c *Context) reset() {
+	c.conn = nil
+	c.engine = nil
+	c.chain = nil
+	c.index = -1
+	c.status = 0
+	c.written = false
+
+	// Retain buffer capacity: avoids reallocating on subsequent requests
+	// Cap maximum retained buffer to prevent unbounded memory retention from large one-off responses
+	if cap(c.buf) > 64*1024 {
+		c.buf = make([]byte, 0, 1024)
+	} else {
+		c.buf = c.buf[:0]
+	}
+
+	c.method = ""
+	c.path = ""
+	c.body = nil
+
+	// Builtin clear() empties maps while retaining allocated hash buckets!
+	clear(c.params)
+	clear(c.store)
+	c.ctx = nil
+
+	clear(c.reqHeaders)
+	clear(c.queryVals)
+	clear(c.respHeaders)
+	c.routePat = ""
+	c.abortedFlag = false
+	c.serveFile = false
+	c.redirected = false
+
+	c.form = nil
+	c.formErr = nil
+	c.postForm = nil
+	c.postFormParsed = false
 }
 
 // SetErrorHandler installs a custom ErrorHandler, replacing
@@ -872,16 +1071,11 @@ func (e *Engine) dispatch(connPtr unsafe.Pointer, routeID int) {
 		return
 	}
 
-	ctx := Context{
-		conn:   (*C.PulsarConn)(connPtr),
-		engine: e,
-		chain:  e.chains[routeID],
-		index:  -1,
-	}
-	defer ctx.closeForm()
+	ctx := e.acquireContext(connPtr, routeID)
+	defer e.releaseContext(ctx)
 
 	if err := ctx.Next(); err != nil {
-		e.errorHandler(err, &ctx)
+		e.errorHandler(err, ctx)
 	}
 
 	ctx.flush()
@@ -1006,9 +1200,7 @@ func SetLogger(fd int) {
 // blocking until the server stops. Returns an error if the event loop exits
 // with a non-zero status.
 func (e *Engine) Listen(addr string, port int) error {
-	activeEngineMu.Lock()
-	activeEngine = e
-	activeEngineMu.Unlock()
+	activeEngine.Store(e)
 
 	cAddr := C.CString(addr)
 	defer C.free(unsafe.Pointer(cAddr))

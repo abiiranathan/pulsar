@@ -169,6 +169,9 @@ func (c *Context) MultipartForm() (*Form, error) {
 	if c.formErr != nil {
 		return nil, c.formErr
 	}
+	if c.conn == nil {
+		return c.multipartFormStandalone()
+	}
 	var raw *C.MultipartForm
 	var code C.int
 	var cmsg *C.char
