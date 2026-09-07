@@ -33,7 +33,7 @@ ALIGN(64) uint64_t g_wall_base_ns = 0;
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
 
 /* High-speed thread-local static read buffer (kept permanently in L1 cache) */
-static __thread char static_read_buf[READ_BUFFER_SIZE];
+alignas(64) static __thread char static_read_buf[READ_BUFFER_SIZE];
 
 typedef struct ALIGN(64) KeepAliveState {
     PulsarConn* head;
@@ -43,9 +43,9 @@ typedef struct ALIGN(64) KeepAliveState {
 
 /* Forward Declarations */
 INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
-INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
 INLINE void free_response_body(response_t* resp);
 INLINE void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state);
+INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
 INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state);
 
 /* ================================================================
@@ -305,7 +305,7 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     return true;
 }
 
-INLINE bool reset_connection(PulsarConn* conn) {
+static bool reset_connection(PulsarConn* conn) {
     conn->closing = false;
     conn->keep_alive = true;
     conn->abort = false;
@@ -370,88 +370,86 @@ INLINE void write_error(PulsarConn* conn, http_status status) {
     finalize_response(conn, conn->request.method_type);
 }
 
-/* ================================================================
- * Zero-Branch AVX2 Header End Search
- * ================================================================ */
-#if defined(__AVX2__)
-alignas(32) static const uint8_t HDR_CR_PAT[32] = {
-    '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r',
-    '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r', '\r'};
-alignas(32) static const uint8_t HDR_LF_PAT[32] = {
-    '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n',
-    '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n', '\n'};
-#endif
-
+/*
+ * Finds the FIRST occurrence of "\r\n\r\n" (0x0a0d0a0d in LE).
+ * Returns pointer to the start of "\r\n\r\n", or NULL if not found.
+ * Do not INLINE to avoid SIMD register spills in the caller.
+ */
 INLINE const char* find_headers_end(const char* buf, size_t len) {
     if (unlikely(len < 4)) return NULL;
+    const char* const end = buf + len - 3;
 
-    const char* end = buf + len;
-    uint32_t tail;
-    memcpy(&tail, end - 4, 4);
-    if (likely(tail == UINT32_C(0x0a0d0a0d))) return end - 4;
+    for (const char* p = buf; p < end; p++) {
+        p = (const char*)memchr(p, '\r', (size_t)(end - p));
+        if (!p) return NULL;
 
-    const char* p = buf;
-
-#if defined(__AVX2__)
-    const __m256i r_vec = _mm256_load_si256((const __m256i*)HDR_CR_PAT);
-    const __m256i n_vec = _mm256_load_si256((const __m256i*)HDR_LF_PAT);
-
-    uint32_t prev_r = 0;
-    uint32_t prev_n = 0;
-
-    while (p + 32 <= end) {
-        __m256i v = _mm256_loadu_si256((const __m256i*)p);
-        uint32_t mask_r = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, r_vec));
-        uint32_t mask_n = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, n_vec));
-
-        uint64_t full_r = ((uint64_t)mask_r << 3) | prev_r;
-        uint64_t full_n = ((uint64_t)mask_n << 3) | prev_n;
-
-        uint64_t match = full_r & (full_n >> 1) & (full_r >> 2) & (full_n >> 3);
-        uint32_t match32 = (uint32_t)(match >> 3);
-
-        if (match32) {
-            int idx = __builtin_ctz(match32);
-            return p + idx;
-        }
-
-        prev_r = mask_r >> 29;
-        prev_n = mask_n >> 29;
-        p += 32;
-    }
-#endif
-
-    const char* scalar_end = end - 3;
-    const char* sp = (p > buf + 3) ? p - 3 : buf;
-    const char* unrolled_end = sp + ((size_t)(scalar_end - sp) & ~(size_t)3);
-    while (sp < unrolled_end) {
-        uint32_t v0, v1, v2, v3;
-        memcpy(&v0, sp + 0, 4);
-        memcpy(&v1, sp + 1, 4);
-        memcpy(&v2, sp + 2, 4);
-        memcpy(&v3, sp + 3, 4);
-        if (v0 == UINT32_C(0x0a0d0a0d)) return sp + 0;
-        if (v1 == UINT32_C(0x0a0d0a0d)) return sp + 1;
-        if (v2 == UINT32_C(0x0a0d0a0d)) return sp + 2;
-        if (v3 == UINT32_C(0x0a0d0a0d)) return sp + 3;
-        sp += 4;
-    }
-    while (sp < scalar_end) {
         uint32_t v;
-        memcpy(&v, sp, 4);
-        if (v == UINT32_C(0x0a0d0a0d)) return sp;
-        sp++;
+        memcpy(&v, p, 4);
+        if (v == UINT32_C(0x0a0d0a0d)) return p;
     }
+
     return NULL;
+}
+
+static const uint64_t POW10[9] = {1ULL,      10ULL,      100ULL,      1000ULL,     10000ULL,
+                                  100000ULL, 1000000ULL, 10000000ULL, 100000000ULL};
+
+/*
+ * Parses between 1 and 8 ASCII digits simultaneously in GPR registers.
+ * Zero branches, zero loops, executes in ~7 cycles.
+ */
+INLINE uint64_t parse_up_to_8_digits(uint64_t v, int k) {
+    v -= 0x3030303030303030ULL;
+    v <<= (8 - k) * 8;  // Align digits to MSB, trailing bytes become zero
+
+    // Step 1: Combine pairs (2-digit numbers)
+    v = (v * 10) + (v >> 8);
+
+    // Step 2: Combine quads (4-digit numbers)
+    uint64_t t = v & 0x00FF00FF00FF00FFULL;
+    v = (t * 100) + (t >> 16);
+
+    // Step 3: Combine into final decimal value (8-digit number)
+    v &= 0x0000FFFF0000FFFFULL;
+    v = (v * 10000) + (v >> 32);
+
+    return (uint32_t)v;
 }
 
 INLINE uint64_t fast_atou64(const char* str, size_t len) {
     uint64_t val = 0;
-    for (size_t i = 0; i < len; i++) {
-        uint8_t c = (uint8_t)(str[i] - '0');
-        if (c > 9) break;
-        val = val * 10 + c;
+
+    while (len > 0) {
+        uint64_t v = 0;
+
+        // Fast path: load 8 bytes in a single 64-bit load
+        if (likely(len >= 8)) {
+            memcpy(&v, str, 8);
+        } else {
+            // Buffer boundary safe: copy only remaining bytes
+            memcpy(&v, str, len);
+        }
+
+        // SWAR validation: determine which bytes are '0'..'9'
+        uint64_t t1 = v - 0x3030303030303030ULL;
+        uint64_t t2 = v + 0x4646464646464646ULL;
+        uint64_t mask = (t1 | t2) & 0x8080808080808080ULL;
+
+        // Find count of consecutive digits (0 to 8) without any loop
+        int digits = mask ? (__builtin_ctzll(mask) >> 3) : 8;
+        if (digits > (int)len) digits = (int)len;
+
+        if (unlikely(digits == 0)) break;
+
+        uint64_t chunk = parse_up_to_8_digits(v, digits);
+        val = val * POW10[digits] + chunk;
+
+        if (digits < 8) break;  // Reached a non-digit delimiter (e.g. '\r', ' ', '\n')
+
+        str += 8;
+        len -= 8;
     }
+
     return val;
 }
 
@@ -1783,12 +1781,19 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
         exit(EXIT_FAILURE);
     }
 
-    int fd = -1, opt = 1;
+    int fd = -1;
+    const int opt = 1;
+
     for (rp = result; rp; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        // Create non-blocking and close-on-exec atomically (zero fcntl syscalls)
+        fd = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, rp->ai_protocol);
         if (fd == -1) continue;
-        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+
+        // Separate calls for REUSEADDR and REUSEPORT
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0 ||
+            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
             sys_close_direct(fd);
+            fd = -1;
             continue;
         }
 
@@ -1800,6 +1805,7 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
 #endif
 
         if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+
         sys_close_direct(fd);
         fd = -1;
     }
@@ -1810,22 +1816,25 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
         exit(EXIT_FAILURE);
     }
 
-    int yes = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
-    int rcv = 256 * 1024, snd = 256 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+    // Keepalive on listener
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
 
-#ifdef __linux__
+    // TCP_DEFER_ACCEPT: Do not wake up epoll until HTTP request data arrives!
     int defer = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof(defer));
 
-    int cpu = worker_cpu_id;
-    setsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, sizeof(cpu));
-#endif
+    // TCP_FASTOPEN: Accept data in the SYN packet
+    int fastopen_qlen = 1024;
+    setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &fastopen_qlen, sizeof(fastopen_qlen));
 
-    if (listen(fd, SOMAXCONN) < 0) {
+    // Bind kernel packet processing directly to this worker's CPU core
+    if (worker_cpu_id >= 0) {
+        int cpu = worker_cpu_id;
+        setsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, sizeof(cpu));
+    }
+
+    // Maximum backlog.
+    if (listen(fd, 65535) < 0) {
         perror("listen");
         sys_close_direct(fd);
         exit(EXIT_FAILURE);
@@ -1834,51 +1843,17 @@ static int create_server_socket(const char* host, int port, int worker_cpu_id) {
 }
 
 INLINE int conn_accept(int listen_fd) {
-    (void)listen_fd;
-    struct sockaddr_in addr;
-    socklen_t addr_len = sizeof(addr);
-
-    int client_fd = raw_accept4(listen_fd, (struct sockaddr*)&addr, &addr_len, SOCK_NONBLOCK);
-    if (client_fd < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) perror("accept");
+    // Pass NULL, NULL so the kernel skips copying peer address structures.
+    // Set both SOCK_NONBLOCK and SOCK_CLOEXEC atomically.
+    int client_fd = raw_accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (unlikely(client_fd < 0)) {
         return -1;
     }
 
-#ifndef __linux__
-    set_nonblocking(client_fd);
-#endif
-
-    struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    int yes = 1;
-#ifdef __linux__
-    setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
-    unsigned int uto = 60000;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &uto, sizeof(uto));
-    int ka_idle = 120, ka_intvl = 15, ka_cnt = 3;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &ka_idle, sizeof(ka_idle));
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &ka_cnt, sizeof(ka_cnt));
-#endif
-
-#if defined(__APPLE__) || defined(__FreeBSD__)
-    setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NOPUSH, &yes, sizeof(yes));
-#ifdef TCP_KEEPIDLE
-    int ka_idle = 120;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &ka_idle, sizeof(ka_idle));
-#endif
-#ifdef TCP_KEEPINTVL
-    int ka_iv = 15;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_iv, sizeof(ka_iv));
-#endif
-#ifdef TCP_KEEPCNT
-    int ka_cnt = 3;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &ka_cnt, sizeof(ka_cnt));
-#endif
-#endif
+    // The ONLY socket option that matters for HTTP performance:
+    // Disables Nagle's algorithm so small HTTP responses flush immediately.
+    const int yes = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
 
     return client_fd;
 }
@@ -1926,26 +1901,29 @@ static void add_connection_to_worker(event_queue_t* queue, int client_fd, int wo
 }
 
 /* ================================================================
- * handle_read (Directly into static_read_buf)
+ * handle_read (Zero-TLS Lookup via base_buf parameter)
  * ================================================================ */
-static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
+INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state,
+                        char* base_buf) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
         conn->start = pulsar_now_ns();
     }
 #endif
 
-    char* target_buf = static_read_buf;
     size_t pending = conn->pending_len;
-    size_t max_read = sizeof(static_read_buf) - 1;
+    size_t max_read = sizeof(static_read_buf) - 1; /* compile-time constant */
+    char* read_ptr = base_buf;
 
+    // Restore unparsed tail from previous event directly into base_buf
     if (unlikely(pending > 0)) {
-        memcpy(static_read_buf, conn->pending_buf, pending);
-        target_buf += pending;
+        memcpy(base_buf, conn->pending_buf, pending);
+        read_ptr += pending;
         max_read -= pending;
     }
 
-    ssize_t bytes_read = sys_read_direct(conn->client_fd, target_buf, max_read);
+    // Read from socket directly into the offset
+    ssize_t bytes_read = sys_read_direct(conn->client_fd, read_ptr, max_read);
     if (bytes_read < 0 && (bytes_read == -EAGAIN || bytes_read == -EWOULDBLOCK)) return;
     if (bytes_read <= 0) {
         conn->closing = true;
@@ -1953,38 +1931,57 @@ static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
     }
 
     size_t total = pending + (size_t)bytes_read;
-    static_read_buf[total] = '\0';
-    conn->read_buf = static_read_buf;
+    conn->read_buf = base_buf;
 
-    const char* end_of_headers = find_headers_end(static_read_buf, total);
-    if (!end_of_headers) {
-        if (total == sizeof(static_read_buf) - 1) {
-            conn->closing = true;
-            return;
+    // Pipelining loop: process all back-to-back requests in base_buf
+    size_t offset = 0;
+    while (offset < total) {
+        size_t available = total - offset;
+        const char* cur_buf = base_buf + offset;
+
+        const char* end_of_headers = find_headers_end(cur_buf, available);
+        if (!end_of_headers) {
+            // Incomplete headers: need more network data
+            break;
         }
-        memcpy(conn->pending_buf, static_read_buf, total);
-        conn->pending_len = total;
-        return;
+
+        size_t consumed = 0;
+        http_status status =
+            process_request(conn, cur_buf, available, end_of_headers, &consumed, state, queue);
+        if (status != StatusOK) {
+            write_error(conn, status);
+        }
+
+        if (conn->offloaded) return;
+
+        // Only trigger write if a response was actually produced
+        if (conn->response.out_len > 0 || conn->response.file_fd > 0) {
+            handle_write(queue, conn, state);
+            if (conn->closing) return;
+
+            // If socket buffer filled up (EAGAIN), pause processing pipelined requests
+            if (HAS_WRITE_PENDING(conn->response.flags)) {
+                offset += consumed;
+                break;
+            }
+        }
+
+        // If process_request consumed 0 bytes (e.g. waiting for full body), stop
+        if (consumed == 0) {
+            break;
+        }
+
+        offset += consumed;
     }
 
-    size_t consumed = 0;
-    http_status status =
-        process_request(conn, static_read_buf, total, end_of_headers, &consumed, state, queue);
-    if (status != StatusOK) {
-        write_error(conn, status);
-    }
-
-    if (conn->offloaded) return;
-
-    handle_write(queue, conn, state);
-    if (conn->closing) return;
-
-    if (consumed < total) {
-        size_t leftover = total - consumed;
-        if (leftover < sizeof(conn->pending_buf)) {
-            memcpy(conn->pending_buf, static_read_buf + consumed, leftover);
+    // Save any incomplete trailing fragment for the next read
+    size_t leftover = total - offset;
+    if (leftover > 0) {
+        if (likely(leftover < sizeof(conn->pending_buf))) {
+            memcpy(conn->pending_buf, base_buf + offset, leftover);
             conn->pending_len = leftover;
         } else {
+            // Header or part exceeded pending buffer capacity
             conn->closing = true;
         }
     } else {
@@ -1992,10 +1989,86 @@ static void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
     }
 }
 
+/* Forward declaration for complex/slow fallback */
+INLINE void handle_write_slow(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
+
 /* ================================================================
- * handle_write (Single Syscall directly from res->buf)
+ * handle_write (Fast-Path Zero-Store Dispatcher)
  * ================================================================ */
-static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
+INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
+    response_t* res = &conn->response;
+    const uint8_t flags = res->flags;
+
+    // =========================================================================
+    // FAST PATH: Small/Medium Contiguous In-Memory Buffer (99.9% of HTTP traffic)
+    // =========================================================================
+    if (likely((flags & (HTTP_HEAP_ALLOCATED | HTTP_RANGE_REQUEST)) == 0 && res->file_fd <= 0)) {
+        const uint32_t out_len = res->out_len;
+        const uint32_t out_sent = res->out_sent;
+        const uint32_t to_send = out_len - out_sent;
+
+        ssize_t sent = sys_write_direct(conn->client_fd, res->buf + out_sent, to_send);
+
+        // 1Common Case: Response 100% written in 1 syscall!
+        if (likely(sent == (ssize_t)to_send)) {
+            // DO NOT store to res->out_sent! It is discarded in reset_connection.
+            request_complete(conn);
+
+            const bool was_pending = HAS_WRITE_PENDING(flags);
+            CLR_WRITE_PENDING(res->flags);
+
+            if (likely(conn->keep_alive)) {
+                AddKeepAliveConnection(conn, state);
+                if (unlikely(!reset_connection(conn))) {
+                    conn->closing = true;
+                    return;
+                }
+                if (unlikely(was_pending)) {
+                    if (event_mod_read(queue, conn->client_fd, conn) < 0) {
+                        conn->closing = true;
+                    }
+                }
+            } else {
+                conn->closing = true;
+            }
+            return;
+        }
+
+        // Partial write: Socket buffer filled up partially
+        if (sent > 0) {
+            res->out_sent = out_sent + (uint32_t)sent;
+            SET_WRITE_PENDING(res->flags);
+            if (event_mod_write(queue, conn->client_fd, conn) < 0) {
+                conn->closing = true;
+            }
+            return;
+        }
+
+        // Socket buffer completely full (EAGAIN / EWOULDBLOCK)
+        if (sent < 0 && (sent == -EAGAIN || sent == -EWOULDBLOCK)) {
+            SET_WRITE_PENDING(res->flags);
+            if (event_mod_write(queue, conn->client_fd, conn) < 0) {
+                conn->closing = true;
+            }
+            return;
+        }
+
+        // Socket error (EPIPE, ECONNRESET, etc.)
+        conn->closing = true;
+        request_complete(conn);
+        return;
+    }
+
+    // =========================================================================
+    // SLOW PATH: sendfile() & writev() for Heap Buffers
+    // =========================================================================
+    handle_write_slow(queue, conn, state);
+}
+
+/* ================================================================
+ * handle_write_slow: Isolated to keep handle_write L1i-cache tiny
+ * ================================================================ */
+INLINE void handle_write_slow(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state) {
     response_t* res = &conn->response;
     int client_fd = conn->client_fd;
     const bool sending_file = res->file_fd > 0 && res->file_size > 0;
@@ -2047,15 +2120,6 @@ static void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState*
                 }
                 complete = (res->file_offset >= send_end);
             }
-        } else if (likely(!HAS_HEAP_ALLOCATED(res->flags) && res->out_len > 0)) {
-            /* Fast Path: 1 single syscall directly from pre-formatted contiguous single buffer */
-            sent =
-                sys_write_direct(client_fd, res->buf + res->out_sent, res->out_len - res->out_sent);
-            if (unlikely(sent < 0)) goto handle_error;
-            if (sent == 0) return;
-
-            res->out_sent += (uint32_t)sent;
-            complete = (res->out_sent == res->out_len);
         } else {
             /* Large body fallback: Header in res->buf + Heap Body */
             struct iovec iov[2];
@@ -2167,6 +2231,9 @@ void* worker_thread(void* arg) {
     int listen_fd = worker->listen_fd;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
+    // Cache the thread-local buffer pointer ONCE:
+    char* const read_buf = static_read_buf;
+
     if (event_add_server(queue, listen_fd) < 0) {
         perror("event_add_server");
         return NULL;
@@ -2175,6 +2242,7 @@ void* worker_thread(void* arg) {
     event_t events[MAX_EVENTS] = {0};
     time_t last_timeout_check = 0;
     time_t last_sync_time = 0;
+    int loop_counter = 0;
 
     while (server_running) {
         int n = event_wait(queue, events, MAX_EVENTS, 500);
@@ -2184,17 +2252,20 @@ void* worker_thread(void* arg) {
             continue;
         }
 
-        time_t wall_now = pulsar_wall_sec();
-        time_t mono_now = pulsar_mono_sec();
+        if (unlikely(++loop_counter >= 128)) {
+            loop_counter = 0;
+            time_t wall_now = pulsar_wall_sec();
+            time_t mono_now = pulsar_mono_sec();
 
-        if (wall_now != last_sync_time) {
-            last_sync_time = wall_now;
-            try_update_date_header(wall_now);
-        }
+            if (wall_now != last_sync_time) {
+                last_sync_time = wall_now;
+                try_update_date_header(wall_now);
+            }
 
-        if (mono_now - last_timeout_check >= 5) {
-            CheckKeepAliveTimeouts(ka_state, queue);
-            last_timeout_check = mono_now;
+            if (mono_now - last_timeout_check >= 5) {
+                CheckKeepAliveTimeouts(ka_state, queue);
+                last_timeout_check = mono_now;
+            }
         }
 
         for (int i = 0; i < n; i++) {
@@ -2212,7 +2283,7 @@ void* worker_thread(void* arg) {
                 }
             } else {
                 if (likely(ev->readable))
-                    handle_read(queue, conn, ka_state);
+                    handle_read(queue, conn, ka_state, read_buf);
                 else if (ev->writable)
                     handle_write(queue, conn, ka_state);
                 else if (ev->error)

@@ -30,7 +30,7 @@
 
 // Buffer size for incoming request excluding body.
 #ifndef READ_BUFFER_SIZE
-#define READ_BUFFER_SIZE 2048
+#define READ_BUFFER_SIZE 4096
 #endif
 
 // Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
