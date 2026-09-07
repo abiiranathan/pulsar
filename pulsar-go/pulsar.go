@@ -1369,17 +1369,6 @@ func (e *Engine) Listen(addr string, port int) error {
 // Utilities
 // ----------------------------------------------------------------
 
-// strPtr returns a pointer suitable for passing s's bytes to C without a
-// copy. For an empty string it returns a pointer to a shared zero byte
-// rather than a nil or dangling pointer, since C call sites pass the
-// corresponding length (0) alongside it and never dereference it.
-func strPtr(s string) unsafe.Pointer {
-	if len(s) == 0 {
-		return unsafe.Pointer(&zeroByte)
-	}
-	return unsafe.Pointer(unsafe.StringData(s))
-}
-
 // bytesPtr is strPtr for []byte.
 func bytesPtr(b []byte) unsafe.Pointer {
 	if len(b) == 0 {
