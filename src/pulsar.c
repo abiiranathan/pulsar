@@ -28,12 +28,13 @@ ALIGN(64) uint64_t g_tsc_mult = 0;
 ALIGN(64) uint64_t g_tsc_base_cycles = 0;
 ALIGN(64) uint64_t g_tsc_base_ns = 0;
 ALIGN(64) uint64_t g_wall_base_ns = 0;
+/* High-speed thread-local static read buffer (kept permanently in L1 cache) */
+ALIGN(64) static __thread char static_read_buf[READ_BUFFER_SIZE];
 
 #define SERVER_NAME                       "PULSAR/1.0 (Unix)"
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
-
-/* High-speed thread-local static read buffer (kept permanently in L1 cache) */
-alignas(64) static __thread char static_read_buf[READ_BUFFER_SIZE];
+#define ensure_headers_capacity(res, required) \
+    ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
 
 typedef struct ALIGN(64) KeepAliveState {
     PulsarConn* head;
@@ -55,7 +56,7 @@ typedef struct ALIGN(64) SlowWorker {
     pthread_t thread;
     event_queue_t* queue;
     int id;
-    KeepAliveState keep_alive_state;
+    KeepAliveState ka_state;
 } SlowWorker;
 
 ALIGN(64) SlowWorker slow_workers[NUM_SLOW_WORKERS];
@@ -82,7 +83,7 @@ static void slow_close_offloaded(event_queue_t* queue, PulsarConn* conn) {
 static void* slow_worker_thread(void* arg) {
     SlowWorker* worker = (SlowWorker*)arg;
     event_queue_t* queue = worker->queue;
-    KeepAliveState* ka = &worker->keep_alive_state;
+    KeepAliveState* ka = &worker->ka_state;
     event_t events[MAX_EVENTS] = {0};
     time_t last_timeout_check = 0;
 
@@ -168,7 +169,7 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
     SlowWorker* target = &slow_workers[idx];
 
     conn->owner_queue = target->queue;
-    conn->owner_ka_state = &target->keep_alive_state;
+    conn->owner_ka_state = &target->ka_state;
 
     int ret = event_add_read(target->queue, conn->client_fd, conn);
     if (ret >= 0 && handlers.on_write) {
@@ -251,13 +252,6 @@ static void install_signal_handler(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
-}
-
-INLINE void ensure_headers_capacity(Arena* arena, response_t* res, size_t required) {
-    (void)arena;
-    (void)res;
-    (void)required;
-    ASSERT((size_t)res->headers_len + required < RESP_BODY_OFFSET);
 }
 
 INLINE void free_response_body(response_t* resp) {
@@ -742,7 +736,7 @@ bool res_header_get_buf(PulsarConn* conn, const char* __restrict__ name, char* _
 void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value) {
     response_t* resp = &conn->response;
     size_t required = name.len + value.len + 4;
-    ensure_headers_capacity(conn->arena, resp, required);
+    ensure_headers_capacity(resp, required);
 
     char* dest = resp->buf + resp->headers_len;
     memcpy(dest, name.data, name.len);
@@ -756,7 +750,7 @@ void conn_writeheader(PulsarConn* conn, StrSlice name, StrSlice value) {
 
 void conn_writeheader_raw(PulsarConn* conn, const char* header, size_t length) {
     response_t* resp = &conn->response;
-    ensure_headers_capacity(conn->arena, resp, length);
+    ensure_headers_capacity(resp, length);
     memcpy(resp->buf + resp->headers_len, header, length);
     resp->headers_len += (uint32_t)length;
 }
@@ -767,7 +761,7 @@ void conn_writeheaders_vec(PulsarConn* conn, const struct iovec* headers, size_t
     for (size_t i = 0; i < count; i++) {
         total_len += headers[i].iov_len;
     }
-    ensure_headers_capacity(conn->arena, resp, total_len);
+    ensure_headers_capacity(resp, total_len);
 
     char* dest = resp->buf + resp->headers_len;
     for (size_t i = 0; i < count; i++) {
@@ -932,7 +926,7 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
     response_t* resp = &conn->response;
     size_t loc_len = strlen(location);
     size_t needed = 10 + loc_len + 2;
-    ensure_headers_capacity(conn->arena, resp, needed);
+    ensure_headers_capacity(resp, needed);
 
     char* dest = resp->buf + resp->headers_len;
     memcpy(dest, "Location: ", 10);
@@ -1087,7 +1081,7 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
     size_t pos = 0;
 
     if (!HAS_HEADERS_WRITTEN(conn->response.flags)) {
-        ensure_headers_capacity(conn->arena, &conn->response, 2);
+        ensure_headers_capacity(&conn->response, 2);
         memcpy(conn->response.buf + conn->response.headers_len, "\r\n", 2);
         conn->response.headers_len += 2;
 
@@ -1122,7 +1116,7 @@ ssize_t conn_write_chunk(PulsarConn* conn, const void* data, size_t size) {
 
 void conn_send_event(PulsarConn* conn, const SSEvent* evt) {
     if (!HAS_HEADERS_WRITTEN(conn->response.flags)) {
-        ensure_headers_capacity(conn->arena, &conn->response, 2);
+        ensure_headers_capacity(&conn->response, 2);
         memcpy(conn->response.buf + conn->response.headers_len, "\r\n", 2);
         conn->response.headers_len += 2;
 
@@ -1235,7 +1229,8 @@ INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off
         "Content-Length: %ld\r\n"
         "Content-Range: bytes %ld-%ld/%lld\r\n";
     response_t* resp = &conn->response;
-    ensure_headers_capacity(conn->arena, resp, sizeof(hfmt) + 64);
+
+    ensure_headers_capacity(resp, sizeof(hfmt) + 64);
     size_t n = (size_t)snprintf(resp->buf + resp->headers_len, sizeof(hfmt) + 64, hfmt,
                                 end - start + 1, start, end, (long long)file_size);
     resp->headers_len += (uint32_t)n;
@@ -1273,11 +1268,13 @@ bool conn_servefile(PulsarConn* conn, const char* filename) {
         conn_set_content_type(conn, get_mimetype((char*)filename));
     }
 
+    // By default, send the entire file.
     conn->response.file_fd = fd;
     conn->response.file_size = (uint32_t)sb.st_size;
     conn->response.file_offset = 0;
     conn->response.range_end = (uint32_t)sb.st_size;
 
+    // Check for Range header cached in request.
     StrSlice range_hdr = conn->request.range_hdr;
     if (range_hdr.data == NULL) return true;
 
@@ -1290,6 +1287,7 @@ bool conn_servefile(PulsarConn* conn, const char* filename) {
             conn_set_status(conn, StatusRequestedRangeNotSatisfiable);
             return true;
         }
+
         conn_set_status(conn, StatusPartialContent);
         send_range_headers(conn, s, e, sb.st_size);
         conn->response.file_offset = s;
@@ -1457,6 +1455,7 @@ void static_file_handler(PulsarCtx* ctx) {
 
 const char* get_path_param(PulsarConn* conn, const char* name) {
     if (!conn || !name) return NULL;
+
     route_t* route = conn->request.route;
     if (route && route->route_type == ROUTE_TYPE_PARAM) {
         PathParams* pp = route->state.path_params;
@@ -1471,9 +1470,10 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
 }
 
 INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
-    if (likely((global_mw_count | route->mw_count) == 0)) {
+    if ((global_mw_count | route->mw_count) == 0) {
         return;
     }
+
     for (size_t i = 0; i < global_mw_count; i++) {
         global_middleware[i](ctx);
         if (ctx->conn->abort) return;
@@ -1485,15 +1485,17 @@ INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
 }
 
 void use_global_middleware(HttpHandler* mw, size_t count) {
-    if (!count) return;
     ASSERT(count + global_mw_count <= MAX_GLOBAL_MIDDLEWARE);
-    for (size_t i = 0; i < count; i++) global_middleware[global_mw_count++] = mw[i];
+    for (size_t i = 0; i < count; i++) {
+        global_middleware[global_mw_count++] = mw[i];
+    }
 }
 
 void use_route_middleware(route_t* route, HttpHandler* mw, size_t count) {
-    if (!count) return;
     ASSERT(route->mw_count + count <= MAX_ROUTE_MIDDLEWARE);
-    for (size_t i = 0; i < count; i++) route->middleware[route->mw_count++] = mw[i];
+    for (size_t i = 0; i < count; i++) {
+        route->middleware[route->mw_count++] = mw[i];
+    }
 }
 
 void pulsar_set_handler_userdata(void* userdata) { GLOBAL_HANDLER_USERDATA = userdata; }
@@ -2326,7 +2328,7 @@ int pulsar_run(const char* addr, int port) {
             perror("slow event_queue_create");
             exit(EXIT_FAILURE);
         }
-        memset(&slow_workers[i].keep_alive_state, 0, sizeof(KeepAliveState));
+        memset(&slow_workers[i].ka_state, 0, sizeof(KeepAliveState));
 
         if (pthread_create(&slow_workers[i].thread, NULL, slow_worker_thread, &slow_workers[i]) !=
             0) {
