@@ -133,7 +133,7 @@ target_compile_definitions(pulsar_objects
 target_compile_options(pulsar_objects PRIVATE
     $<$<CONFIG:Debug>:          -O0 -g3 -DDEBUG>
     $<$<CONFIG:Release>:        ${PULSAR_RELEASE_OPTS}>
-    $<$<CONFIG:RelWithDebInfo>: -O2 -g>
+    $<$<CONFIG:RelWithDebInfo>: ${PULSAR_RELEASE_OPTS} -g>
 )
 
 target_link_libraries(pulsar_objects PUBLIC solidc::solidc)

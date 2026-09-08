@@ -191,7 +191,7 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
 }
 
 static void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state) {
-    if (!conn->in_keep_alive) return;
+    if (unlikely(!conn->in_keep_alive)) return;
 
     if (conn->prev)
         conn->prev->next = conn->next;
@@ -210,7 +210,7 @@ static void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state)
 }
 
 static void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
-    if (conn->in_keep_alive) return;
+    if (unlikely(conn->in_keep_alive)) return;
 
     conn->next = state->head;
     conn->prev = NULL;
@@ -351,7 +351,7 @@ static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveSt
     sys_close_direct(conn->client_fd);
     conn->client_fd = -1;
 
-    remove_keepalive_connection(conn, ka_state);
+    if (conn->in_keep_alive) remove_keepalive_connection(conn, ka_state);
     free_response_body(&conn->response);
     locals_destroy(&conn->locals);
     arena_destroy(conn->arena);

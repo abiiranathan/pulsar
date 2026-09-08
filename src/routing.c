@@ -118,6 +118,7 @@ INLINE uint32_t exact_hash(const char* path, size_t len, uint16_t method, uint64
     }
     return (uint32_t)crc;
 #else
+    (void)path;
     // High-entropy fallback
     uint64_t h =
         prefix8 ^ ((uint64_t)method * 0x9E3779B97F4A7C15ULL) ^ (len * 0x517CC1B727220A95ULL);
