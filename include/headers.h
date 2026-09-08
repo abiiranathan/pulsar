@@ -56,7 +56,24 @@ typedef struct {
  * @param h Headers structure to initialize
  * @param arena Memory arena for allocations
  */
-INLINE void headers_init(headers_t* h) { *h = (headers_t){0}; }
+INLINE void headers_init(headers_t* h) { h->count = 0; }
+
+/**
+ * @brief Append a header without duplicate checking (O(1)).
+ *
+ * Fast path for request parsing where duplicates are rare and handled
+ * separately (Connection / Content-Length are extracted via integer compares
+ * during parse). headers_get() scans all entries so appended duplicates
+ * remain retrievable. Preserves headers_set() for the public API where
+ * replace-in-place semantics (and Set-Cookie multi-value) are required.
+ */
+INLINE bool headers_push(headers_t* h, StrSlice name, StrSlice value) {
+    if (unlikely(h->count >= HEADERS_CAPACITY)) {
+        return false;
+    }
+    h->entries[h->count++] = (header_entry){.name = name, .value = value};
+    return true;
+}
 
 /**
  * @brief Set a header value (replaces existing or adds new)

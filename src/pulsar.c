@@ -28,8 +28,9 @@ ALIGN(64) uint64_t g_tsc_mult = 0;
 ALIGN(64) uint64_t g_tsc_base_cycles = 0;
 ALIGN(64) uint64_t g_tsc_base_ns = 0;
 ALIGN(64) uint64_t g_wall_base_ns = 0;
-/* High-speed thread-local static read buffer (kept permanently in L1 cache) */
-ALIGN(64) static __thread char static_read_buf[READ_BUFFER_SIZE];
+/* Read buffer lives on each worker's stack (passed as base_buf). Kept off
+ * thread-local storage so the hot read path pays a plain RSP-relative LEA
+ * instead of two %fs:0 segment loads per request. */
 
 #define SERVER_NAME                       "PULSAR/1.0 (Unix)"
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
@@ -347,6 +348,7 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
 
     locals_init(&conn->locals, 64);
     headers_init(&req->headers);
+    headers_init(&req->query_params);
 
     res->file_fd = -1;
     res->status_code = StatusOK;
@@ -368,7 +370,6 @@ static bool reset_connection(PulsarConn* conn) {
     conn->keep_alive = true;
     conn->abort = false;
     response_t* res = &conn->response;
-    request_t* req = &conn->request;
 
     if (HAS_HEAP_ALLOCATED(res->flags)) {
         free_response_body(res);
@@ -393,11 +394,6 @@ static bool reset_connection(PulsarConn* conn) {
     res->file_size = 0;
     res->file_offset = 0;
     res->range_end = 0;
-
-    // Initialize headers and query_params to empty.
-    // Should not fail if arena was already allocated and just reset.
-    headers_init(&req->headers);
-    headers_init(&req->query_params);
 
     if (!conn->in_keep_alive) {
         conn->next = NULL;
@@ -564,8 +560,8 @@ INLINE bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
 
         const char fc = (char)(ptr[0] | 0x20);
 
-        if (!headers_set(&req->headers, (StrSlice){.data = ptr, .len = name_len},
-                         (StrSlice){.data = value_start, .len = value_len})) {
+        if (!headers_push(&req->headers, (StrSlice){.data = ptr, .len = name_len},
+                          (StrSlice){.data = value_start, .len = value_len})) {
             return false;
         }
 
@@ -635,7 +631,7 @@ INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
         if (ptr < end && *ptr == '&') ptr++;
         if (key.len == 0) continue;
 
-        if (!headers_set(&conn->request.query_params, key, value)) {
+        if (!headers_push(&conn->request.query_params, key, value)) {
             return false;
         }
     }
@@ -1010,6 +1006,10 @@ static PreformattedServerDate g_server_date_hdr;
 static _Atomic time_t g_current_time = 0;
 static _Atomic uint64_t g_date_seq = 0;
 
+/* Cached exact "/" GET route. Populated on first hot-path hit; routes are
+ * read-only after sort_routes() so the cached pointer stays valid. */
+static route_t* g_cached_root_get = NULL;
+
 static void try_update_date_header(time_t t) {
     struct tm tm;
     if (gmtime_r(&t, &tm) == NULL) return;
@@ -1017,7 +1017,10 @@ static void try_update_date_header(time_t t) {
     if (tm.tm_mon < 0 || tm.tm_mon > 11) return;
 
     char buf[128];
+    /* Single prebuilt prefix: status line + Server + Date. Copied with one
+     * memcpy per request in process_request, saving separate status stores. */
     int n = snprintf(buf, sizeof(buf),
+                     "HTTP/1.1 200 OK\r\n"
                      "Server: " SERVER_NAME
                      "\r\n"
                      "Date: %s %02d %s %04d %02d:%02d:%02d GMT\r\n",
@@ -1034,23 +1037,20 @@ static void try_update_date_header(time_t t) {
     }
 
     uint64_t seq = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
-    atomic_store_explicit(&g_date_seq, seq + 1, memory_order_release);
+    atomic_store_explicit(&g_date_seq, seq + 1, memory_order_relaxed);
     memcpy(g_server_date_hdr.header_str, buf, (size_t)n);
     g_server_date_hdr.header_len = (uint16_t)n;
-    atomic_thread_fence(memory_order_release);
     atomic_store_explicit(&g_date_seq, seq + 2, memory_order_release);
 }
 
 INLINE uint16_t snapshot_date_header(char* dst) {
     for (;;) {
-        uint64_t s0 = atomic_load_explicit(&g_date_seq, memory_order_acquire);
+        uint64_t s0 = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
         if (s0 & 1u) continue;
-        atomic_thread_fence(memory_order_acquire);
         uint16_t len = g_server_date_hdr.header_len;
-        if (len <= 128 && len > 0) memcpy(dst, g_server_date_hdr.header_str, len);
-        atomic_thread_fence(memory_order_acquire);
-        uint64_t s1 = atomic_load_explicit(&g_date_seq, memory_order_acquire);
-        if (s0 == s1) return (len <= 128) ? len : 0;
+        if (likely(len <= 128 && len > 0)) memcpy(dst, g_server_date_hdr.header_str, len);
+        uint64_t s1 = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
+        if (likely(s0 == s1)) return (len <= 128) ? len : 0;
     }
 }
 
@@ -1379,7 +1379,7 @@ INLINE size_t fmt_cl_small(char* dst, size_t cl) {
     return pulsar_itoa((uint64_t)cl, dst);
 }
 
-__attribute__((no_stack_protector)) static void finalize_response(PulsarConn* conn,
+__attribute__((no_stack_protector)) INLINE void finalize_response(PulsarConn* conn,
                                                                   HttpMethod method) {
     response_t* resp = &conn->response;
 
@@ -1427,10 +1427,12 @@ __attribute__((no_stack_protector)) static void finalize_response(PulsarConn* co
         return;
     }
 
-    /* Fast Path: Close the gap with single memmove of small body in-cache */
+    /* Fast Path: close the gap between headers and the inline body staging
+     * area. Regions never overlap (dest < RESP_BODY_OFFSET <= src), so memcpy
+     * lets the compiler inline small bodies instead of calling libc memmove. */
     size_t b_len = resp->body_len;
     if (b_len > 0) {
-        memmove(resp->buf + resp->headers_len, resp->buf + RESP_BODY_OFFSET, b_len);
+        memcpy(resp->buf + resp->headers_len, resp->buf + RESP_BODY_OFFSET, b_len);
     }
     resp->out_len = resp->headers_len + (uint32_t)b_len;
     resp->out_sent = 0;
@@ -1526,7 +1528,7 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
 }
 
 INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
-    if ((global_mw_count == 0 || route->mw_count == 0)) {
+    if (global_mw_count == 0 && route->mw_count == 0) {
         return;
     }
 
@@ -1666,9 +1668,20 @@ INLINE int parse_request_line(const char* input, size_t input_len, request_t* re
     // "GET / HTTP/1.1\r\n" is 16 bytes minimum
     if (unlikely(input_len < 16)) return -1;
 
+    uint64_t w0, w1;
+    memcpy(&w0, input, 8);
+    memcpy(&w1, input + 8, 8);
+    if (likely(w0 == UINT64_C(0x5448202F20544547) && w1 == UINT64_C(0x0A0D312E312F5054))) {
+        req->method_type = HTTP_GET;
+        *(uint32_t*)req->method = UINT32_C(0x00544547); /* "GET\0" */
+        *url_ptr = input + 4;
+        *url_len = 1;
+        *line_end = input + 16;
+        return 1;
+    }
+
     // Load first 8 bytes into an integer register for branch-free dispatch
-    uint64_t m8;
-    memcpy(&m8, input, 8);
+    uint64_t m8 = w0;
 
     const char* ptr;
 
@@ -1796,14 +1809,32 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     size_t url_len = 0;
     const char* line_end = NULL;
 
-    if (parse_request_line(buf, read_bytes, req, &url_ptr, &url_len, &line_end) != 0) {
+    int prl = parse_request_line(buf, read_bytes, req, &url_ptr, &url_len, &line_end);
+    if (unlikely(prl < 0)) {
         return StatusBadRequest;
     }
 
-    size_t path_len = decode_path_fast(url_ptr, url_len, req->path, sizeof(req->path));
+    size_t path_len;
+    route_t* route;
+    if (likely(prl == 1)) {
+        /* Exact "GET /" hot path: path is known, no percent-encoding or
+         * query string is possible in the 16-byte form. Reuse the cached
+         * root route instead of hashing + radix matching per request. */
+        req->path[0] = '/';
+        req->path[1] = '\0';
+        path_len = 1;
+        route = g_cached_root_get;
+        if (unlikely(!route)) {
+            route = route_match(req->path, path_len, req->method_type, conn->arena);
+            if (likely(route)) g_cached_root_get = route;
+        }
+    } else {
+        path_len = decode_path_fast(url_ptr, url_len, req->path, sizeof(req->path));
 
-    if (!parse_query_params(conn, &path_len)) {
-        return StatusInternalServerError;
+        if (!parse_query_params(conn, &path_len)) {
+            return StatusInternalServerError;
+        }
+        route = NULL; /* resolved below after headers */
     }
 
     const size_t hdr_off = (size_t)(line_end - buf);
@@ -1813,22 +1844,19 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
 
     *consumed = headers_len + req->content_length;
 
-    route_t* route = route_match(req->path, path_len, req->method_type, conn->arena);
+    if (unlikely(!route)) {
+        route = route_match(req->path, path_len, req->method_type, conn->arena);
+    }
     if (!route) return StatusNotFound;
     req->route = route;
 
     http_status status = parse_request_body(conn, buf, headers_len, read_bytes);
     if (status != StatusOK) return status;
 
-    /* Pre-populate status line and Server + Date in the single contiguous response buffer */
-    *(uint64_t*)(res->buf + 0) = UINT64_C(0x312e312f50545448); /* "HTTP/1.1" */
-    *(uint64_t*)(res->buf + 8) = UINT64_C(0x0d4b4f2030303220); /* " 200 OK\r" */
-    res->buf[16] = '\n';
+    uint16_t prefix_len = snapshot_date_header(res->buf);
     res->status_len = 17;
     res->status_code = StatusOK;
-
-    uint16_t date_len = snapshot_date_header(res->buf + 17);
-    res->headers_len = 17 + date_len;
+    res->headers_len = prefix_len;
 
     PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
     execute_all_middleware(&ctx, route);
@@ -2009,7 +2037,7 @@ INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
 #endif
 
     size_t pending = conn->pending_len;
-    size_t max_read = sizeof(static_read_buf) - 1; /* compile-time constant */
+    size_t max_read = READ_BUFFER_SIZE - 1;
     char* read_ptr = base_buf;
 
     // Restore unparsed tail from previous event directly into base_buf
@@ -2330,8 +2358,10 @@ void* worker_thread(void* arg) {
 
     worker_pool_init(worker_id);
 
-    // Cache the thread-local buffer pointer ONCE:
-    char* const read_buf = static_read_buf;
+    /* Stack-resident read buffer: plain RSP-relative addressing, no %fs
+     * segment loads on the hot path. 64-byte aligned to keep the
+     * request-line loads off cacheline splits. */
+    ALIGN(64) char read_buf[READ_BUFFER_SIZE];
 
     if (event_add_server(queue, listen_fd) < 0) {
         perror("event_add_server");

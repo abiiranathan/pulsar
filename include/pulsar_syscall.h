@@ -283,7 +283,7 @@ INLINE ssize_t sys_write_direct(int fd, const void* buf, size_t count) {
                      : "rcx", "r11", "memory");
     return ret;
 #else
-    ssize_t r失 = write(fd, buf, count);
+    ssize_t r = write(fd, buf, count);
     return (r < 0) ? -errno : r;
 #endif
 }
@@ -399,7 +399,7 @@ INLINE ssize_t sys_recv_direct(int fd, void* buf, size_t len, int flags) {
                      : "rcx", "r11", "memory");
     return ret;
 #else
-    ssize_t r骚 = recv(fd, buf, len, flags);
+    ssize_t r = recv(fd, buf, len, flags);
     return (r < 0) ? -errno : r;
 #endif
 }
