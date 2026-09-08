@@ -14,31 +14,29 @@
 #include "../include/pulsar_itoa.h"
 #include "../include/pulsar_syscall.h"
 #include "../include/pulsar_time.h"
-
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
-
-ALIGN(64) static int worker_listen_fds[NUM_WORKERS];
-ALIGN(64) volatile sig_atomic_t server_running = 1;
-ALIGN(64) static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
-ALIGN(64) static size_t global_mw_count = 0;
-ALIGN(64) static void* GLOBAL_HANDLER_USERDATA = NULL;
-ALIGN(64) uint64_t g_tsc_mult = 0;
-ALIGN(64) uint64_t g_tsc_base_cycles = 0;
-ALIGN(64) uint64_t g_tsc_base_ns = 0;
-ALIGN(64) uint64_t g_wall_base_ns = 0;
-/* Read buffer lives on each worker's stack (passed as base_buf). Kept off
- * thread-local storage so the hot read path pays a plain RSP-relative LEA
- * instead of two %fs:0 segment loads per request. */
 
 #define SERVER_NAME                       "PULSAR/1.0 (Unix)"
 #define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
 #define ensure_headers_capacity(res, required) \
     ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
+#define ALIGNED ALIGN(64)
 
 #define WORKER_POOL_SIZE      512
 #define CONNECTION_ARENA_SIZE (1 << 14)
+
+static int worker_listen_fds[NUM_WORKERS];
+volatile sig_atomic_t server_running = 1;
+static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
+static size_t global_mw_count = 0;
+static void* GLOBAL_HANDLER_USERDATA = NULL;
+
+ALIGN(64) uint64_t g_tsc_mult = 0;
+ALIGN(64) uint64_t g_tsc_base_cycles = 0;
+ALIGN(64) uint64_t g_tsc_base_ns = 0;
+ALIGN(64) uint64_t g_wall_base_ns = 0;
 
 typedef struct ALIGN(64) WorkerPool {
     PulsarConn* conns[WORKER_POOL_SIZE];
