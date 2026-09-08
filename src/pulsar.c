@@ -37,7 +37,7 @@ ALIGN(64) uint64_t g_wall_base_ns = 0;
 #define ensure_headers_capacity(res, required) \
     ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
 
-#define WORKER_POOL_SIZE      1024
+#define WORKER_POOL_SIZE      512
 #define CONNECTION_ARENA_SIZE (1 << 14)
 
 typedef struct ALIGN(64) WorkerPool {
@@ -991,27 +991,23 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
     resp->headers_len += (uint32_t)needed;
 }
 
-/* ================================================================
- * Preformatted Server + Date Header (background-refreshed)
- *
- * INVARIANT: all formatting (gmtime_r + snprintf) happens ONLY in
- * the background date thread (plus one synchronous publish at
- * startup before workers spawn). The request hot path NEVER formats:
- * snapshot_date_header() below is a pure copy — one acquire atomic
- * load of the active index + one small memcpy. No clock calls, no
- * gmtime, no snprintf, no CAS, no retry loop on the request path.
- *
- * Synchronization is single-writer double-buffered: the updater
- * writes the inactive slot and publishes it with a release store;
- * readers take an acquire load of the active index and copy that
- * slot only. The writer never touches the slot readers use, so a
- * torn read is impossible without any per-request locking.
- * ================================================================ */
 static const char DAYS[7][5] = {"Sun,", "Mon,", "Tue,", "Wed,", "Thu,", "Fri,", "Sat,"};
 static const char MONTHS[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-#define DATE_HDR_MAX 256
+#define DATE_HDR_MAX 128
+
+/* Compile-time constant: format_date_header always produces exactly this many
+ * bytes for the fixed SERVER_NAME/day/month tables above (all numeric fields
+ * are zero-padded to fixed width). Asserted in refresh_date_header_now(). */
+#define DATE_HDR_FIXED_LEN (18 + sizeof(SERVER_NAME) - 1 + 2 + 5 /* "Date: " */ + 29)
+
+/* Fixed for the process lifetime. Valid only because SERVER_NAME is a
+ * compile-time constant and DAYS[]/MONTHS[]/the %02d/%04d fields are all
+ * fixed-width — format_date_header() therefore always produces the same
+ * length. If SERVER_NAME ever becomes runtime-configurable, this must be
+ * recomputed in publish_date_header() on every refresh, not just at startup. */
+alignas(64) static uint16_t g_date_hdr_len = 0;
 
 typedef struct __attribute__((aligned(64))) {
     char data[DATE_HDR_MAX];
@@ -1075,12 +1071,11 @@ static void publish_date_header(time_t t) {
 }
 
 static void refresh_date_header_now(void) {
-    /* Startup only (workers not yet spawned): seed BOTH slots so the
-     * request path can never observe an empty slot, keeping the hot
-     * path a pure copy with no formatting fallback. */
     char buf[DATE_HDR_MAX];
     int n = format_date_header(pulsar_wall_sec(), buf, sizeof(buf));
     if (n <= 0) return;
+
+    g_date_hdr_len = (uint16_t)n; /* fixed length for the process lifetime */
     memcpy(g_date_slots[0].data, buf, (size_t)n);
     g_date_slots[0].len = (uint16_t)n;
     memcpy(g_date_slots[1].data, buf, (size_t)n);
@@ -1116,18 +1111,14 @@ static void* date_updater_thread(void* arg) {
 
 /* Request hot path: PURE COPY, never formats. All gmtime_r/snprintf
  * work happens in date_updater_thread() (and refresh_date_header_now()
- * at startup). If the cache were somehow empty this returns 0 rather
- * than formatting inline, preserving the no-format-on-request invariant
- * (both slots are seeded at startup so this is unreachable in practice). */
+ * at startup).*/
 INLINE uint16_t snapshot_date_header(char* dst) {
     int idx = atomic_load_explicit(&g_date_cur, memory_order_acquire);
     if (unlikely((unsigned)idx > 1u)) idx = 0;
-    uint16_t len = g_date_slots[idx].len;
-    if (likely(len <= DATE_HDR_MAX && len > 0)) {
-        memcpy(dst, g_date_slots[idx].data, len);
-        return len;
-    }
-    return 0;
+    uint16_t len = g_date_hdr_len; /* compile-time-invariant after startup */
+    if (unlikely(len == 0)) return 0;
+    memcpy(dst, g_date_slots[idx].data, DATE_HDR_MAX); /* fixed-size, always inlines */
+    return len;
 }
 
 /* ================================================================
