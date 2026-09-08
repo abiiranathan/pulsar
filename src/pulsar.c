@@ -379,6 +379,7 @@ static bool reset_connection(PulsarConn* conn) {
     conn->request.body = NULL;
     conn->request.range_hdr = (StrSlice){.data = NULL, .len = 0};
 
+    arena_reset(conn->arena);
     headers_init(&conn->request.headers);
     headers_init(&conn->request.query_params);
 
@@ -991,67 +992,142 @@ void conn_send_redirect(PulsarConn* conn, const char* location, bool permanent) 
 }
 
 /* ================================================================
- * Fast 1-Second Preformatted Server + Date Header
+ * Preformatted Server + Date Header (background-refreshed)
+ *
+ * INVARIANT: all formatting (gmtime_r + snprintf) happens ONLY in
+ * the background date thread (plus one synchronous publish at
+ * startup before workers spawn). The request hot path NEVER formats:
+ * snapshot_date_header() below is a pure copy — one acquire atomic
+ * load of the active index + one small memcpy. No clock calls, no
+ * gmtime, no snprintf, no CAS, no retry loop on the request path.
+ *
+ * Synchronization is single-writer double-buffered: the updater
+ * writes the inactive slot and publishes it with a release store;
+ * readers take an acquire load of the active index and copy that
+ * slot only. The writer never touches the slot readers use, so a
+ * torn read is impossible without any per-request locking.
  * ================================================================ */
 static const char DAYS[7][5] = {"Sun,", "Mon,", "Tue,", "Wed,", "Thu,", "Fri,", "Sat,"};
 static const char MONTHS[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-typedef struct __attribute__((aligned(64))) {
-    char header_str[128];
-    uint16_t header_len;
-} PreformattedServerDate;
+#define DATE_HDR_MAX 256
 
-static PreformattedServerDate g_server_date_hdr;
-static _Atomic time_t g_current_time = 0;
-static _Atomic uint64_t g_date_seq = 0;
+typedef struct __attribute__((aligned(64))) {
+    char data[DATE_HDR_MAX];
+    uint16_t len;
+} DateSlot;
+
+alignas(64) static DateSlot g_date_slots[2];
+alignas(64) static _Atomic int g_date_cur = 0;
+alignas(64) static _Atomic unsigned g_date_refresh_sec = PULSAR_DATE_REFRESH_SEC;
 
 /* Cached exact "/" GET route. Populated on first hot-path hit; routes are
  * read-only after sort_routes() so the cached pointer stays valid. */
-static route_t* g_cached_root_get = NULL;
+alignas(64) static route_t* g_cached_root_get = NULL;
 
-static void try_update_date_header(time_t t) {
+void pulsar_set_date_refresh_interval(unsigned seconds) {
+    if (seconds < 1) seconds = 1;
+    if (seconds > 86400) seconds = 86400;
+    atomic_store_explicit(&g_date_refresh_sec, seconds, memory_order_relaxed);
+}
+
+unsigned pulsar_get_date_refresh_interval(void) {
+    return atomic_load_explicit(&g_date_refresh_sec, memory_order_relaxed);
+}
+
+/* Format the shared prefix for wall-clock second t into buf.
+ * Returns formatted length, or 0 on failure. */
+static int format_date_header(time_t t, char* buf, size_t cap) {
     struct tm tm;
-    if (gmtime_r(&t, &tm) == NULL) return;
-    if (tm.tm_wday < 0 || tm.tm_wday > 6) return;
-    if (tm.tm_mon < 0 || tm.tm_mon > 11) return;
+    if (gmtime_r(&t, &tm) == NULL) return 0;
+    if (tm.tm_wday < 0 || tm.tm_wday > 6) return 0;
+    if (tm.tm_mon < 0 || tm.tm_mon > 11) return 0;
 
-    char buf[128];
     /* Single prebuilt prefix: status line + Server + Date. Copied with one
      * memcpy per request in process_request, saving separate status stores. */
-    int n = snprintf(buf, sizeof(buf),
+    int n = snprintf(buf, cap,
                      "HTTP/1.1 200 OK\r\n"
                      "Server: " SERVER_NAME
                      "\r\n"
                      "Date: %s %02d %s %04d %02d:%02d:%02d GMT\r\n",
                      DAYS[tm.tm_wday], tm.tm_mday, MONTHS[tm.tm_mon], tm.tm_year + 1900, tm.tm_hour,
                      tm.tm_min, tm.tm_sec);
-
-    if (n <= 0 || n >= (int)sizeof(buf)) return;
-
-    time_t cur = atomic_load_explicit(&g_current_time, memory_order_relaxed);
-    if (cur == t) return;
-    if (!atomic_compare_exchange_strong_explicit(&g_current_time, &cur, t, memory_order_relaxed,
-                                                 memory_order_relaxed)) {
-        return;
-    }
-
-    uint64_t seq = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
-    atomic_store_explicit(&g_date_seq, seq + 1, memory_order_relaxed);
-    memcpy(g_server_date_hdr.header_str, buf, (size_t)n);
-    g_server_date_hdr.header_len = (uint16_t)n;
-    atomic_store_explicit(&g_date_seq, seq + 2, memory_order_release);
+    if (n <= 0 || n >= (int)cap) return 0;
+    return n;
 }
 
-INLINE uint16_t snapshot_date_header(char* dst) {
-    for (;;) {
-        uint64_t s0 = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
-        if (s0 & 1u) continue;
-        uint16_t len = g_server_date_hdr.header_len;
-        if (likely(len <= 128 && len > 0)) memcpy(dst, g_server_date_hdr.header_str, len);
-        uint64_t s1 = atomic_load_explicit(&g_date_seq, memory_order_relaxed);
-        if (likely(s0 == s1)) return (len <= 128) ? len : 0;
+/* Single-writer publish: format into the inactive slot, then flip the
+ * active index with a release store. Called only by the date thread
+ * (and once synchronously at startup). */
+static void publish_date_header(time_t t) {
+    int cur = atomic_load_explicit(&g_date_cur, memory_order_relaxed);
+    if ((unsigned)cur > 1u) cur = 0;
+    int inactive = cur ^ 1;
+
+    char buf[DATE_HDR_MAX];
+    int n = format_date_header(t, buf, sizeof(buf));
+    if (n <= 0) return;
+
+    memcpy(g_date_slots[inactive].data, buf, (size_t)n);
+    g_date_slots[inactive].len = (uint16_t)n;
+    atomic_store_explicit(&g_date_cur, inactive, memory_order_release);
+}
+
+static void refresh_date_header_now(void) {
+    /* Startup only (workers not yet spawned): seed BOTH slots so the
+     * request path can never observe an empty slot, keeping the hot
+     * path a pure copy with no formatting fallback. */
+    char buf[DATE_HDR_MAX];
+    int n = format_date_header(pulsar_wall_sec(), buf, sizeof(buf));
+    if (n <= 0) return;
+    memcpy(g_date_slots[0].data, buf, (size_t)n);
+    g_date_slots[0].len = (uint16_t)n;
+    memcpy(g_date_slots[1].data, buf, (size_t)n);
+    g_date_slots[1].len = (uint16_t)n;
+    atomic_store_explicit(&g_date_cur, 0, memory_order_release);
+}
+
+/* Background thread: refresh the cached header every N seconds.
+ * Sleeps in 100 ms slices so shutdown via server_running stays prompt
+ * even for large intervals. Re-reads the interval each tick so
+ * pulsar_set_date_refresh_interval() takes effect without a restart. */
+static void* date_updater_thread(void* arg) {
+    (void)arg;
+    time_t last = 0;
+    while (server_running) {
+        unsigned interval = atomic_load_explicit(&g_date_refresh_sec, memory_order_relaxed);
+        if (interval < 1) interval = 1;
+
+        unsigned slices = interval * 10u;
+        for (unsigned i = 0; i < slices; i++) {
+            if (!server_running) return NULL;
+            usleep(100 * 1000);
+        }
+        if (!server_running) break;
+
+        time_t now = pulsar_wall_sec();
+        if (now == last) continue;
+        last = now;
+        publish_date_header(now);
     }
+    return NULL;
+}
+
+/* Request hot path: PURE COPY, never formats. All gmtime_r/snprintf
+ * work happens in date_updater_thread() (and refresh_date_header_now()
+ * at startup). If the cache were somehow empty this returns 0 rather
+ * than formatting inline, preserving the no-format-on-request invariant
+ * (both slots are seeded at startup so this is unreachable in practice). */
+INLINE uint16_t snapshot_date_header(char* dst) {
+    int idx = atomic_load_explicit(&g_date_cur, memory_order_acquire);
+    if (unlikely((unsigned)idx > 1u)) idx = 0;
+    uint16_t len = g_date_slots[idx].len;
+    if (likely(len <= DATE_HDR_MAX && len > 0)) {
+        memcpy(dst, g_date_slots[idx].data, len);
+        return len;
+    }
+    return 0;
 }
 
 /* ================================================================
@@ -2371,7 +2447,6 @@ void* worker_thread(void* arg) {
 
     event_t events[MAX_EVENTS] = {0};
     time_t last_timeout_check = 0;
-    time_t last_sync_time = 0;
     int loop_counter = 0;
 
     while (server_running) {
@@ -2382,15 +2457,11 @@ void* worker_thread(void* arg) {
             continue;
         }
 
+        /* Date header is refreshed by the background date thread;
+         * workers only handle keep-alive timeouts here. */
         if (unlikely(++loop_counter >= 128)) {
             loop_counter = 0;
-            time_t wall_now = pulsar_wall_sec();
             time_t mono_now = pulsar_mono_sec();
-
-            if (wall_now != last_sync_time) {
-                last_sync_time = wall_now;
-                try_update_date_header(wall_now);
-            }
 
             if (mono_now - last_timeout_check >= 5) {
                 CheckKeepAliveTimeouts(ka_state, queue, worker_id);
@@ -2448,7 +2519,15 @@ int pulsar_run(const char* addr, int port) {
     sort_routes();
     init_mimetypes();
     pulsar_time_init();
-    try_update_date_header(pulsar_wall_sec());
+    refresh_date_header_now();
+
+    pthread_t date_thread = 0;
+    bool date_thread_started = false;
+    if (pthread_create(&date_thread, NULL, date_updater_thread, NULL) != 0) {
+        perror("pthread_create date updater (continuing without background refresh)");
+    } else {
+        date_thread_started = true;
+    }
 
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         slow_workers[i].id = i;
@@ -2502,6 +2581,10 @@ int pulsar_run(const char* addr, int port) {
 
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         pthread_join(slow_workers[i].thread, NULL);
+    }
+
+    if (date_thread_started) {
+        pthread_join(date_thread, NULL);
     }
 
     for (int i = 0; i < NUM_WORKERS; i++) {

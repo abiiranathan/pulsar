@@ -103,6 +103,22 @@ void pulsar_set_handler_userdata(void* userdata);
 // Get the currently set handler userdata pointer.
 void* pulsar_get_handler_userdata(void);
 
+/**
+ * @brief Sets how often the background thread refreshes the preformatted
+ * Date header, in seconds.
+ *
+ * The request hot path copies the cached "HTTP/1.1 200 OK + Server + Date"
+ * prefix with a single atomic load + memcpy, so this interval only controls
+ * the staleness bound of the Date header (default PULSAR_DATE_REFRESH_SEC).
+ * Takes effect without a restart. Values are clamped to [1, 86400].
+ *
+ * @param seconds Refresh interval in seconds.
+ */
+void pulsar_set_date_refresh_interval(unsigned seconds);
+
+/** @brief Returns the current Date header refresh interval in seconds. */
+unsigned pulsar_get_date_refresh_interval(void);
+
 /** @brief Set a post_handler callback that is called after the handler runs
  * before writing data to the socket.
  * @param cb User-provided callback function pointer.
