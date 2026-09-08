@@ -16,9 +16,9 @@ extern "C" {
 
 /** Path parameter extracted from URL. */
 typedef struct {
-    char* name;      /**< Parameter name (interior pointer into pattern; never freed). */
-    size_t name_len; /**< Length of the name. */
-    char* value;     /**< Parameter value (arena-allocated, NUL-terminated). */
+    char* name;       /**< Parameter name (interior pointer into pattern; never freed). */
+    size_t name_len;  /**< Length of the name. */
+    char* value;      /**< Parameter value (arena-allocated, NUL-terminated). */
     size_t value_len; /**< Length of the value in bytes (excluding NUL). Stored so
                            readers don't pay strlen() per lookup on the hot path. */
 } PathParam;

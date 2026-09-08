@@ -83,15 +83,13 @@ struct response_t {
 
 /* HTTP Request Structure */
 struct request_t {
-    char path_buf[MAX_PATH_LEN];
-    char* path;
+    char path[MAX_PATH_LEN];
     char method[8];
     HttpMethod method_type;
     char* body;
     size_t content_length;
-    headers_t headers_data;
-    headers_t* headers;
-    headers_t* query_params;
+    headers_t headers;
+    headers_t query_params;
     struct route_t* route;
     StrSlice range_hdr;
 };
@@ -113,9 +111,7 @@ struct pulsar_conn {
     int client_fd;
     int worker_id;
     bool closing, keep_alive, abort, in_keep_alive;
-    bool arena_dirty;
     time_t last_activity;
-
     Locals locals;
     struct request_t request;
     struct response_t response;

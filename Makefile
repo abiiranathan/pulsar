@@ -47,48 +47,87 @@ ifeq ($(BUILD), debug)
     BUILD_DIR := build/bin
 
 else ifeq ($(BUILD), release)
-    # Architecture & Vectorization
-    ARCH_FLAGS := -march=native -mtune=native -mavx2 -mprefer-vector-width=256
+    # ==============================================================================
+	# Architecture & Target Tuning
+	# ==============================================================================
+	# -march=native enables all instruction sets supported by the host (AVX2, BMI2, etc.)
+	# We omit manual -mavx2 because -march=native already enables it optimally.
+	ARCH_FLAGS := -march=native -mtune=native
 
-    # Code Generation & Register Allocation
-    OPT_FLAGS := -O3 -DNDEBUG -DENABLE_LOGGING=0 \
-                 -fomit-frame-pointer \
-                 -fno-stack-protector \
-                 -fno-math-errno \
-                 -fno-trapping-math \
-                 -ffunction-sections \
-                 -fdata-sections
+	# ==============================================================================
+	# Code Generation & Optimization
+	# ==============================================================================
+	# 1. -g1 / -gline-tables-only: Injects function & line debug info into non-alloc ELF
+	#    sections. 0% runtime overhead, but fixes raw hex addresses in 'perf report'.
+	# 2. -fno-omit-frame-pointer: Keeps RBP for zero-overhead call-graph profiling (-g fp).
+	#    On x86-64 with 16 GPRs, the throughput difference is < 0.2%.
+	# 3. -fvisibility=hidden: Lets LTO devirtualize, inline, and prune symbols aggressively.
+	# 4. -fmerge-all-constants: Merges identical strings and constants across compilation units.
+	OPT_FLAGS := -O3 -DNDEBUG -DENABLE_LOGGING=0 \
+				-g1 \
+				-fno-omit-frame-pointer \
+				-mno-omit-leaf-frame-pointer \
+				-fno-stack-protector \
+				-fno-math-errno \
+				-fno-trapping-math \
+				-fstrict-aliasing \
+				-fvisibility=hidden \
+				-fmerge-all-constants \
+				-ffunction-sections \
+				-fdata-sections
 
-    # Cache Line Alignment
-    ALIGN_FLAGS := -falign-functions=32 \
-                   -falign-loops=32 \
-                   -falign-jumps=32 \
-                   -falign-labels=32
+	# ==============================================================================
+	# Cache Line Alignment (x86-64 uses 64-byte cache lines)
+	# ==============================================================================
+	# Align function entries to 64 bytes (the hardware L1i cache line size).
+	# Align loops to 32 bytes with up to 16 bytes of padding to avoid fetch-block splits.
+	ALIGN_FLAGS := -falign-functions=64 \
+				-falign-loops=32:24:8 \
+				-falign-jumps=32:16:8 \
+				-falign-labels=32:16:8
 
-    # Eliminate PLT / Dynamic Call Overhead (Linux only)
-    ifeq ($(UNAME), Linux)
-        INTERPOS_FLAGS := -fno-semantic-interposition -fno-plt
-    else
-        INTERPOS_FLAGS :=
-    endif
+	# ==============================================================================
+	# Binary Model (PIE vs PIC)
+	# ==============================================================================
+	# CRITICAL FIX: -fPIC is for shared libraries (.so) and forces all global variable
+	# accesses through the GOT. For an executable binary, use -fPIE / -pie (or -fno-pie)
+	# so the compiler can use direct RIP-relative displacement addressing.
+	ifeq ($(UNAME), Linux)
+		BIN_FLAGS      := -fPIE
+		INTERPOS_FLAGS := -fno-semantic-interposition -fno-plt
+	else
+		BIN_FLAGS      := -fPIE
+		INTERPOS_FLAGS :=
+	endif
 
-    # Link-Time Optimization
-    LTO_FLAGS := -flto=auto
+	# ==============================================================================
+	# Link-Time Optimization (LTO)
+	# ==============================================================================
+	LTO_FLAGS := -flto=auto -fuse-linker-plugin
 
-    # Final CFLAGS
-    CFLAGS := $(BASE_CFLAGS) -fPIC $(ARCH_FLAGS) $(OPT_FLAGS) $(ALIGN_FLAGS) \
-              $(INTERPOS_FLAGS) $(LTO_FLAGS) $(PGO_FLAGS)
+	# ==============================================================================
+	# Final CFLAGS
+	# ==============================================================================
+	CFLAGS := $(BASE_CFLAGS) $(BIN_FLAGS) $(ARCH_FLAGS) $(OPT_FLAGS) $(ALIGN_FLAGS) \
+			$(INTERPOS_FLAGS) $(LTO_FLAGS) $(PGO_FLAGS)
 
-    # Final LDFLAGS (Inherits LTO, Arch, and PGO flags for cross-TU link optimization)
-    LDFLAGS := $(ARCH_FLAGS) $(LTO_FLAGS) $(PGO_FLAGS) -O3 $(BASE_LDFLAGS)
+	# ==============================================================================
+	# Final LDFLAGS
+	# ==============================================================================
+	LDFLAGS := $(ARCH_FLAGS) $(LTO_FLAGS) $(PGO_FLAGS) -O3 $(BASE_LDFLAGS)
 
-    ifeq ($(UNAME), Linux)
-        LDFLAGS += -Wl,--gc-sections -Wl,-O1 -Wl,--as-needed -Wl,-z,now -Wl,-z,relro
-    else ifeq ($(UNAME), Darwin)
-        LDFLAGS += -Wl,-dead_strip
-    endif
+	ifeq ($(UNAME), Linux)
+		# -pie: Pairs with -fPIE for position-independent executable with direct RIP addressing
+		# -Wl,-O2: Aggressive linker optimization
+		# -Wl,--gc-sections: Removes unused functions and dead data sections
+		# -Wl,--as-needed: Avoids linking unneeded dynamic libraries
+		# -Wl,-z,now -Wl,-z,relro: Full RELRO binds all relocations at startup (zero runtime resolution)
+		LDFLAGS += -pie -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,now -Wl,-z,relro
+	else ifeq ($(UNAME), Darwin)
+		LDFLAGS += -Wl,-dead_strip
+	endif
 
-    BUILD_DIR := build/bin
+	BUILD_DIR := build/bin
 else
     $(error Invalid BUILD type: $(BUILD). Use 'debug' or 'release')
 endif

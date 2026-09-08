@@ -56,10 +56,7 @@ typedef struct {
  * @param h Headers structure to initialize
  * @param arena Memory arena for allocations
  */
-INLINE void headers_init(headers_t* h) {
-    h->count = 0;
-    // entries not zeroed as will be overwritten.
-}
+INLINE void headers_init(headers_t* h) { *h = (headers_t){0}; }
 
 /**
  * @brief Set a header value (replaces existing or adds new)
@@ -73,7 +70,7 @@ INLINE void headers_init(headers_t* h) {
 INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
     // Check if we have space for a new header.
     // Remember string slices are not guaranteed to be NULL-terminated.
-    if (h->count >= HEADERS_CAPACITY) {
+    if (unlikely(h->count >= HEADERS_CAPACITY)) {
         return false;
     }
 
@@ -92,6 +89,7 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
             }
         }
     }
+
     // Reject duplicate headers unless its a Cookie.
     if (entry != NULL && !ss_equal_nocase(name, SS_LIT("Set-Cookie"))) {
         // Update header in-place
@@ -111,12 +109,10 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
  */
 INLINE StrSlice headers_get(const headers_t* h, const char* name) {
     StrSlice target = {0};
-    if (!h || !name || !*name) {
+    if (unlikely(!h || !name || !*name)) {
         return target;
     }
-    // Hoist the strlen out of the loop and prefilter on length +
-    // case-folded first byte (same scheme as headers_set); most entries
-    // differ in one of those and never reach ss_equal_nocase.
+
     const StrSlice want = ss_from_cstr(name);
     const unsigned int f0 = (unsigned int)want.data[0] | 32u;
     for (size_t i = 0; i < h->count; ++i) {
@@ -148,9 +144,10 @@ INLINE bool headers_has(const headers_t* h, const char* name) {
  * @return true if header was removed, false if not found
  */
 INLINE bool headers_remove(headers_t* h, const char* name) {
-    if (!h || !name || !*name) {
+    if (unlikely(!h || !name || !*name)) {
         return true;
     }
+
     const StrSlice want = ss_from_cstr(name);
     const unsigned int f0 = (unsigned int)want.data[0] | 32u;
     for (size_t i = 0; i < h->count; ++i) {

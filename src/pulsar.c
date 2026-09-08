@@ -36,6 +36,73 @@ ALIGN(64) static __thread char static_read_buf[READ_BUFFER_SIZE];
 #define ensure_headers_capacity(res, required) \
     ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
 
+#define WORKER_POOL_SIZE      1024
+#define CONNECTION_ARENA_SIZE (1 << 14)
+
+typedef struct ALIGN(64) WorkerPool {
+    PulsarConn* conns[WORKER_POOL_SIZE];
+    Arena* arenas[WORKER_POOL_SIZE];
+    size_t top;
+} WorkerPool;
+
+static WorkerPool worker_pools[NUM_WORKERS];
+
+static void worker_pool_init(int worker_id) {
+    WorkerPool* pool = &worker_pools[worker_id];
+    pool->top = 0;
+
+    for (size_t i = 0; i < WORKER_POOL_SIZE; i++) {
+        PulsarConn* conn = malloc(sizeof(*conn));
+        Arena* arena = arena_create(CONNECTION_ARENA_SIZE);
+        if (!conn || !arena) {
+            free(conn);
+            arena_destroy(arena);
+            fprintf(stderr, "worker_pool_init failed for worker %d at slot %zu\n", worker_id, i);
+            return;
+        }
+
+        pool->conns[pool->top] = conn;
+        pool->arenas[pool->top] = arena;
+        pool->top++;
+    }
+}
+
+static PulsarConn* worker_pool_acquire(int worker_id, Arena** arena) {
+    WorkerPool* pool = &worker_pools[worker_id];
+    if (pool->top == 0) {
+        *arena = arena_create(CONNECTION_ARENA_SIZE);
+        return malloc(sizeof(PulsarConn));
+    }
+
+    pool->top--;
+    *arena = pool->arenas[pool->top];
+    return pool->conns[pool->top];
+}
+
+static void worker_pool_release(int worker_id, PulsarConn* conn, Arena* arena) {
+    WorkerPool* pool = &worker_pools[worker_id];
+    arena_reset(arena);
+
+    if (pool->top < WORKER_POOL_SIZE) {
+        pool->conns[pool->top] = conn;
+        pool->arenas[pool->top] = arena;
+        pool->top++;
+        return;
+    }
+
+    arena_destroy(arena);
+    free(conn);
+}
+
+static void worker_pool_cleanup(int worker_id) {
+    WorkerPool* pool = &worker_pools[worker_id];
+    while (pool->top > 0) {
+        pool->top--;
+        arena_destroy(pool->arenas[pool->top]);
+        free(pool->conns[pool->top]);
+    }
+}
+
 typedef struct ALIGN(64) KeepAliveState {
     PulsarConn* head;
     PulsarConn* tail;
@@ -47,7 +114,8 @@ INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
 INLINE void free_response_body(response_t* resp);
 INLINE void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state);
 INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
-INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state);
+INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
+                             int worker_id);
 
 /* ================================================================
  * Slow Worker Pool
@@ -225,13 +293,13 @@ static void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
     conn->in_keep_alive = true;
 }
 
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue) {
+INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue, int worker_id) {
     PulsarConn* current = state->head;
     time_t now = pulsar_mono_sec();
     while (current) {
         PulsarConn* next = current->next;
         if (conn_timedout(now, current->last_activity)) {
-            close_connection(queue, current, state);
+            close_connection(queue, current, state, worker_id);
         }
         current = next;
     }
@@ -272,17 +340,13 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     conn->in_keep_alive = false;
     conn->abort = false;
     conn->arena = arena;
-    conn->arena_dirty = false;
     conn->last_activity = pulsar_mono_sec();
     conn->pending_len = 0;
     conn->next = NULL;
     conn->prev = NULL;
 
     locals_init(&conn->locals, 64);
-
-    req->path = req->path_buf;
-    req->headers = &req->headers_data;
-    headers_init(req->headers);
+    headers_init(&req->headers);
 
     res->file_fd = -1;
     res->status_code = StatusOK;
@@ -304,16 +368,18 @@ static bool reset_connection(PulsarConn* conn) {
     conn->keep_alive = true;
     conn->abort = false;
     response_t* res = &conn->response;
+    request_t* req = &conn->request;
 
     if (HAS_HEAP_ALLOCATED(res->flags)) {
         free_response_body(res);
     }
 
-    conn->request.query_params = NULL;
     conn->request.content_length = 0;
     conn->request.body = NULL;
     conn->request.range_hdr = (StrSlice){.data = NULL, .len = 0};
-    if (conn->request.headers) headers_init(conn->request.headers);
+
+    headers_init(&conn->request.headers);
+    headers_init(&conn->request.query_params);
 
     res->status_code = StatusOK;
     res->status_len = 0;
@@ -328,14 +394,10 @@ static bool reset_connection(PulsarConn* conn) {
     res->file_offset = 0;
     res->range_end = 0;
 
-    if (conn->locals.size > 0) {
-        locals_destroy(&conn->locals);
-    }
-
-    if (conn->arena_dirty) {
-        arena_reset(conn->arena);
-        conn->arena_dirty = false;
-    }
+    // Initialize headers and query_params to empty.
+    // Should not fail if arena was already allocated and just reset.
+    headers_init(&req->headers);
+    headers_init(&req->query_params);
 
     if (!conn->in_keep_alive) {
         conn->next = NULL;
@@ -344,18 +406,21 @@ static bool reset_connection(PulsarConn* conn) {
     return true;
 }
 
-static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state) {
+static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
+                             int worker_id) {
     if (!conn || conn->client_fd == -1) return;
 
     event_delete(queue, conn->client_fd);
     sys_close_direct(conn->client_fd);
     conn->client_fd = -1;
 
-    if (conn->in_keep_alive) remove_keepalive_connection(conn, ka_state);
+    if (conn->in_keep_alive) {
+        remove_keepalive_connection(conn, ka_state);
+    }
+
     free_response_body(&conn->response);
     locals_destroy(&conn->locals);
-    arena_destroy(conn->arena);
-    free(conn);
+    worker_pool_release(worker_id, conn, conn->arena);
 }
 
 INLINE void write_error(PulsarConn* conn, http_status status) {
@@ -465,11 +530,7 @@ INLINE bool match_content_length(const char* s) {
             UINT64_C(0x00006874676e656c));
 }
 
-INLINE const char* pulsar_memchr(const char* s, int c, size_t n) {
-    return (const char*)__builtin_memchr(s, c, n);
-}
-
-static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod method,
+INLINE bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod method,
                                   size_t headers_len) {
     const char* ptr = hdrs;
     const char* end = ptr + headers_len;
@@ -478,13 +539,13 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
     conn->keep_alive = true;
     uint8_t flags = 0;
 
-    if (req->headers) headers_init(req->headers);
+    headers_init(&req->headers);
 
     while (ptr < end) {
-        const char* const eol = pulsar_memchr(ptr, '\r', (size_t)(end - ptr));
+        const char* const eol = memchr(ptr, '\r', (size_t)(end - ptr));
         if (!eol || eol + 1 >= end || eol[1] != '\n') break;
 
-        const char* const colon = pulsar_memchr(ptr, ':', (size_t)(eol - ptr));
+        const char* const colon = memchr(ptr, ':', (size_t)(eol - ptr));
         if (unlikely(!colon)) {
             ptr = eol + 2;
             continue;
@@ -503,7 +564,7 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
 
         const char fc = (char)(ptr[0] | 0x20);
 
-        if (!headers_set(req->headers, (StrSlice){.data = ptr, .len = name_len},
+        if (!headers_set(&req->headers, (StrSlice){.data = ptr, .len = name_len},
                          (StrSlice){.data = value_start, .len = value_len})) {
             return false;
         }
@@ -541,10 +602,10 @@ static bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
     return true;
 }
 
-static bool parse_query_params(PulsarConn* conn, size_t* path_len) {
+INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
     char* const path = conn->request.path;
-    const char* query = pulsar_memchr(path, '?', *path_len);
-    if (!query) return true;
+    const char* query = memchr(path, '?', *path_len);
+    if (!query) return true;  // No Query Params (not an error)
 
     path[query - path] = '\0';
     *path_len = (size_t)(query - path);
@@ -552,14 +613,11 @@ static bool parse_query_params(PulsarConn* conn, size_t* path_len) {
     const char* ptr = query + 1;
     const char* end = ptr + strlen(ptr);
 
-    conn->request.query_params = arena_alloc(conn->arena, sizeof(headers_t));
-    if (!conn->request.query_params) return false;
-    conn->arena_dirty = true;
-    headers_init(conn->request.query_params);
+    headers_init(&conn->request.query_params);
 
     while (ptr < end) {
-        const char* eq = pulsar_memchr(ptr, '=', (size_t)(end - ptr));
-        const char* amp = pulsar_memchr(ptr, '&', (size_t)(end - ptr));
+        const char* eq = memchr(ptr, '=', (size_t)(end - ptr));
+        const char* amp = memchr(ptr, '&', (size_t)(end - ptr));
 
         const char* key_end = eq && (!amp || eq < amp) ? eq : (amp ? amp : end);
         StrSlice key = {.data = ptr, .len = (size_t)(key_end - ptr)};
@@ -577,7 +635,7 @@ static bool parse_query_params(PulsarConn* conn, size_t* path_len) {
         if (ptr < end && *ptr == '&') ptr++;
         if (key.len == 0) continue;
 
-        if (!headers_set(conn->request.query_params, key, value)) {
+        if (!headers_set(&conn->request.query_params, key, value)) {
             return false;
         }
     }
@@ -602,7 +660,6 @@ static http_status parse_request_body(PulsarConn* conn, const char* buf, size_t 
         perror("arena_alloc failed to allocate body");
         return StatusInternalServerError;
     }
-    conn->arena_dirty = true;
 
     memcpy(req->body, buf + headers_len, body_available);
     req->body[body_available] = '\0';
@@ -645,20 +702,19 @@ const char* req_method(PulsarConn* conn) { return conn->request.method; }
 const char* req_path(PulsarConn* conn) { return conn->request.path; }
 
 const char* query_get(PulsarConn* conn, const char* name) {
-    if (!conn->request.query_params) return NULL;
-    StrSlice h = headers_get(conn->request.query_params, name);
+    StrSlice h = headers_get(&conn->request.query_params, name);
     const char* dup = arena_strdupn(conn->arena, h.data, h.len);
-    if (dup) conn->arena_dirty = true;
     return dup;
 }
 
-headers_t* query_params(PulsarConn* conn) { return conn->request.query_params; }
-const headers_t* req_headers(PulsarConn* conn) { return (const headers_t*)conn->request.headers; }
+headers_t* query_params(PulsarConn* conn) { return &conn->request.query_params; }
+const headers_t* req_headers(PulsarConn* conn) {
+    return (const headers_t*)(&conn->request.headers);
+}
 
 const char* req_header_get(PulsarConn* conn, const char* name) {
-    StrSlice h = headers_get(conn->request.headers, name);
+    StrSlice h = headers_get(&conn->request.headers, name);
     const char* dup = arena_strdupn(conn->arena, h.data, h.len);
-    if (dup) conn->arena_dirty = true;
     return dup;
 }
 
@@ -1470,7 +1526,7 @@ const char* get_path_param(PulsarConn* conn, const char* name) {
 }
 
 INLINE void execute_all_middleware(PulsarCtx* ctx, route_t* route) {
-    if ((global_mw_count | route->mw_count) == 0) {
+    if ((global_mw_count == 0 || route->mw_count == 0)) {
         return;
     }
 
@@ -1578,14 +1634,10 @@ bool pulsar_set(PulsarConn* conn, const char* k, void* v, ValueFreeFunc ff) {
     return locals_setvalue(&conn->locals, k, v, ff);
 }
 
-Arena* pulsar_get_arena(PulsarConn* conn) {
-    conn->arena_dirty = true;
-    return conn->arena;
-}
+Arena* pulsar_get_arena(PulsarConn* conn) { return conn->arena; }
 
 void* pulsar_alloc(PulsarConn* conn, size_t sz) {
     void* p = arena_alloc(conn->arena, sz);
-    if (p) conn->arena_dirty = true;
     return p;
 }
 
@@ -1607,61 +1659,109 @@ INLINE void request_complete(PulsarConn* conn) {
 }
 
 /* ================================================================
- * HTTP Request Line Parser
+ * High-Speed HTTP Request Line Parser (Pure Standard C)
  * ================================================================ */
 INLINE int parse_request_line(const char* input, size_t input_len, request_t* req,
                               const char** url_ptr, size_t* url_len, const char** line_end) {
-    if (unlikely(input_len < 14)) return -1;
-    const char* ptr = input;
+    // "GET / HTTP/1.1\r\n" is 16 bytes minimum
+    if (unlikely(input_len < 16)) return -1;
 
-    uint32_t m4;
-    memcpy(&m4, ptr, 4);
-    if (m4 == UINT32_C(0x20544547)) { /* "GET " */
+    // Load first 8 bytes into an integer register for branch-free dispatch
+    uint64_t m8;
+    memcpy(&m8, input, 8);
+
+    const char* ptr;
+
+    // 1. Scalar Method Match (GET is 90%+ of traffic, single 32-bit test)
+    if (likely((uint32_t)m8 == UINT32_C(0x20544547))) { /* "GET " */
         req->method_type = HTTP_GET;
         *(uint32_t*)req->method = UINT32_C(0x00544547); /* "GET\0" */
-        ptr += 4;
-    } else if (m4 == UINT32_C(0x54534F50) && ptr[4] == ' ') { /* "POST " */
+        ptr = input + 4;
+    } else if (likely((m8 & UINT64_C(0xFFFFFFFFFF)) == UINT64_C(0x2054534F50))) { /* "POST " */
         req->method_type = HTTP_POST;
-        memcpy(req->method, "POST", 5);
-        ptr += 5;
-    } else if (m4 == UINT32_C(0x44414548) && ptr[4] == ' ') { /* "HEAD " */
+        *(uint64_t*)req->method = UINT64_C(0x00000054534F50); /* "POST\0\0\0\0" */
+        ptr = input + 5;
+    } else if ((m8 & UINT64_C(0xFFFFFFFFFF)) == UINT64_C(0x2044414548)) { /* "HEAD " */
         req->method_type = HTTP_HEAD;
-        memcpy(req->method, "HEAD", 5);
-        ptr += 5;
-    } else if (m4 == UINT32_C(0x20545550)) { /* "PUT " */
+        *(uint64_t*)req->method = UINT64_C(0x00000044414548); /* "HEAD\0\0\0\0" */
+        ptr = input + 5;
+    } else if ((uint32_t)m8 == UINT32_C(0x20545550)) { /* "PUT " */
         req->method_type = HTTP_PUT;
         *(uint32_t*)req->method = UINT32_C(0x00545550); /* "PUT\0" */
-        ptr += 4;
+        ptr = input + 4;
+    } else if ((m8 & UINT64_C(0x00FFFFFFFFFFFFFF)) ==
+               UINT64_C(0x00204554454C4544)) { /* "DELETE " */
+        req->method_type = HTTP_DELETE;
+        *(uint64_t*)req->method = UINT64_C(0x004554454C4544); /* "DELETE\0" */
+        ptr = input + 7;
+    } else if (m8 == UINT64_C(0x20534E4F4954504F)) { /* "OPTIONS " */
+        req->method_type = HTTP_OPTIONS;
+        memcpy(req->method, "OPTIONS\0", 8);
+        ptr = input + 8;
     } else {
-        const char* sp = memchr(ptr, ' ', 8);
+        const char* sp = (const char*)memchr(input, ' ', 8);
         if (!sp) return -1;
-        size_t mlen = (size_t)(sp - ptr);
+        size_t mlen = (size_t)(sp - input);
         if (mlen >= sizeof(req->method)) return -1;
-        memcpy(req->method, ptr, mlen);
+        memcpy(req->method, input, mlen);
         req->method[mlen] = '\0';
         req->method_type = http_method_from_string(req->method, mlen);
         ptr = sp + 1;
     }
 
-    const char* sp = memchr(ptr, ' ', input_len - (size_t)(ptr - input));
-    if (unlikely(!sp)) return -1;
+    const char* const end = input + input_len;
+
+    // 2. Ultra-Fast Root "/" Path (0-loop fast path)
+    if (likely(ptr[0] == '/' && ptr[1] == ' ')) {
+        const char* proto = ptr + 2;
+        if (unlikely((size_t)(end - proto) < 10)) return -1;
+
+        uint64_t h1;
+        uint16_t h2;
+        memcpy(&h1, proto, 8);
+        memcpy(&h2, proto + 8, 2);
+
+        if (likely(h1 == UINT64_C(0x312E312F50545448) &&
+                   h2 == UINT16_C(0x0A0D))) { /* "HTTP/1.1\r\n" */
+            *url_ptr = ptr;
+            *url_len = 1;
+            *line_end = proto + 10;
+            return 0;
+        }
+    }
+
+    // 3. Inlined Scalar Search (Zero libc calls, stops on ' ', '\r', '\n', or '\0')
+    const char* sp = ptr;
+    while (sp < end && (unsigned char)*sp > ' ') {
+        sp++;
+    }
+
+    if (unlikely(sp >= end || *sp != ' ')) return -1;
+
     *url_ptr = ptr;
     *url_len = (size_t)(sp - ptr);
 
+    // 4. Protocol Verification in 2 integer comparisons
     const char* proto = sp + 1;
-    if (unlikely(input_len < (size_t)(proto - input) + 10)) return -1;
+    if (unlikely((size_t)(end - proto) < 10)) return -1;
 
     uint64_t h1;
     uint16_t h2;
     memcpy(&h1, proto, 8);
     memcpy(&h2, proto + 8, 2);
 
-    if (unlikely(h1 != UINT64_C(0x312E312F50545448) || h2 != UINT16_C(0x0A0D))) {
-        return -1;
+    if (likely(h1 == UINT64_C(0x312E312F50545448) && h2 == UINT16_C(0x0A0D))) { /* "HTTP/1.1\r\n" */
+        *line_end = proto + 10;
+        return 0;
     }
 
-    *line_end = proto + 10;
-    return 0;
+    if (unlikely(h1 == UINT64_C(0x302E312F50545448) &&
+                 h2 == UINT16_C(0x0A0D))) { /* "HTTP/1.0\r\n" */
+        *line_end = proto + 10;
+        return 0;
+    }
+
+    return -1;
 }
 
 INLINE size_t decode_path_fast(const char* url, size_t url_len, char* dest, size_t dest_cap) {
@@ -1700,20 +1800,23 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
         return StatusBadRequest;
     }
 
-    size_t path_len = decode_path_fast(url_ptr, url_len, req->path, MAX_PATH_LEN);
-    if (!parse_query_params(conn, &path_len)) return StatusInternalServerError;
+    size_t path_len = decode_path_fast(url_ptr, url_len, req->path, sizeof(req->path));
+
+    if (!parse_query_params(conn, &path_len)) {
+        return StatusInternalServerError;
+    }
 
     const size_t hdr_off = (size_t)(line_end - buf);
-    if (!parse_request_headers(conn, line_end, req->method_type, headers_len - hdr_off))
+    if (!parse_request_headers(conn, line_end, req->method_type, headers_len - hdr_off)) {
         return StatusInternalServerError;
+    }
 
     *consumed = headers_len + req->content_length;
 
     route_t* route = route_match(req->path, path_len, req->method_type, conn->arena);
     if (!route) return StatusNotFound;
-    if (unlikely(route->route_type == ROUTE_TYPE_PARAM)) conn->arena_dirty = true;
-
     req->route = route;
+
     http_status status = parse_request_body(conn, buf, headers_len, read_bytes);
     if (status != StatusOK) return status;
 
@@ -1862,19 +1965,13 @@ INLINE int conn_accept(int listen_fd) {
 
 static void add_connection_to_worker(event_queue_t* queue, int client_fd, int worker_id,
                                      KeepAliveState* ka_state) {
-    Arena* arena = arena_create(1 << 20);
-    if (!arena) {
-        fprintf(stderr, "add_connection_to_worker->arena_create failed\n");
-        sys_close_direct(client_fd);
-        return;
-    }
-
-    /* Single calloc for PulsarConn without buffer partitioning */
-    PulsarConn* conn = calloc(1, sizeof(PulsarConn));
-    if (!conn) {
-        fprintf(stderr, "add_connection_to_worker calloc failed\n");
+    Arena* arena = NULL;
+    PulsarConn* conn = worker_pool_acquire(worker_id, &arena);
+    if (!conn || !arena) {
+        fprintf(stderr, "add_connection_to_worker pool acquire failed\n");
         sys_close_direct(client_fd);
         arena_destroy(arena);
+        free(conn);
         return;
     }
 
@@ -1882,8 +1979,7 @@ static void add_connection_to_worker(event_queue_t* queue, int client_fd, int wo
         fprintf(stderr, "init_connection failed\n");
         sys_close_direct(client_fd);
         locals_destroy(&conn->locals);
-        arena_destroy(arena);
-        free(conn);
+        worker_pool_release(worker_id, conn, arena);
         return;
     }
 
@@ -1897,8 +1993,7 @@ static void add_connection_to_worker(event_queue_t* queue, int client_fd, int wo
         conn->client_fd = -1;
         free_response_body(&conn->response);
         locals_destroy(&conn->locals);
-        arena_destroy(arena);
-        free(conn);
+        worker_pool_release(worker_id, conn, arena);
     }
 }
 
@@ -2233,11 +2328,14 @@ void* worker_thread(void* arg) {
     int listen_fd = worker->listen_fd;
     KeepAliveState* ka_state = worker->keep_alive_state;
 
+    worker_pool_init(worker_id);
+
     // Cache the thread-local buffer pointer ONCE:
     char* const read_buf = static_read_buf;
 
     if (event_add_server(queue, listen_fd) < 0) {
         perror("event_add_server");
+        worker_pool_cleanup(worker_id);
         return NULL;
     }
 
@@ -2265,7 +2363,7 @@ void* worker_thread(void* arg) {
             }
 
             if (mono_now - last_timeout_check >= 5) {
-                CheckKeepAliveTimeouts(ka_state, queue);
+                CheckKeepAliveTimeouts(ka_state, queue, worker_id);
                 last_timeout_check = mono_now;
             }
         }
@@ -2291,7 +2389,7 @@ void* worker_thread(void* arg) {
                 else if (ev->error)
                     conn->closing = true;
 
-                if (conn->closing) close_connection(queue, conn, ka_state);
+                if (conn->closing) close_connection(queue, conn, ka_state, worker_id);
             }
         }
     }
@@ -2299,6 +2397,7 @@ void* worker_thread(void* arg) {
     event_delete(queue, listen_fd);
     sys_close_direct(listen_fd);
     event_queue_free(queue);
+    worker_pool_cleanup(worker_id);
     return NULL;
 }
 
