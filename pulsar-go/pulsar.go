@@ -12,7 +12,7 @@ package pulsar
 */
 import "C"
 import (
-	"context" // for context.Context
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"

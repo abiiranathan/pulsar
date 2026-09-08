@@ -35,7 +35,8 @@ size_t bridge_get_path_params_count(PulsarConn* conn);
 void bridge_get_path_param_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
                               const char** val, size_t* val_len);
 
-/* Zero-allocation Query & Header slice helpers */
+/* Zero-allocation Query & Header slice helpers.
+ * name is NOT NUL-terminated (Go string data); length given by name_len. */
 int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
                      size_t* out_len);
 int bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,

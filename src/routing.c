@@ -114,9 +114,11 @@ static MethodRouter method_routers[HTTP_METHOD_COUNT] ALIGN(CACHELINE_SIZE) = {0
 
 /** Master list of routes created at registration */
 static route_t** global_routes = NULL;
-static size_t global_route_count = 0;
 static size_t global_route_capacity = 0;
 
+// Total number of registered global routes.
+// This MUST be exported for use by cgo.
+size_t global_route_count = 0;
 /*
  * ------------------------------------------------------------------------
  * Helpers & Tree Construction

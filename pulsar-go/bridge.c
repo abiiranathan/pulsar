@@ -38,22 +38,27 @@ typedef struct {
 #define GO_BINDING_FROM_PATTERN(p) \
     ((const GoBinding*)((const char*)(p) - offsetof(GoBinding, pattern)))
 
-extern size_t global_route_count;
-
 /**
  * Registered Go route bindings, in registration order.
  *
  * Parallel to g_registered_method. Entries are appended by
  * pulsar_bridge_add_route() and never removed or reordered; routes live for
  * the lifetime of the process.
+ *
+ * The C router (routing.c) now grows its global route list dynamically, so
+ * the bridge mirrors that: these arrays grow via realloc instead of the old
+ * fixed MAX_ROUTES cap.
  */
-static const GoBinding* g_registered[MAX_ROUTES];
+static const GoBinding** g_registered = NULL;
 
 /** HTTP method for g_registered[i], parallel array. */
-static HttpMethod g_registered_method[MAX_ROUTES];
+static HttpMethod* g_registered_method = NULL;
 
 /** Number of valid entries in g_registered / g_registered_method. */
 static size_t g_registered_count = 0;
+
+/** Capacity of g_registered / g_registered_method. */
+static size_t g_registered_capacity = 0;
 
 /**
  * Returns the length of a path-parameter name starting at s, i.e. the run
@@ -151,6 +156,7 @@ static GoBinding* binding_new(const char* pattern, int go_id) {
                     }
                     k++;
                 }
+
                 if (k >= in_len) {
                     goto invalid;  // Unterminated constraint.
                 }
@@ -174,8 +180,10 @@ static GoBinding* binding_new(const char* pattern, int go_id) {
                 // Skip a balanced "(...)" constraint (not enforceable).
                 int depth = 0;
                 do {
-                    if (pattern[k] == '(') depth++;
-                    else if (pattern[k] == ')') depth--;
+                    if (pattern[k] == '(')
+                        depth++;
+                    else if (pattern[k] == ')')
+                        depth--;
                     k++;
                 } while (k < in_len && depth > 0);
                 if (depth != 0) {
@@ -244,17 +252,14 @@ void pulsar_c_trampoline(PulsarCtx* ctx) {
  *                the C router's sort order.
  * @param route_id Non-negative identifier the Go side uses to look up the
  *                 corresponding handler chain.
- * @return 0 on success. -1 if route_id is negative, method is invalid, the
- *         route table is full, pattern is malformed, or (method, pattern)
- *         is already registered.
+ * @return 0 on success. -1 if route_id is negative, method is invalid,
+ *         pattern is malformed, (method, pattern) is already registered,
+ *         or allocation fails.
  * @note Not safe for concurrent use; call only during single-threaded
  *       startup before Listen begins serving traffic.
  */
 int pulsar_bridge_add_route(int method, const char* pattern, int route_id) {
     if (route_id < 0 || !METHOD_VALID(method)) {
-        return -1;
-    }
-    if (g_registered_count >= MAX_ROUTES || global_route_count >= MAX_ROUTES) {
         return -1;
     }
 
@@ -275,6 +280,26 @@ int pulsar_bridge_add_route(int method, const char* pattern, int route_id) {
     if (!r) {
         free(b);
         return -1;
+    }
+
+    if (g_registered_count >= g_registered_capacity) {
+        size_t new_cap = g_registered_capacity == 0 ? 64 : g_registered_capacity * 2;
+        const GoBinding** new_regs =
+            (const GoBinding**)realloc(g_registered, new_cap * sizeof(*new_regs));
+        if (!new_regs) {
+            free(b);
+            return -1;
+        }
+        HttpMethod* new_methods =
+            (HttpMethod*)realloc(g_registered_method, new_cap * sizeof(*new_methods));
+        if (!new_methods) {
+            free((void*)new_regs);
+            free(b);
+            return -1;
+        }
+        g_registered = new_regs;
+        g_registered_method = new_methods;
+        g_registered_capacity = new_cap;
     }
 
     g_registered[g_registered_count] = b;
@@ -301,7 +326,7 @@ int pulsar_bridge_add_route(int method, const char* pattern, int route_id) {
  *       startup before Listen begins serving traffic.
  */
 int pulsar_bridge_add_static(const char* pattern, const char* dirname) {
-    if (!pattern || !dirname || global_route_count >= MAX_ROUTES) {
+    if (!pattern || !dirname) {
         return -1;
     }
 
@@ -474,10 +499,13 @@ void bridge_get_path_param_at(PulsarConn* conn, size_t idx, const char** name, s
  */
 int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
                      size_t* out_len) {
-    if (!conn || !conn->request.query_params || !name || name_len == 0) {
+    if (!conn || !name || name_len == 0 || !out_data || !out_len) {
         return 0;
     }
-    const headers_t* q = conn->request.query_params;
+    /* request.query_params is now an inline struct (not a pointer); Go
+     * strings are not NUL-terminated, so scan with the explicit length
+     * instead of query_get() (which needs a C string and arena-copies). */
+    const headers_t* q = &conn->request.query_params;
     StrSlice target = {.data = (char*)name, .len = name_len};
     for (size_t i = 0; i < q->count; ++i) {
         if (ss_equal_nocase(q->entries[i].name, target)) {
@@ -506,10 +534,11 @@ int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const 
  */
 int bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
                           const char** out_data, size_t* out_len) {
-    if (!conn || !conn->request.headers || !name || name_len == 0) {
+    if (!conn || !name || name_len == 0 || !out_data || !out_len) {
         return 0;
     }
-    const headers_t* h = conn->request.headers;
+    /* Same as above: inline struct + non-NUL-terminated Go name. */
+    const headers_t* h = &conn->request.headers;
     StrSlice target = {.data = (char*)name, .len = name_len};
     for (size_t i = 0; i < h->count; ++i) {
         if (ss_equal_nocase(h->entries[i].name, target)) {
@@ -528,10 +557,10 @@ int bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
  * @return Query parameter count (0 when the URL carries no query string).
  */
 size_t bridge_query_count(PulsarConn* conn) {
-    if (!conn || !conn->request.query_params) {
+    if (!conn) {
         return 0;
     }
-    return conn->request.query_params->count;
+    return conn->request.query_params.count;
 }
 
 /**
@@ -541,13 +570,14 @@ size_t bridge_query_count(PulsarConn* conn) {
  */
 int bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
                     const char** val, size_t* val_len) {
-    if (!conn || !conn->request.query_params || !name || !name_len || !val || !val_len) {
+    if (!conn || !name || !name_len || !val || !val_len) {
         return 0;
     }
-    const headers_t* q = conn->request.query_params;
+    const headers_t* q = &conn->request.query_params;
     if (idx >= q->count) {
         return 0;
     }
+
     *name = q->entries[idx].name.data;
     *name_len = q->entries[idx].name.len;
     *val = q->entries[idx].value.data;
@@ -559,10 +589,10 @@ int bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* nam
  * Returns the number of request headers.
  */
 size_t bridge_req_headers_count(PulsarConn* conn) {
-    if (!conn || !conn->request.headers) {
+    if (!conn) {
         return 0;
     }
-    return conn->request.headers->count;
+    return conn->request.headers.count;
 }
 
 /**
@@ -572,10 +602,10 @@ size_t bridge_req_headers_count(PulsarConn* conn) {
  */
 int bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
                          const char** val, size_t* val_len) {
-    if (!conn || !conn->request.headers || !name || !name_len || !val || !val_len) {
+    if (!conn || !name || !name_len || !val || !val_len) {
         return 0;
     }
-    const headers_t* h = conn->request.headers;
+    const headers_t* h = &conn->request.headers;
     if (idx >= h->count) {
         return 0;
     }
@@ -691,8 +721,8 @@ int bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_
     /* Content-Type is stored as a non-NUL-terminated slice; make a
      * NUL-terminated stack copy for parse_boundary(). */
     StrSlice ct = {.data = NULL, .len = 0};
-    if (conn->request.headers) {
-        const headers_t* h = conn->request.headers;
+    {
+        const headers_t* h = &conn->request.headers;
         StrSlice target = {.data = "Content-Type", .len = 12};
         for (size_t i = 0; i < h->count; ++i) {
             if (ss_equal_nocase(h->entries[i].name, target)) {

@@ -12,7 +12,7 @@
 
 // Number of workers. Should be ideally == ncpus.
 #ifndef NUM_WORKERS
-    #define NUM_WORKERS 4
+#define NUM_WORKERS 4
 #endif
 
 // Number of slow workers processing SSE or websocket requests.
@@ -20,12 +20,12 @@
 
 // maximum path length
 #ifndef MAX_PATH_LEN
-    #define MAX_PATH_LEN 1024
+#define MAX_PATH_LEN 1024
 #endif
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-    #define MAX_EVENTS 4096
+#define MAX_EVENTS 4096
 #endif
 
 // Buffer size for incoming request excluding body.
@@ -35,13 +35,13 @@
 
 // Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
 #ifndef WRITE_BUFFER_SIZE
-    #define WRITE_BUFFER_SIZE 4096
+#define WRITE_BUFFER_SIZE 4096
 #endif
 
 // Default buffer size for response body above which allocation happens, allocating
 // WRITE_BUFFER_SIZE.
 #ifndef STACK_BUFFER_SIZE
-    #define STACK_BUFFER_SIZE 512
+#define STACK_BUFFER_SIZE 512
 #endif
 
 // How often the background thread refreshes the preformatted
@@ -53,13 +53,13 @@
 
 // Keep-Alive connection timeout in seconds.
 #ifndef CONNECTION_TIMEOUT
-    #define CONNECTION_TIMEOUT 60
+#define CONNECTION_TIMEOUT 60
 #endif
 
 // Max Request body allowed. Default 10 MB
 // You need to increase this to allow large file uploads.
 #ifndef MAX_BODY_SIZE
-    #define MAX_BODY_SIZE (10 << 20)
+#define MAX_BODY_SIZE (10 << 20)
 #endif
 
 /**
@@ -67,22 +67,17 @@
  * @brief Maximum allowed file size (25KB default) in multipart forms.
  */
 #ifndef MAX_FILE_SIZE
-    #define MAX_FILE_SIZE (25 * 1024)
-#endif
-
-// Maximum number of routes to support.
-#ifndef MAX_ROUTES
-    #define MAX_ROUTES 128
+#define MAX_FILE_SIZE (25 * 1024)
 #endif
 
 // Maximum number of global middleware
 #ifndef MAX_GLOBAL_MIDDLEWARE
-    #define MAX_GLOBAL_MIDDLEWARE 16
+#define MAX_GLOBAL_MIDDLEWARE 16
 #endif
 
 // Maximum number of route middleware
 #ifndef MAX_ROUTE_MIDDLEWARE
-    #define MAX_ROUTE_MIDDLEWARE 2
+#define MAX_ROUTE_MIDDLEWARE 2
 #endif
 
 // Constants
@@ -92,7 +87,6 @@
 
 _Static_assert(NUM_WORKERS > 0, "NUM_WORKERS must be > 0");
 _Static_assert(MAX_EVENTS > 0, "MAX_EVENTS must be > 0");
-_Static_assert(MAX_ROUTES > 0, "MAX_ROUTES must be > 0");
 _Static_assert(MAX_GLOBAL_MIDDLEWARE > 0, "MAX_GLOBAL_MIDDLEWARE must be > 0");
 _Static_assert(MAX_ROUTE_MIDDLEWARE > 0, "MAX_ROUTE_MIDDLEWARE must be > 0");
 _Static_assert(READ_BUFFER_SIZE >= 1024, "READ_BUFFER_SIZE must be at least 1KB");
