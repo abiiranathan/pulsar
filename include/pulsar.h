@@ -149,12 +149,6 @@ bool pulsar_set_callback(PulsarCallback cb, int fd);
  */
 void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns);
 
-// Set a user-owned value pointer to the context with a callback function to
-// free the value. The function may be NULL if the value is not to be freed.
-// Returns true on success.
-// The key length is computed by strlen(key) and must be a valid null-terminated string.
-#define pulsar_setvalue(conn, key, value, free_func) LocalsSetValue(&conn->locals, key, value, free_func)
-
 /**
  * @brief Allocate memory of at least 'size' bytes that is managed by the
  * server.
@@ -275,6 +269,12 @@ static inline void* pulsar_realloc(PulsarConn* conn, void* ptr, size_t old_size,
 
 // Get a context value stored with pulsar_set.
 void* pulsar_get(PulsarConn* conn, const char* key);
+
+// Set a user-owned value pointer to the context with a callback function to
+// free the value. The function may be NULL if the value is not to be freed.
+// Returns true on success.
+// The key length is computed by strlen(key) and must be a valid null-terminated string.
+bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func);
 
 // Delete the context value stored with pulsar_set.
 void pulsar_delete(PulsarConn* conn, const char* key);

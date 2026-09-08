@@ -1697,10 +1697,6 @@ void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns) {
     plog_submit(&PLOG_STATE, &ev);
 }
 
-bool pulsar_set(PulsarConn* conn, const char* k, void* v, ValueFreeFunc ff) {
-    return locals_setvalue(&conn->locals, k, v, ff);
-}
-
 Arena* pulsar_get_arena(PulsarConn* conn) { return conn->arena; }
 
 void* pulsar_alloc(PulsarConn* conn, size_t sz) {
@@ -1708,8 +1704,20 @@ void* pulsar_alloc(PulsarConn* conn, size_t sz) {
     return p;
 }
 
-void* pulsar_get(PulsarConn* conn, const char* k) { return locals_getvalue(&conn->locals, k); }
-void pulsar_delete(PulsarConn* conn, const char* k) { locals_remove(&conn->locals, k); }
+void* pulsar_get(PulsarConn* conn, const char* k) {
+    // Return saved context value
+    return locals_getvalue(&conn->locals, k);
+}
+
+bool pulsar_set(PulsarConn* conn, const char* key, void* value, ValueFreeFunc free_func) {
+    // Store context value.
+    return locals_setvalue(&conn->locals, key, value, free_func);
+}
+
+void pulsar_delete(PulsarConn* conn, const char* k) {
+    // Delete context value
+    locals_remove(&conn->locals, k);
+}
 
 INLINE void request_complete(PulsarConn* conn) {
 #if ENABLE_LOGGING
