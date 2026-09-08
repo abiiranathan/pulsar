@@ -1,120 +1,128 @@
+/**
+ * High-performance, Thread-Safe Radix router with O(1) exact lookup.
+ *
+ * Thread Safety & Concurrency
+ * ---------------------------
+ * - All global routing structures are read-only post-startup.
+ * - Per-method structures are 64-byte cacheline-aLIGN.
+ * - Parameter matching allocates the returned route_t and PathParams
+ *   strictly from the caller's per-request Arena. No shared memory is
+ *   ever mutated during route_match().
+ */
+
 #include "../include/routing.h"
+
 #include <solidc/arena.h>
 #include <solidc/filepath.h>
-#include <stdalign.h>
+#include <solidc/macros.h>  // for ASSERT
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include <solidc/align.h>
 #include "../include/method.h"
 
-/** Static file handler provided by pulsar.c. */
 extern void static_file_handler(PulsarCtx* ctx);
 
-/** Global route storage. */
-ALIGN(64) route_t global_routes[MAX_ROUTES] = {0};
-ALIGN(64) size_t global_route_count = 0;
-
-// Metadata for routes.
-typedef struct {
-    const char* pattern;  /**< Pointer to pattern string (permanent lifetime). */
-    route_t* target;      /**< Pointer to the full route_t (used on match). */
-    uint16_t pattern_len; /**< Byte length of pattern. */
-    uint8_t route_type;   /**< ROUTE_TYPE_{EXACT,STATIC,PARAM}. */
-    char first_char;      /**< pattern[0], pre-extracted to avoid a pointer chase. */
-    uint8_t _pad[4];      /**< Pad to exactly 24 B (LP64 natural alignment). */
-} RouteMetadata;
+#define CACHELINE_SIZE       64
+#define MAX_PARAMS_PER_ROUTE 8
 
 /*
- * Method-specific pointer directory.
- *
- * Struct is exactly 16 bytes (a power of two). This allows the compiler to index
- * into `method_routes[method]` using a single shift instruction (e.g. `shl rax, 4`)
- * instead of generating an expensive `imul` integer multiplication.
- *
- * All directories fit within two 64-byte cache lines. Both `routes` and `count`
- * are guaranteed to reside in the same cache line.
+ * ------------------------------------------------------------------------
+ * Fast FNV-1a Hash
+ * ------------------------------------------------------------------------
  */
-typedef struct {
-    RouteMetadata* routes; /**< Pointer to flat backing storage. */
-    uint16_t count;        /**< Number of active entries. */
-    uint16_t _pad[3];      /**< Explicit padding to align to exactly 16 B. */
-} MethodRoutes;
 
-ALIGN(64) MethodRoutes method_routes[HTTP_METHOD_COUNT] = {0};
+#define FNV_OFFSET_BASIS_64 14695981039346656037ULL
+#define FNV_PRIME_64        1099511628211ULL
 
-/* Flat, contiguous backing storage allocated once statically. */
-ALIGN(64) RouteMetadata method_route_storage[HTTP_METHOD_COUNT][MAX_ROUTES] = {0};
-
-/*
- * Portable __builtin_memcmp shim.
- *
- * GCC and Clang expand __builtin_memcmp to inline scalar/SIMD comparisons
- * for sizes known at compile time, and to a direct call (no PLT) otherwise.
- * The PLT call to bcmp@plt that appeared in the profiling report is the
- * symptom this shim addresses. On compilers that don't provide the builtin
- * the macro falls back to the standard memcmp, which is correct if slower.
- */
-#if defined(__GNUC__) || defined(__clang__)
-    #define ROUTE_MEMCMP(a, b, n) __builtin_memcmp((a), (b), (n))
-#else
-    #define ROUTE_MEMCMP(a, b, n) memcmp((a), (b), (n))
-#endif
-
-/*
- * Exact-match hash table (method + path -> route_t*).
- *
- * Exact routes dominate real-world traffic ("GET /", "GET /api/users"), and
- * the linear scan pays a length compare + first-char compare + memcmp per
- * candidate. This open-addressed table resolves them in one probe on average.
- * Built once in sort_routes(); read-only afterwards, so no locking needed.
- *
- */
-#define EXACT_TABLE_SIZE MAX_ROUTES * 2 /* power of two; >= 2x MAX_ROUTES */
-typedef struct {
-    const char* pattern;
-    route_t* target;
-    uint16_t pattern_len;
-    uint16_t method; /**< HttpMethod, folded into the probe key. */
-} ExactEntry;
-
-ALIGN(64) static ExactEntry exact_table[EXACT_TABLE_SIZE] = {0};
-
-/** FNV-1a over the path bytes, mixed with the method for bucket spread. */
-static inline size_t exact_hash(const char* path, size_t len, uint16_t method) {
-    uint64_t h = 1469598103934665603ULL;
+INLINE uint64_t hash_path(const char* path, size_t len) {
+    uint64_t hash = FNV_OFFSET_BASIS_64;
     for (size_t i = 0; i < len; i++) {
-        h ^= (unsigned char)path[i];
-        h *= 1099511628211ULL;
+        hash ^= (uint64_t)(uint8_t)path[i];
+        hash *= FNV_PRIME_64;
     }
-    h ^= (uint64_t)method * 0x9E3779B97F4A7C15ULL;
-    h ^= h >> 29;
-    return (size_t)h & (EXACT_TABLE_SIZE - 1);
+    return hash;
 }
 
-/**
- * Looks up an EXACT route by method + path in O(1).
- * @return Matched route, or NULL.
+/*
+ * ------------------------------------------------------------------------
+ * Exact Route Hash Table
+ * ------------------------------------------------------------------------
  */
-static inline route_t* exact_lookup(const char* path, size_t len, HttpMethod method) {
-    size_t i = exact_hash(path, len, (uint16_t)method);
-    while (exact_table[i].target) {
-        if (exact_table[i].method == (uint16_t)method && exact_table[i].pattern_len == len &&
-            ROUTE_MEMCMP(exact_table[i].pattern, path, len) == 0) {
-            return exact_table[i].target;
-        }
-        i = (i + 1) & (EXACT_TABLE_SIZE - 1);
-    }
-    return NULL;
-}
 
-/**
- * Counts path parameters in a pattern and validates its syntax.
- *
- * Single-pass: each character is visited exactly once.
- *
- * @param pattern Route pattern string to inspect.
- * @param valid   Output flag; set to false on malformed input, true otherwise.
- * @return Number of {param} placeholders found; 0 on invalid pattern.
+typedef struct ExactRouteEntry {
+    uint64_t hash;
+    const route_t* route;
+} ExactRouteEntry;
+
+typedef struct ExactRouteTable {
+    ExactRouteEntry* entries;
+    size_t capacity;
+    size_t mask;
+    size_t count;
+} ExactRouteTable;
+
+/*
+ * ------------------------------------------------------------------------
+ * Radix Tree Structures
+ * ------------------------------------------------------------------------
  */
+
+typedef enum NodeKind {
+    NODE_LITERAL = 0,
+    NODE_PARAM,
+} NodeKind;
+
+typedef struct RadixNode {
+    NodeKind kind;
+    char* edge;
+    uint16_t edge_len;
+
+    char* param_name;
+    uint16_t param_name_len;
+
+    const route_t* route;
+    struct RadixNode* param_child;
+
+    char* indices;
+    struct RadixNode** children;
+    uint16_t child_count;
+    uint16_t child_capacity;
+} RadixNode;
+
+/*
+ * ------------------------------------------------------------------------
+ * Cache-ALIGN Per-Method Routing State
+ * ------------------------------------------------------------------------
+ * Grouping all lookup data for a method into a 64-byte aLIGN struct prevents
+ * cacheline straddling and eliminates any possibility of false sharing.
+ */
+
+typedef struct ALIGN(CACHELINE_SIZE) MethodRouter {
+    const route_t* fast_root;
+    ExactRouteTable exact_table;
+    RadixNode* radix_root;
+    route_t** static_routes;
+    size_t static_route_count;
+} MethodRouter;
+
+static MethodRouter method_routers[HTTP_METHOD_COUNT] ALIGN(CACHELINE_SIZE) = {0};
+
+/** Master list of routes created at registration */
+static route_t** global_routes = NULL;
+static size_t global_route_count = 0;
+static size_t global_route_capacity = 0;
+
+/*
+ * ------------------------------------------------------------------------
+ * Helpers & Tree Construction
+ * ------------------------------------------------------------------------
+ */
+
 static size_t count_path_params(const char* pattern, bool* valid) {
     const char* p = pattern;
     size_t count = 0;
@@ -122,22 +130,22 @@ static size_t count_path_params(const char* pattern, bool* valid) {
 
     while (*p) {
         if (*p == '{') {
-            p++; /* step past '{' before inner scan */
+            p++;
             while (*p && *p != '}') {
                 if (*p == '{') {
-                    *valid = false; /* nested brace — illegal */
+                    *valid = false;
                     return 0;
                 }
                 p++;
             }
             if (*p != '}') {
-                *valid = false; /* unterminated brace */
+                *valid = false;
                 return 0;
             }
             count++;
-            p++; /* step past '}' */
+            p++;
         } else if (*p == '}') {
-            *valid = false; /* unmatched closing brace */
+            *valid = false;
             return 0;
         } else {
             p++;
@@ -146,111 +154,267 @@ static size_t count_path_params(const char* pattern, bool* valid) {
     return count;
 }
 
-/**
- * Classifies a route based on its pattern and sets the parameter count.
- *
- * @param pattern   Route pattern string.
- * @param is_static True for static file routes.
- * @param nparams   Output: number of path parameters found.
- * @return ROUTE_TYPE_STATIC, ROUTE_TYPE_EXACT, or ROUTE_TYPE_PARAM.
- */
-INLINE uint8_t classify_route(const char* pattern, bool is_static, uint8_t* nparams) {
-    if (is_static) return ROUTE_TYPE_STATIC;
-
-    bool valid;
-    *nparams = (uint8_t)count_path_params(pattern, &valid);
-    ASSERT(valid && "Invalid path parameters in pattern");
-    return (*nparams > 0) ? ROUTE_TYPE_PARAM : ROUTE_TYPE_EXACT;
-}
-
-/**
- * Pre-populates param names in a PathParams structure from a route pattern.
- *
- * Called once at registration time so that the hot-path matcher only needs
- * to write extracted values, never names.
- *
- * @param pattern     Route pattern containing {name} placeholders.
- * @param path_params Destination structure; items must already be allocated
- *                    and total_params must reflect the actual placeholder count.
- */
-static void populate_param_names(const char* pattern, PathParams* path_params) {
-    const char* p = pattern;
-    uint8_t idx = 0;
-    const uint8_t total = path_params->total_params;
-
-    while (*p && idx < total) {
-        if (*p != '{') {
-            p++;
-            continue;
-        }
-
-        p++; /* skip '{' */
-        const char* name_start = p;
-        while (*p && *p != '}') p++;
-
-        /* Pattern was validated by count_path_params; '}' is guaranteed. */
-        const size_t name_len = (size_t)(p - name_start);
-        p++; /* skip '}' */
-
-        /*
-         * Names are stored as interior pointers into the (static, permanent)
-         * pattern string. No allocation is needed; lifetime matches the route.
-         * We cast away const to satisfy the non-const field, but the pointer
-         * will never be written through in the matcher.
-         */
-        path_params->items[idx].name = (char*)name_start;
-        path_params->items[idx].name_len = name_len;
-        idx++;
+static RadixNode* radix_node_create(NodeKind kind) {
+    RadixNode* node = (RadixNode*)calloc(1, sizeof(RadixNode));
+    if (unlikely(node == NULL)) {
+        ASSERT(node != NULL && "Failed to allocate RadixNode");
     }
+    node->kind = kind;
+    return node;
 }
 
-/**
- * Internal route registration helper.
- *
- * @param pattern   URL pattern string (must have static lifetime).
- * @param method    HTTP method enum value.
- * @param handler   Request handler function.
- * @param is_static True for static file routes.
- * @return Pointer to the newly registered route_t entry.
+static size_t common_prefix_len(const char* a, const char* b, size_t max) {
+    size_t i = 0;
+    while (i < max && a[i] == b[i]) {
+        i++;
+    }
+    return i;
+}
+
+static void radix_node_add_literal_child(RadixNode* parent, RadixNode* child) {
+    ASSERT(child->edge_len > 0 && "Literal child must have non-empty edge");
+
+    if (parent->child_count >= parent->child_capacity) {
+        size_t new_cap = parent->child_capacity == 0 ? 4 : (size_t)parent->child_capacity * 2;
+        char* new_indices = (char*)realloc(parent->indices, new_cap);
+        ASSERT(new_indices != NULL && "Failed to grow node indices");
+
+        RadixNode** new_children =
+            (RadixNode**)realloc(parent->children, new_cap * sizeof(RadixNode*));
+        ASSERT(new_children != NULL && "Failed to grow node children");
+
+        parent->indices = new_indices;
+        parent->children = new_children;
+        parent->child_capacity = (uint16_t)new_cap;
+    }
+
+    parent->indices[parent->child_count] = child->edge[0];
+    parent->children[parent->child_count] = child;
+    parent->child_count++;
+}
+
+static RadixNode* radix_find_literal_child(const RadixNode* parent, char c, uint16_t* index_out) {
+    for (uint16_t i = 0; i < parent->child_count; i++) {
+        if (parent->indices[i] == c) {
+            if (index_out) *index_out = i;
+            return parent->children[i];
+        }
+    }
+    return NULL;
+}
+
+static void radix_node_split(RadixNode* node, size_t at) {
+    ASSERT(at > 0 && at < node->edge_len && "Invalid split point");
+
+    RadixNode* tail = radix_node_create(NODE_LITERAL);
+    tail->edge_len = (uint16_t)(node->edge_len - at);
+    tail->edge = (char*)malloc(tail->edge_len + 1);
+    ASSERT(tail->edge != NULL && "Edge allocation failed");
+    memcpy(tail->edge, node->edge + at, tail->edge_len);
+    tail->edge[tail->edge_len] = '\0';
+
+    // Transfer state and child arrays to tail
+    tail->route = node->route;
+    tail->param_child = node->param_child;
+    tail->child_count = node->child_count;
+    tail->child_capacity = node->child_capacity;
+    tail->children = node->children;
+    tail->indices = node->indices;
+
+    // Shrink edge in parent
+    char* shrunk_edge = (char*)malloc(at + 1);
+    ASSERT(shrunk_edge != NULL && "Edge allocation failed");
+    memcpy(shrunk_edge, node->edge, at);
+    shrunk_edge[at] = '\0';
+
+    free(node->edge);
+    node->edge = shrunk_edge;
+    node->edge_len = (uint16_t)at;
+    node->route = NULL;
+    node->param_child = NULL;
+    node->child_count = 0;
+    node->child_capacity = 0;
+    node->children = NULL;
+    node->indices = NULL;
+
+    radix_node_add_literal_child(node, tail);
+}
+
+static void radix_insert(RadixNode* root, const char* pattern, const route_t* r) {
+    if (*pattern == '\0') {
+        ASSERT(root->route == NULL && "Duplicate route registered");
+        root->route = r;
+        return;
+    }
+
+    if (*pattern == '{') {
+        const char* name_start = pattern + 1;
+        const char* end = strchr(name_start, '}');
+        ASSERT(end != NULL && "Malformed parameter in pattern");
+        size_t name_len = (size_t)(end - name_start);
+        const char* rest = end + 1;
+
+        if (root->param_child == NULL) {
+            RadixNode* pnode = radix_node_create(NODE_PARAM);
+            pnode->param_name = (char*)name_start;
+            pnode->param_name_len = (uint16_t)name_len;
+            root->param_child = pnode;
+        }
+        radix_insert(root->param_child, rest, r);
+        return;
+    }
+
+    uint16_t child_idx = 0;
+    RadixNode* child = radix_find_literal_child(root, pattern[0], &child_idx);
+    if (child == NULL) {
+        const char* stop = strchr(pattern, '{');
+        size_t lit_len = stop ? (size_t)(stop - pattern) : strlen(pattern);
+
+        RadixNode* node = radix_node_create(NODE_LITERAL);
+        node->edge_len = (uint16_t)lit_len;
+        node->edge = (char*)malloc(lit_len + 1);
+        ASSERT(node->edge != NULL && "Edge allocation failed");
+        memcpy(node->edge, pattern, lit_len);
+        node->edge[lit_len] = '\0';
+
+        radix_node_add_literal_child(root, node);
+        radix_insert(node, pattern + lit_len, r);
+        return;
+    }
+
+    size_t rem = strlen(pattern);
+    size_t max_shared = rem < child->edge_len ? rem : child->edge_len;
+    size_t shared = common_prefix_len(pattern, child->edge, max_shared);
+
+    const char* brace = (const char*)memchr(pattern, '{', shared);
+    if (brace) {
+        shared = (size_t)(brace - pattern);
+    }
+
+    if (shared < child->edge_len) {
+        radix_node_split(child, shared);
+    }
+    radix_insert(child, pattern + shared, r);
+}
+
+/*
+ * ------------------------------------------------------------------------
+ * Exact Route Table
+ * ------------------------------------------------------------------------
  */
-static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler, int is_static) {
-    ASSERT(global_route_count < MAX_ROUTES && "Route table full");
+
+static void exact_table_init(ExactRouteTable* table, size_t min_capacity) {
+    size_t cap = 16;
+    while (cap < min_capacity * 2) {
+        cap <<= 1;
+    }
+    table->capacity = cap;
+    table->mask = cap - 1;
+    table->entries = (ExactRouteEntry*)calloc(cap, sizeof(ExactRouteEntry));
+    ASSERT(table->entries != NULL && "Exact route table allocation failed");
+    table->count = 0;
+}
+
+static void exact_table_insert(ExactRouteTable* table, const route_t* r) {
+    uint64_t hash = hash_path(r->pattern, r->pattern_len);
+    size_t idx = (size_t)(hash & table->mask);
+
+    while (table->entries[idx].route != NULL) {
+        idx = (idx + 1) & table->mask;
+    }
+
+    table->entries[idx].hash = hash;
+    table->entries[idx].route = r;
+    table->count++;
+}
+
+INLINE const route_t* exact_table_lookup(const ExactRouteTable* table, const char* path,
+                                         size_t len) {
+    if (unlikely(table->entries == NULL)) return NULL;
+
+    uint64_t hash = hash_path(path, len);
+    size_t idx = (size_t)(hash & table->mask);
+
+    while (table->entries[idx].route != NULL) {
+        if (table->entries[idx].hash == hash) {
+            const route_t* r = table->entries[idx].route;
+            if (r->pattern_len == len && memcmp(r->pattern, path, len) == 0) {
+                return r;
+            }
+        }
+        idx = (idx + 1) & table->mask;
+    }
+    return NULL;
+}
+
+/*
+ * ------------------------------------------------------------------------
+ * Public API: Registration
+ * ------------------------------------------------------------------------
+ */
+
+static route_t* route_register_helper(const char* pattern, HttpMethod method, HttpHandler handler,
+                                      int is_static) {
     ASSERT(METHOD_VALID(method) && "Invalid HTTP method");
     ASSERT(pattern && handler && "pattern and handler must not be NULL");
 
-    uint8_t nparams = 0;
-    route_t* r = &global_routes[global_route_count];
+    if (global_route_count >= global_route_capacity) {
+        size_t new_cap = global_route_capacity == 0 ? 64 : global_route_capacity * 2;
+        route_t** new_routes = (route_t**)realloc(global_routes, new_cap * sizeof(route_t*));
+        ASSERT(new_routes != NULL && "Failed to grow global route list");
+        global_routes = new_routes;
+        global_route_capacity = new_cap;
+    }
 
-    /* Zero-initialise the whole entry via compound literal, then fill fields.
-     * A single memset-equivalent store is cheaper than piecemeal zeroing. */
+    route_t* r = (route_t*)calloc(1, sizeof(route_t));
+    ASSERT(r != NULL && "Failed to allocate route_t");
+
     *r = (route_t){
         .pattern = pattern,
         .pattern_len = (uint16_t)strlen(pattern),
         .method = method,
         .handler = handler,
-        .route_type = classify_route(pattern, is_static, &nparams),
     };
+    global_routes[global_route_count++] = r;
 
-    if (r->route_type == ROUTE_TYPE_PARAM && nparams > 0) {
-        r->state.path_params = malloc(sizeof(PathParams));
-        ASSERT(r->state.path_params && "Failed to allocate PathParams");
-
-        /* calloc zero-initialises name/value pointers in every PathParam. */
-        r->state.path_params->items = calloc(nparams, sizeof(PathParam));
-        ASSERT(r->state.path_params->items && "Failed to allocate PathParam array");
-
-        r->state.path_params->match_count = 0;
-        r->state.path_params->total_params = nparams;
-
-        /*
-         * Pre-populate parameter names once at registration time.
-         * The hot-path matcher (match_path_parameters) then only writes
-         * values, eliminating arena_strdupn calls for names on each request.
-         */
-        populate_param_names(pattern, r->state.path_params);
+    if (is_static) {
+        r->route_type = ROUTE_TYPE_STATIC;
+        return r;
     }
 
-    global_route_count++;
+    bool valid = true;
+    size_t nparams = count_path_params(pattern, &valid);
+    ASSERT(valid && "Invalid path parameters in pattern");
+    ASSERT(nparams <= MAX_PARAMS_PER_ROUTE && "Too many {params} in pattern");
+    r->route_type = (nparams > 0) ? ROUTE_TYPE_PARAM : ROUTE_TYPE_EXACT;
+
+    if (r->route_type == ROUTE_TYPE_PARAM) {
+        // Metadata template stored in the global route: contains param names only.
+        // Dynamic values are written into per-request arena instances during match.
+        r->state.path_params = (PathParams*)malloc(sizeof(PathParams));
+        ASSERT(r->state.path_params && "Failed to allocate PathParams template");
+        r->state.path_params->items = (PathParam*)calloc(nparams, sizeof(PathParam));
+        ASSERT(r->state.path_params->items && "Failed to allocate PathParam items");
+        r->state.path_params->total_params = (uint8_t)nparams;
+        r->state.path_params->match_count = 0;
+
+        const char* p = pattern;
+        uint8_t idx = 0;
+        while (*p && idx < nparams) {
+            if (*p != '{') {
+                p++;
+                continue;
+            }
+            p++;
+            const char* name_start = p;
+            while (*p && *p != '}') p++;
+            r->state.path_params->items[idx].name = (char*)name_start;
+            r->state.path_params->items[idx].name_len = (size_t)(p - name_start);
+            p++;
+            idx++;
+        }
+    }
+
     return r;
 }
 
@@ -268,215 +432,148 @@ route_t* route_static(const char* pattern, const char* dirname) {
     return r;
 }
 
-/**
- * Comparison function for qsort-based route ordering.
- *
- * Sort order (most to least significant):
- *   1. HTTP method (groups routes for O(1) per-method dispatch).
- *   2. Root static routes last (catch-all semantics).
- *   3. Route type: exact → static → param (match in specificity order).
- *   4. Pattern length descending (longer = more specific).
- *   5. Lexicographic (deterministic tie-break).
+/*
+ * ------------------------------------------------------------------------
+ * Public API: Build
+ * ------------------------------------------------------------------------
  */
-static int compare_routes(const void* a, const void* b) {
-    const route_t* ra = (const route_t*)a;
-    const route_t* rb = (const route_t*)b;
-
-    if (ra->method != rb->method) return (ra->method < rb->method) ? -1 : 1;
-
-    /* Root static routes serve as catch-alls; push them to the end. */
-    const bool ra_root_static = (ra->route_type == ROUTE_TYPE_STATIC && ra->pattern_len == 1 && ra->pattern[0] == '/');
-    const bool rb_root_static = (rb->route_type == ROUTE_TYPE_STATIC && rb->pattern_len == 1 && rb->pattern[0] == '/');
-
-    if (ra_root_static != rb_root_static) return ra_root_static ? 1 : -1;
-
-    if (ra->route_type != rb->route_type) return (ra->route_type < rb->route_type) ? -1 : 1;
-
-    if (ra->pattern_len != rb->pattern_len) return (ra->pattern_len > rb->pattern_len) ? -1 : 1;
-
-    return strcmp(ra->pattern, rb->pattern);
-}
 
 void sort_routes(void) {
-    static int sorted = 0;
-    if (sorted || global_route_count == 0) return;
+    static int built = 0;
+    if (built || global_route_count == 0) return;
 
-    qsort(global_routes, global_route_count, sizeof(route_t), compare_routes);
+    size_t exact_counts[HTTP_METHOD_COUNT] = {0};
+    size_t static_counts[HTTP_METHOD_COUNT] = {0};
 
-    /* Reset directory counts and map their contiguous backing storage */
-    for (size_t i = 0; i < HTTP_METHOD_COUNT; i++) {
-        method_routes[i].routes = method_route_storage[i];
-        method_routes[i].count = 0;
+    for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+        method_routers[m].radix_root = radix_node_create(NODE_LITERAL);
+        method_routers[m].fast_root = NULL;
     }
-    memset(exact_table, 0, sizeof(exact_table));
 
-    /*
-     * Build flat contiguous RouteMetadata arrays from the sorted global table.
-     *
-     * Copying the hot fields (pattern, pattern_len, route_type, first_char)
-     * into the metadata array means the inner scan loop in match_method_routes
-     * never dereferences route_t* to read those fields — every byte it needs
-     * lives in the same cache line as the metadata entry itself.
-     *
-     * EXACT routes are diverted into exact_table[] instead; the linear scan
-     * then only walks STATIC/PARAM candidates.
-     */
     for (size_t i = 0; i < global_route_count; i++) {
-        route_t* r = &global_routes[i];
-        const HttpMethod method = r->method;
-
-        ASSERT(method < HTTP_METHOD_COUNT && "Invalid method during sort");
+        const route_t* r = global_routes[i];
         if (r->route_type == ROUTE_TYPE_EXACT) {
-            size_t slot = exact_hash(r->pattern, r->pattern_len, (uint16_t)method);
-            while (exact_table[slot].target) slot = (slot + 1) & (EXACT_TABLE_SIZE - 1);
-            exact_table[slot] = (ExactEntry){
-                .pattern = r->pattern,
-                .target = r,
-                .pattern_len = r->pattern_len,
-                .method = (uint16_t)method,
-            };
+            exact_counts[r->method]++;
+        } else if (r->route_type == ROUTE_TYPE_STATIC) {
+            static_counts[r->method]++;
+        }
+    }
+
+    for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+        if (exact_counts[m] > 0) {
+            exact_table_init(&method_routers[m].exact_table, exact_counts[m]);
+        }
+        if (static_counts[m] > 0) {
+            method_routers[m].static_routes =
+                (route_t**)malloc(static_counts[m] * sizeof(route_t*));
+            ASSERT(method_routers[m].static_routes && "Failed to allocate static routes array");
+        }
+        method_routers[m].static_route_count = 0;
+    }
+
+    for (size_t i = 0; i < global_route_count; i++) {
+        route_t* r = global_routes[i];
+
+        if (r->pattern_len == 1 && r->pattern[0] == '/' && r->route_type == ROUTE_TYPE_EXACT) {
+            method_routers[r->method].fast_root = r;
+        }
+
+        if (r->route_type == ROUTE_TYPE_STATIC) {
+            size_t idx = method_routers[r->method].static_route_count++;
+            method_routers[r->method].static_routes[idx] = r;
             continue;
         }
 
-        uint16_t idx = method_routes[method].count;
-        ASSERT(idx < MAX_ROUTES && "Too many routes for method");
-
-        method_routes[method].routes[idx] = (RouteMetadata){
-            .pattern = r->pattern,
-            .target = r,
-            .pattern_len = r->pattern_len,
-            .route_type = r->route_type,
-            .first_char = r->pattern[0],
-        };
-        method_routes[method].count++;
-    }
-
-    sorted = 1;
-}
-
-/**
- * Matches a parameterised route pattern against a URL and extracts values.
- *
- * Param names are pre-populated at registration time (see populate_param_names),
- * so this function only allocates arena memory for extracted values — never for
- * names. This is the primary hot-path optimisation over the naive approach.
- *
- * Single-pass over both strings simultaneously. The literal-character path
- * (overwhelmingly the common case) costs one compare and two pointer increments
- * per character. The bitwise-AND loop condition tests both pointers for
- * non-NUL in a single branch.
- *
- * @param pattern     Route pattern with {param} placeholders.
- * @param url         URL path to match against.
- * @param path_params PathParams with names already filled; values are written here.
- * @param arena       Arena used for value string allocation.
- * @return true if the pattern matches the URL exactly and all params were filled.
- */
-static bool match_path_parameters(const char* pattern, const char* url, PathParams* path_params, Arena* arena) {
-    const char* pat = pattern;
-    const char* url_ptr = url;
-    const uint8_t total_params = path_params->total_params;
-    uint8_t nparams = 0;
-
-    path_params->match_count = 0;
-
-    while (*pat & *url_ptr) { /* bitwise-AND: both non-NUL in a single branch */
-        if (*pat != '{') {
-            /* ---- Hot path: literal character match ---- */
-            if (*pat != *url_ptr) return false;
-            pat++;
-            url_ptr++;
-            continue;
+        if (r->route_type == ROUTE_TYPE_EXACT) {
+            exact_table_insert(&method_routers[r->method].exact_table, r);
         }
 
-        /* ---- Param path ---- */
-        if (nparams == total_params) return false; /* guard: no overflow */
-
-        PathParam* param = &path_params->items[nparams++];
-
-        /* Skip past the {name} token; the name pointer was stored at
-         * registration time, so we only need to advance pat here. */
-        pat++; /* skip '{' */
-        while (*pat && *pat != '}') pat++;
-        if (*pat != '}') return false; /* malformed pattern — defensive */
-        pat++;                         /* skip '}' */
-
-        /* Extract value: stop at '/', the next literal pattern character,
-         * or end-of-string. Hoist *pat to avoid re-dereferencing each iter. */
-        const char* val_start = url_ptr;
-        const char stop_pat = *pat; /* next pattern char after '}' */
-
-        if (stop_pat == '\0') {
-            /* Terminal param: consume everything except a trailing slash. */
-            while (*url_ptr && *url_ptr != '/') url_ptr++;
-        } else {
-            while (*url_ptr && *url_ptr != '/' && *url_ptr != stop_pat) url_ptr++;
-        }
-
-        const size_t val_len = (size_t)(url_ptr - val_start);
-        param->value = arena_strdupn(arena, val_start, val_len);
-        if (!param->value) return false;
+        radix_insert(method_routers[r->method].radix_root, r->pattern, r);
     }
 
-    /* Strip optional trailing slashes before the exhaustion check. */
-    while (*pat == '/') pat++;
-    while (*url_ptr == '/') url_ptr++;
+    // Sort static routes descending by length for longest-prefix match
+    for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+        MethodRouter* mr = &method_routers[m];
+        for (size_t i = 1; i < mr->static_route_count; i++) {
+            route_t* key = mr->static_routes[i];
+            size_t j = i;
+            while (j > 0 && mr->static_routes[j - 1]->pattern_len < key->pattern_len) {
+                mr->static_routes[j] = mr->static_routes[j - 1];
+                j--;
+            }
+            mr->static_routes[j] = key;
+        }
+    }
 
-    path_params->match_count = nparams;
+    if (method_routers[HTTP_HEAD].fast_root == NULL && method_routers[HTTP_GET].fast_root != NULL) {
+        method_routers[HTTP_HEAD].fast_root = method_routers[HTTP_GET].fast_root;
+    }
 
-    /* Branchless final check: all three conditions are cheap boolean loads. */
-    return (*pat == '\0') & (*url_ptr == '\0') & (nparams == total_params);
+    built = 1;
 }
 
-/**
- * Searches the per-method RouteMetadata array for the first matching route.
- *
- * Only STATIC and PARAM routes live here; EXACT routes are resolved through
- * exact_table[] (see route_match). Candidates are ordered by specificity.
- *
- * @param method     HTTP method to search.
- * @param path       Request path.
- * @param url_length Byte length of path.
- * @param arena      Arena passed through to param matchers.
- * @return Matched route pointer, or NULL if none found.
+/*
+ * ------------------------------------------------------------------------
+ * Public API: Matching
+ * ------------------------------------------------------------------------
  */
-INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t url_length, Arena* arena) {
-    if (method >= HTTP_METHOD_COUNT) return NULL;
 
-    const MethodRoutes* mr = &method_routes[method];
-    const uint16_t count = mr->count;
+static route_t* match_static(HttpMethod method, const char* path, size_t path_len) {
+    const MethodRouter* mr = &method_routers[method];
+    route_t** routes = mr->static_routes;
+    const size_t count = mr->static_route_count;
 
-    /* Exit immediately if no routes exist for this method */
-    if (count == 0) return NULL;
+    for (size_t i = 0; i < count; i++) {
+        route_t* r = routes[i];
+        if (r->pattern_len <= path_len && memcmp(r->pattern, path, r->pattern_len) == 0) {
+            return r;
+        }
+    }
+    return NULL;
+}
 
-    const RouteMetadata* routes = mr->routes;
-    const char first_url_ch = path[0]; /* hoist: avoids re-read each iteration */
+typedef struct CapturedParam {
+    const char* value;
+    size_t value_len;
+} CapturedParam;
 
-    for (uint16_t i = 0; i < count; i++) {
-        const RouteMetadata* meta = &routes[i];
+static const route_t* radix_match_param(const RadixNode* root, const char* path, size_t path_len,
+                                        CapturedParam* captured, uint8_t* depth) {
+    if (path_len == 0) {
+        return root->route;
+    }
 
-        switch (meta->route_type) {
-            case ROUTE_TYPE_STATIC:
-                if (meta->pattern_len <= (uint16_t)url_length && meta->first_char == first_url_ch &&
-                    ROUTE_MEMCMP(meta->pattern, path, meta->pattern_len) == 0) {
-                    return meta->target;
-                }
-                break;
+    char first = path[0];
 
-            case ROUTE_TYPE_PARAM:
-                /*
-                 * Parameterised matching is inherently variable-length; delegate
-                 * to match_path_parameters. The first_char pre-check is omitted
-                 * here because param patterns virtually always start with '/' and
-                 * so do all URL paths — the check would never filter anything.
-                 */
-                if (match_path_parameters(meta->pattern, path, meta->target->state.path_params, arena)) {
-                    return meta->target;
-                }
-                break;
+    // Check literal child using cached indices
+    if (root->child_count > 0) {
+        const char* match = (const char*)memchr(root->indices, first, root->child_count);
+        if (match != NULL) {
+            size_t idx = (size_t)(match - root->indices);
+            const RadixNode* child = root->children[idx];
+            if (child->edge_len <= path_len && memcmp(child->edge, path, child->edge_len) == 0) {
+                const route_t* found = radix_match_param(
+                    child, path + child->edge_len, path_len - child->edge_len, captured, depth);
+                if (found) return found;
+            }
+        }
+    }
 
-            default:
-                break;
+    // Try dedicated param child if literal branch missed or failed
+    if (root->param_child != NULL) {
+        const char* p = (const char*)memchr(path, '/', path_len);
+        size_t seg_len = p ? (size_t)(p - path) : path_len;
+
+        if (seg_len > 0) {
+            ASSERT(*depth < MAX_PARAMS_PER_ROUTE && "Too many parameters in path");
+            captured[*depth] = (CapturedParam){.value = path, .value_len = seg_len};
+            (*depth)++;
+
+            const route_t* found = radix_match_param(root->param_child, path + seg_len,
+                                                     path_len - seg_len, captured, depth);
+            if (found) return found;
+
+            (*depth)--;
         }
     }
 
@@ -484,50 +581,152 @@ INLINE route_t* match_method_routes(HttpMethod method, const char* path, size_t 
 }
 
 /**
- * Searches all methods for a matching route.
+ * Thread-safe param tree match.
  *
- * Used by OPTIONS handling to find any route on the requested path
- * regardless of the registered method.
+ * Captures parameter values and instantiates a request-local route_t and
+ * PathParams in the per-request Arena. The global route template is never modified.
  */
-INLINE route_t* match_any_method(const char* path, size_t url_length, Arena* arena) {
-    for (size_t method = 0; method < HTTP_METHOD_COUNT; method++) {
-        route_t* found = match_method_routes((HttpMethod)method, path, url_length, arena);
-        if (found) return found;
+static route_t* match_method_tree(HttpMethod method, const char* path, size_t path_len,
+                                  Arena* arena) {
+    const RadixNode* root = method_routers[method].radix_root;
+    if (root == NULL) return NULL;
+
+    CapturedParam captured[MAX_PARAMS_PER_ROUTE];
+    uint8_t depth = 0;
+    const route_t* template = radix_match_param(root, path, path_len, captured, &depth);
+    if (template == NULL) return NULL;
+
+    if (template->route_type != ROUTE_TYPE_PARAM) {
+        return (route_t*)template;
     }
-    return NULL;
+
+    // Allocate request-local route_t copy in the Arena
+    route_t* req_route = (route_t*)arena_alloc(arena, sizeof(route_t));
+    if (unlikely(req_route == NULL)) return NULL;
+    *req_route = *template;
+
+    // Allocate request-local PathParams container
+    PathParams* pp = (PathParams*)arena_alloc(arena, sizeof(PathParams));
+    if (unlikely(pp == NULL)) return NULL;
+
+    PathParam* items = (PathParam*)arena_alloc(arena, depth * sizeof(PathParam));
+    if (unlikely(items == NULL)) return NULL;
+
+    const PathParams* tmpl_pp = template->state.path_params;
+    ASSERT(depth == tmpl_pp->total_params && "Parameter count mismatch");
+
+    for (uint8_t i = 0; i < depth; i++) {
+        char* value = arena_strdupn(arena, captured[i].value, captured[i].value_len);
+        if (unlikely(value == NULL)) return NULL;
+
+        items[i].name = tmpl_pp->items[i].name;
+        items[i].name_len = tmpl_pp->items[i].name_len;
+        items[i].value = value;
+        items[i].value_len = captured[i].value_len;
+    }
+
+    pp->items = items;
+    pp->total_params = depth;
+    pp->match_count = depth;
+    req_route->state.path_params = pp;
+
+    return req_route;
 }
 
 route_t* route_match(const char* path, size_t url_length, HttpMethod method, Arena* arena) {
-    /* O(1) exact match — the overwhelmingly common case. */
-    route_t* found = exact_lookup(path, url_length, method);
-    if (found) return found;
-
-    /* HEAD falls back to GET routes per RFC 9110 §9.3.2 (exact first). */
-    if (method == HTTP_HEAD) {
-        found = exact_lookup(path, url_length, HTTP_GET);
-        if (found) return found;
-        return match_method_routes(HTTP_GET, path, url_length, arena);
+    // 1. Root "/" fast path
+    if (likely(url_length == 1 && path[0] == '/')) {
+        if (likely((unsigned)method < HTTP_METHOD_COUNT)) {
+            const route_t* r = method_routers[method].fast_root;
+            if (likely(r != NULL)) return (route_t*)r;
+        }
     }
 
-    /* OPTIONS matches any registered route on the path. */
+    if (unlikely((unsigned)method >= HTTP_METHOD_COUNT)) return NULL;
+
+    // 2. Direct O(1) Exact Route Match
+    const route_t* found =
+        exact_table_lookup(&method_routers[method].exact_table, path, url_length);
+    if (likely(found != NULL)) return (route_t*)found;
+
+    // 3. Dynamic Parameter Match (allocates result into arena)
+    route_t* dynamic_match = match_method_tree(method, path, url_length, arena);
+    if (dynamic_match) return dynamic_match;
+
+    // 4. Static Directory Match
+    found = match_static(method, path, url_length);
+    if (found) return (route_t*)found;
+
+    // 5. Fallback for HEAD requests
+    if (method == HTTP_HEAD) {
+        found = exact_table_lookup(&method_routers[HTTP_GET].exact_table, path, url_length);
+        if (found) return (route_t*)found;
+
+        dynamic_match = match_method_tree(HTTP_GET, path, url_length, arena);
+        if (dynamic_match) return dynamic_match;
+
+        return match_static(HTTP_GET, path, url_length);
+    }
+
+    // 6. Fallback for OPTIONS requests
     if (method == HTTP_OPTIONS) {
         for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
-            found = exact_lookup(path, url_length, (HttpMethod)m);
-            if (found) return found;
+            found = exact_table_lookup(&method_routers[m].exact_table, path, url_length);
+            if (found) return (route_t*)found;
         }
-        return match_any_method(path, url_length, arena);
+        for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+            dynamic_match = match_method_tree((HttpMethod)m, path, url_length, arena);
+            if (dynamic_match) return dynamic_match;
+        }
+        for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+            found = match_static((HttpMethod)m, path, url_length);
+            if (found) return (route_t*)found;
+        }
     }
 
-    return match_method_routes(method, path, url_length, arena);
+    return NULL;
 }
 
-/** Releases PathParams memory allocated during route registration. */
-__attribute__((destructor)) void routing_cleanup(void) {
+/*
+ * ------------------------------------------------------------------------
+ * Cleanup
+ * ------------------------------------------------------------------------
+ */
+
+static void radix_node_free(RadixNode* node) {
+    if (node == NULL) return;
+    for (uint16_t i = 0; i < node->child_count; i++) {
+        radix_node_free(node->children[i]);
+    }
+    radix_node_free(node->param_child);
+    free(node->children);
+    free(node->indices);
+    free(node->edge);
+    free(node);
+}
+
+__attribute__((destructor)) void routing_radix_cleanup(void) {
+    for (size_t m = 0; m < HTTP_METHOD_COUNT; m++) {
+        radix_node_free(method_routers[m].radix_root);
+        method_routers[m].radix_root = NULL;
+
+        free(method_routers[m].exact_table.entries);
+        method_routers[m].exact_table.entries = NULL;
+
+        free(method_routers[m].static_routes);
+        method_routers[m].static_routes = NULL;
+        method_routers[m].static_route_count = 0;
+    }
     for (size_t i = 0; i < global_route_count; i++) {
-        route_t* r = &global_routes[i];
+        route_t* r = global_routes[i];
         if (r->route_type == ROUTE_TYPE_PARAM && r->state.path_params) {
             free(r->state.path_params->items);
             free(r->state.path_params);
         }
+        free(r);
     }
+    free(global_routes);
+    global_routes = NULL;
+    global_route_count = 0;
+    global_route_capacity = 0;
 }

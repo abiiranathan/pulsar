@@ -56,9 +56,23 @@ typedef struct {
  * @param h Headers structure to initialize
  * @param arena Memory arena for allocations
  */
-INLINE void headers_init(headers_t* h) {
-    h->count = 0;
-    // entries not zeroed as will be overwritten.
+INLINE void headers_init(headers_t* h) { h->count = 0; }
+
+/**
+ * @brief Append a header without duplicate checking (O(1)).
+ *
+ * Fast path for request parsing where duplicates are rare and handled
+ * separately (Connection / Content-Length are extracted via integer compares
+ * during parse). headers_get() scans all entries so appended duplicates
+ * remain retrievable. Preserves headers_set() for the public API where
+ * replace-in-place semantics (and Set-Cookie multi-value) are required.
+ */
+INLINE bool headers_push(headers_t* h, StrSlice name, StrSlice value) {
+    if (unlikely(h->count >= HEADERS_CAPACITY)) {
+        return false;
+    }
+    h->entries[h->count++] = (header_entry){.name = name, .value = value};
+    return true;
 }
 
 /**
@@ -71,7 +85,9 @@ INLINE void headers_init(headers_t* h) {
  * Note: Set-Cookie allows multiple values; other headers are replaced
  */
 INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
-    if (h->count >= HEADERS_CAPACITY) {
+    // Check if we have space for a new header.
+    // Remember string slices are not guaranteed to be NULL-terminated.
+    if (unlikely(h->count >= HEADERS_CAPACITY)) {
         return false;
     }
 
@@ -80,7 +96,8 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
     if (name.len > 0) {
         unsigned int f0 = (unsigned int)name.data[0] | 32u;
         for (size_t i = 0; i < h->count; ++i) {
-            if (h->entries[i].name.len == name.len && ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+            if (h->entries[i].name.len == name.len &&
+                ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
                 ss_equal_nocase(h->entries[i].name, name)) {
                 entry = &h->entries[i];
                 break;
@@ -105,8 +122,16 @@ INLINE bool headers_set(headers_t* h, StrSlice name, StrSlice value) {
  */
 INLINE StrSlice headers_get(const headers_t* h, const char* name) {
     StrSlice target = {0};
+    if (unlikely(!h || !name || !*name)) {
+        return target;
+    }
+
+    const StrSlice want = ss_from_cstr(name);
+    const unsigned int f0 = (unsigned int)want.data[0] | 32u;
     for (size_t i = 0; i < h->count; ++i) {
-        if (ss_equal_nocase(h->entries[i].name, ss_from_cstr(name))) {
+        if (h->entries[i].name.len == want.len &&
+            ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+            ss_equal_nocase(h->entries[i].name, want)) {
             target = h->entries[i].value;
             break;
         }
@@ -132,8 +157,16 @@ INLINE bool headers_has(const headers_t* h, const char* name) {
  * @return true if header was removed, false if not found
  */
 INLINE bool headers_remove(headers_t* h, const char* name) {
+    if (unlikely(!h || !name || !*name)) {
+        return true;
+    }
+
+    const StrSlice want = ss_from_cstr(name);
+    const unsigned int f0 = (unsigned int)want.data[0] | 32u;
     for (size_t i = 0; i < h->count; ++i) {
-        if (ss_equal_nocase(h->entries[i].name, ss_from_cstr(name))) {
+        if (h->entries[i].name.len == want.len &&
+            ((unsigned int)h->entries[i].name.data[0] | 32u) == f0 &&
+            ss_equal_nocase(h->entries[i].name, want)) {
             // Shift remaining items to delete current entry
             for (size_t j = i; j < h->count - 1; j++) {
                 h->entries[j] = h->entries[j + 1];
@@ -162,7 +195,7 @@ INLINE void headers_foreach(const headers_t* h, header_iter_fn callback, void* u
 }
 
 // DEBUG MACRO: Print all headers to stdout
-#define DUMP_HEADERS(h)                                                                            \
+#define dump_headers(h)                                                                            \
     if (h) {                                                                                       \
         do {                                                                                       \
             printf("Headers (count=%zu):\n", (h)->count);                                          \

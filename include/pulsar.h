@@ -103,6 +103,22 @@ void pulsar_set_handler_userdata(void* userdata);
 // Get the currently set handler userdata pointer.
 void* pulsar_get_handler_userdata(void);
 
+/**
+ * @brief Sets how often the background thread refreshes the preformatted
+ * Date header, in seconds.
+ *
+ * The request hot path copies the cached "HTTP/1.1 200 OK + Server + Date"
+ * prefix with a single atomic load + memcpy, so this interval only controls
+ * the staleness bound of the Date header (default PULSAR_DATE_REFRESH_SEC).
+ * Takes effect without a restart. Values are clamped to [1, 86400].
+ *
+ * @param seconds Refresh interval in seconds.
+ */
+void pulsar_set_date_refresh_interval(unsigned seconds);
+
+/** @brief Returns the current Date header refresh interval in seconds. */
+unsigned pulsar_get_date_refresh_interval(void);
+
 /** @brief Set a post_handler callback that is called after the handler runs
  * before writing data to the socket.
  * @param cb User-provided callback function pointer.
@@ -121,7 +137,8 @@ bool pulsar_set_callback(PulsarCallback cb, int fd);
  * ---------------------
  *
  * This logger is asynchronous and non-blocking as possible:
- * it formats the log line on the stack and submits it to plog without any locks or syscalls in the hot path.
+ * it formats the log line on the stack and submits it to plog without any locks or syscalls in the
+ * hot path.
  *
  * This is called after every request, and is passed the total latency in nanoseconds.
  * It gathers request info from the connection
@@ -137,10 +154,6 @@ void pulsar_logger(PulsarCtx* ctx, uint64_t total_ns);
 // Returns true on success.
 // The key length is computed by strlen(key) and must be a valid null-terminated string.
 #define pulsar_setvalue(conn, key, value, free_func) LocalsSetValue(&conn->locals, key, value, free_func)
-
-// Same as pulsar_setvalue() but requires that the key is a string literal.
-// This allows the compiler to compute the key length at compile time.
-#define pulsar_set(conn, key, value, free_func) LocalsSet(&conn->locals, key, value, free_func)
 
 /**
  * @brief Allocate memory of at least 'size' bytes that is managed by the
@@ -410,7 +423,8 @@ void conn_send_xml(PulsarConn* conn, http_status status, const char* xml, size_t
  * @param javascript Null-terminated JS string
  * @param length Length of response body
  */
-void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript, size_t length);
+void conn_send_javascript(PulsarConn* conn, http_status status, const char* javascript,
+                          size_t length);
 
 /**
  * @brief Sends a CSS response
@@ -499,8 +513,8 @@ const char* query_get(PulsarConn* conn, const char* name);
  * @brief Gets all query parameters
  *
  * @param conn The connection object
- * @return headers_t* Map of all query parameters. Note that the entries values are not NULL-terminated
- * and are just views into the original URL.
+ * @return headers_t* Map of all query parameters. Note that the entries values are not
+ * NULL-terminated and are just views into the original URL.
  */
 headers_t* query_params(PulsarConn* conn);
 
@@ -590,9 +604,9 @@ const char* get_path_param(PulsarConn* conn, const char* name);
 
 // Read-Only request data.
 typedef struct Request {
-    const char* path;           // Request path
-    const char* method;         // HTTP method (GET, POST etc.)
-    StrSlice body;              // Request body. The body.data ptr is guaranteed to be NULL-terminated.
+    const char* path;    // Request path
+    const char* method;  // HTTP method (GET, POST etc.)
+    StrSlice body;       // Request body. The body.data ptr is guaranteed to be NULL-terminated.
     const char* route_pattern;  // Matched route pattern(has static lifetime)
 } Request;
 

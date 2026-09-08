@@ -159,7 +159,9 @@ INLINE bool http_status_valid(http_status code) {
 
 // Direct lookup using status code as index
 INLINE StrSlice get_http_status(http_status code) {
-    if (!http_status_valid(code)) { return SS_LIT("HTTP/1.1 200 OK\r\n"); }
+    if (!http_status_valid(code)) {
+        return SS_LIT("HTTP/1.1 200 OK\r\n");
+    }
     return status_info[code];
 }
 

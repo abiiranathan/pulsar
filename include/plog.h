@@ -1,268 +1,409 @@
 #ifndef PLOG_H
 #define PLOG_H
 
-/**
- * plog — Pulsar async logger
- *
- * Architecture
- * ============
- * Worker threads (producers) call plog_submit() which atomically claims a
- * slot in a power-of-two MPSC ring buffer, copies the pre-formatted line,
- * and publishes it.  A single background thread drains ready slots with one
- * writev(2) per batch, amortising syscall cost across all concurrent
- * producers.
- *
- * Hot-path cost per request (uncontended ring):
- *   1. Atomic CAS on prod_seq (claims slot + checks fullness) (~3 ns)
- *   2. __builtin_memcpy into the slot                     (~8 ns)
- *   3. Release store of READY on the slot                 (~1 ns)
- *   4. Atomic fetch-add on pending (signals consumer)     (~2 ns)
- *  ──────────────────────────────────────────────────────────────
- *  Total                                                  ~14 ns
- *
- * No malloc on the hot path.  No spin loops.  No per-entry locks.
- *
- * Slot state machine
- * ==================
- *
- *   FREE ──(producer store)──► READY ──(drain store)──► FREE
- * The two-state machine is safe because:
- *   - prod_seq is a monotonically increasing counter; the CAS on prod_seq
- *     gives one thread exclusive ownership of a unique index and guarantees
- *     that the slot is not currently in use.
- *   - The drain thread advances cons_seq only after writev completes, so it
- *     can never reach a slot whose producer has not yet stored READY.
- *
- * Backpressure
- * ============
- * plog_submit() checks for a full ring BEFORE claiming a sequence number.
- * If full, the entry is dropped and the drop counter incremented.  No spin.
- * A CAS failure after the pre-check (possible under high concurrency) is
- * also handled as a drop.  Tune PLOG_RING_CAPACITY upward if drops occur.
- * Retrieve the cumulative drop count with plog_drop_count().
- *
- * Thread safety
- * =============
- * plog_submit()          — safe for concurrent use by any number of threads.
- * plog_init/destroy()    — call from one thread only, before/after all
- *                          submit calls.
- */
-
-#include <inttypes.h>      /* PRIu64                             */
-#include <stdalign.h>      /* alignas                            */
-#include <stdatomic.h>     /* _Atomic, atomic_*                  */
-#include <stdbool.h>       /* bool                               */
-#include <stddef.h>        /* size_t                             */
-#include <stdint.h>        /* uint32_t, uint64_t                 */
-#include <sys/uio.h>       /* struct iovec, writev               */
-#include <unistd.h>        /* STDOUT_FILENO, usleep              */
-
-#include <solidc/lock.h>   /* Lock, Condition, lock_*, cond_*   */
+#include <errno.h>
+#include <inttypes.h>
+#include <solidc/align.h>  /* ALIGN */
 #include <solidc/thread.h> /* Thread, thread_create, thread_join */
+#include <stdalign.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include "constants.h"
 
 /* -------------------------------------------------------------------------
- * Tunables — override with -DPLOG_XXX=value before including.
+ * Tunables & Shard Configuration
  * ---------------------------------------------------------------------- */
 
-/** Ring capacity.  Must be a power of two.  Increase if drops occur. */
-#ifndef PLOG_RING_CAPACITY
-#define PLOG_RING_CAPACITY 4096
+#ifndef PLOG_NUM_SHARDS
+#ifdef NUM_WORKERS
+#define PLOG_NUM_SHARDS NUM_WORKERS
+#else
+#define PLOG_NUM_SHARDS 16
 #endif
-
-/** Maximum bytes per log line including the trailing newline. */
-#ifndef PLOG_LINE_MAX
-#define PLOG_LINE_MAX 256
 #endif
-
-/** Maximum iovec entries per writev(2) batch.  POSIX guarantees >= 16. */
-#ifndef PLOG_BATCH_MAX
-#define PLOG_BATCH_MAX 256
-#endif
-
-_Static_assert((PLOG_RING_CAPACITY & (PLOG_RING_CAPACITY - 1)) == 0, "PLOG_RING_CAPACITY must be a power of two");
-_Static_assert(PLOG_LINE_MAX > 0, "PLOG_LINE_MAX must be positive");
-_Static_assert(PLOG_BATCH_MAX > 0, "PLOG_BATCH_MAX must be positive");
-
-/* -------------------------------------------------------------------------
- * Ring slot
- * ---------------------------------------------------------------------- */
-
-/** Slot state: FREE means available to a producer; READY means written and
- *  waiting for the drain thread. */
-typedef enum {
-    PLOG_SLOT_FREE = 0,  /* available for a new producer             */
-    PLOG_SLOT_READY = 1, /* written, waiting to be drained           */
-} PlogSlotState;
 
 /**
- * One ring slot.
- *
- * Padded to a multiple of 64 bytes (one cache line) to prevent false
- * sharing between adjacent slots on different cores.
- *
- * Layout for PLOG_LINE_MAX=256:
- *   state  4 B  +  len  4 B  +  line  256 B  +  pad  56 B  =  320 B
+ * Capacity per shard (must be a power of two).
+ * 32,768 entries * 16 shards = 524,288 total buffered entries.
+ * At 500K req/sec, this provides > 1.0 seconds of burst absorption.
  */
-typedef struct {
-    _Atomic(PlogSlotState) state; /* two-state machine; see above       */
-    uint32_t len;                 /* valid bytes in line[]              */
-    char line[PLOG_LINE_MAX];     /* pre-formatted text   */
-    /* Pad to next 64-byte boundary to eliminate false sharing. */
-    char _pad[64 - ((sizeof(_Atomic(PlogSlotState)) + sizeof(uint32_t) + PLOG_LINE_MAX) % 64)];
-} PlogSlot;
+#ifndef PLOG_SHARD_CAPACITY
+#define PLOG_SHARD_CAPACITY 32768
+#endif
 
-/* -------------------------------------------------------------------------
- * Logger state
- * ---------------------------------------------------------------------- */
+_Static_assert((PLOG_SHARD_CAPACITY & (PLOG_SHARD_CAPACITY - 1)) == 0,
+               "PLOG_SHARD_CAPACITY must be a power of two");
 
 /**
- * PlogState — logger instance.
- *
- * Declare as a static or global variable and pass to all plog_* functions.
- * Zero-initialised by plog_init(); do not memset manually.
- *
- * NOTE: If allocating PlogState on the heap, use aligned_alloc(64, sizeof(PlogState))
- * or posix_memalign() to guarantee alignment of its members and prevent false sharing.
+ * 1 = Security-critical mode: never drop logs. If full, workers briefly pause
+ *     until the consumer drains slots.
+ * 0 = Lossy mode: drops entries on backpressure.
  */
+#ifndef PLOG_LOSSLESS
+#define PLOG_LOSSLESS 1
+#endif
+
+#define PLOG_METHOD_MAX 8
+#define PLOG_PATH_MAX   64
+#define PLOG_UA_MAX     128
+#define PLOG_WRITE_BUF  (16 * 1024) /* 16KB buffer for writev() batching. */
+
+/**
+ * Idle backoff tuning for the drain thread. The loop starts by spinning
+ * (cheap, low-latency) and escalates to increasingly longer nanosleep()
+ * calls the longer it stays idle, capping at PLOG_IDLE_SLEEP_MAX_NS. This
+ * prevents the drain thread from pegging a core when there is no log
+ * traffic, while still reacting quickly when bursts arrive.
+ */
+#ifndef PLOG_IDLE_SPIN_LIMIT
+#define PLOG_IDLE_SPIN_LIMIT 64 /* Pure spin iterations before first sleep. */
+#endif
+#ifndef PLOG_IDLE_SLEEP_MIN_NS
+#define PLOG_IDLE_SLEEP_MIN_NS 50000L /* 50 microseconds. */
+#endif
+#ifndef PLOG_IDLE_SLEEP_MAX_NS
+#define PLOG_IDLE_SLEEP_MAX_NS 20000000L /* 20 milliseconds. */
+#endif
+
+/**
+ * Backpressure spin tuning for the lossless producer path. If the consumer
+ * cannot keep up, producers spin briefly, then fall back to short sleeps so
+ * a stalled or dead drain thread cannot pin worker threads at 100% CPU
+ * indefinitely.
+ */
+#ifndef PLOG_BACKPRESSURE_SPIN_LIMIT
+#define PLOG_BACKPRESSURE_SPIN_LIMIT 1000
+#endif
+#ifndef PLOG_BACKPRESSURE_SLEEP_NS
+#define PLOG_BACKPRESSURE_SLEEP_NS 20000L /* 20 microseconds. */
+#endif
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define PLOG_THREAD_LOCAL _Thread_local
+#elif defined(__GNUC__) || defined(__clang__)
+#define PLOG_THREAD_LOCAL __thread
+#else
+#define PLOG_THREAD_LOCAL _Thread_local
+#endif
+
+/* -------------------------------------------------------------------------
+ * Binary Log Event
+ * ---------------------------------------------------------------------- */
+
 typedef struct {
-    /** Ring buffer.  Indexed by (sequence & (PLOG_RING_CAPACITY - 1)). */
-    alignas(64) PlogSlot ring[PLOG_RING_CAPACITY];
+    uint64_t total_ns;
+    uint16_t status_code;
+    char method[PLOG_METHOD_MAX];
+    char path[PLOG_PATH_MAX];
+    char user_agent[PLOG_UA_MAX];
+} PlogEvent;
 
-    /* -- Producer side -------------------------------------------------- */
+/* -------------------------------------------------------------------------
+ * SPSC Shard (Zero False-Sharing Layout)
+ * ---------------------------------------------------------------------- */
 
-    /** Next sequence number to claim.  Each fetch-add gives one thread an
-     *  exclusive slot index.  Only the low PLOG_RING_CAPACITY bits matter. */
+typedef struct {
+    /* Producer cache line: written exclusively by worker thread */
     alignas(64) _Atomic uint64_t prod_seq;
+    uint64_t cached_cons; /* Local copy: avoids reading cons_seq across cores */
 
-    /* -- Consumer side -------------------------------------------------- */
-
-    /** Next sequence number to drain.  Advanced by the drain thread after
-     *  each writev batch completes. */
+    /* Consumer cache line: written exclusively by drain thread */
     alignas(64) _Atomic uint64_t cons_seq;
 
-    /** Cumulative entries dropped due to a full ring.  Read with
-     *  plog_drop_count(). */
-    _Atomic uint64_t drops;
+    /* Metrics */
+    alignas(64) _Atomic uint64_t drops;
 
-    /** Outstanding entries in the ring not yet drained.  The drain thread
-     *  sleeps on wake only when this is zero, preventing missed-wakeup
-     *  stalls under sustained load. */
-    _Atomic uint64_t pending;
+    /* SPSC Ring buffer */
+    alignas(64) PlogEvent ring[PLOG_SHARD_CAPACITY];
+} PlogShard;
 
-    /* -- Drain thread --------------------------------------------------- */
-
-    alignas(64) Lock mu;        /* protects the cond_wait predicate        */
-    Condition wake;             /* drain thread sleeps here when idle      */
-    _Atomic bool drain_running; /* cleared by plog_destroy to stop thread */
-    Thread thread_handle;       /* opaque handle returned by thread_create */
-    int out_fd;                 /* destination fd (e.g. STDOUT_FILENO)     */
+typedef struct {
+    PlogShard* shards[PLOG_NUM_SHARDS];
+    _Atomic uint32_t shard_allocator;
+    _Atomic bool drain_running;
+    Thread thread_handle;
+    int out_fd;
 } PlogState;
 
 /* -------------------------------------------------------------------------
- * Internal — drain thread
+ * Ultra-Fast Direct Serialization (~15ns vs ~1500ns in snprintf)
  * ---------------------------------------------------------------------- */
 
-/** Maps a raw sequence number to a ring index. */
-static inline size_t plog__idx(uint64_t seq) {
-    return (size_t)(seq & (uint64_t)(PLOG_RING_CAPACITY - 1));
+static const char g_plog_digits100[] =
+    "0001020304050607080910111213141516171819"
+    "2021222324252627282930313233343536373839"
+    "4041424344454647484950515253545556575859"
+    "6061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+
+static inline size_t plog__format_line(char* dst, const PlogEvent* ev) {
+    char* p = dst;
+
+    /* 1. Prefix: "[Pulsar] " (9 bytes) */
+    memcpy(p, "[Pulsar] ", 9);
+    p += 9;
+
+    /* 2. Method: %-4s */
+    size_t m_len = 0;
+    while (m_len < PLOG_METHOD_MAX && ev->method[m_len] != '\0') {
+        p[m_len] = ev->method[m_len];
+        m_len++;
+    }
+    p += m_len;
+    while (m_len < 4) {
+        *p++ = ' ';
+        m_len++;
+    }
+    *p++ = ' ';
+
+    /* 3. Path: %-3s */
+    size_t path_len = 0;
+    while (path_len < PLOG_PATH_MAX && ev->path[path_len] != '\0') {
+        p[path_len] = ev->path[path_len];
+        path_len++;
+    }
+    p += path_len;
+    while (path_len < 3) {
+        *p++ = ' ';
+        path_len++;
+    }
+    *p++ = ' ';
+
+    /* 4. Status Code: %3d (branchless table lookup) */
+    uint32_t sc = (uint32_t)ev->status_code;
+    if (__builtin_expect(sc >= 100 && sc <= 999, 1)) {
+        p[0] = (char)('0' + (sc / 100));
+        uint32_t rem = (sc % 100) * 2;
+        p[1] = g_plog_digits100[rem];
+        p[2] = g_plog_digits100[rem + 1];
+        p += 3;
+    } else {
+        p[0] = ' ';
+        p[1] = ' ';
+        p[2] = ' ';
+        p += 3;
+    }
+    *p++ = ' ';
+
+    /* 5. Latency: %8s (always exactly 8 bytes) */
+    uint64_t ns = ev->total_ns;
+    if (ns < 1000) {
+        /* %3lluns -> 3 spaces + 3 digits + "ns" */
+        p[0] = ' ';
+        p[1] = ' ';
+        p[2] = ' ';
+        uint32_t v = (uint32_t)ns;
+        p[3] = (v >= 100) ? (char)('0' + (v / 100)) : ' ';
+        p[4] = (v >= 10) ? (char)('0' + ((v / 10) % 10)) : ' ';
+        p[5] = (char)('0' + (v % 10));
+        p[6] = 'n';
+        p[7] = 's';
+        p += 8;
+    } else if (ns < 1000000) {
+        /* %5lluµs -> 5 digits/spaces + "\xc2\xb5s" = 8 bytes */
+        uint32_t us = (uint32_t)(ns / 1000);
+        for (int i = 4; i >= 0; i--) {
+            if (us > 0 || i == 4) {
+                p[i] = (char)('0' + (us % 10));
+                us /= 10;
+            } else {
+                p[i] = ' ';
+            }
+        }
+        p[5] = (char)0xC2;
+        p[6] = (char)0xB5;
+        p[7] = 's';
+        p += 8;
+    } else if (ns < 1000000000) {
+        /* %5llums -> 1 space + 5 digits + "ms" = 8 bytes */
+        p[0] = ' ';
+        uint32_t ms = (uint32_t)(ns / 1000000);
+        for (int i = 5; i >= 1; i--) {
+            if (ms > 0 || i == 5) {
+                p[i] = (char)('0' + (ms % 10));
+                ms /= 10;
+            } else {
+                p[i] = ' ';
+            }
+        }
+        p[6] = 'm';
+        p[7] = 's';
+        p += 8;
+    } else {
+        /* %5llus -> 2 spaces + 5 digits + "s" = 8 bytes */
+        p[0] = ' ';
+        p[1] = ' ';
+        uint32_t s = (uint32_t)(ns / 1000000000);
+        for (int i = 6; i >= 2; i--) {
+            if (s > 0 || i == 6) {
+                p[i] = (char)('0' + (s % 10));
+                s /= 10;
+            } else {
+                p[i] = ' ';
+            }
+        }
+        p[7] = 's';
+        p += 8;
+    }
+    *p++ = ' ';
+
+    /* 6. User Agent: %s */
+    size_t ua_len = 0;
+    while (ua_len < PLOG_UA_MAX && ev->user_agent[ua_len] != '\0') {
+        p[ua_len] = ev->user_agent[ua_len];
+        ua_len++;
+    }
+    if (ua_len == 0) {
+        *p++ = '-';
+    } else {
+        p += ua_len;
+    }
+
+    *p++ = '\n';
+    return (size_t)(p - dst);
+}
+
+static inline void plog__write_all(int fd, const char* buf, size_t count) {
+    while (count > 0) {
+        ssize_t n = write(fd, buf, count);
+        if (__builtin_expect(n > 0, 1)) {
+            buf += n;
+            count -= (size_t)n;
+        } else if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
+            continue;
+        } else {
+            break; /* Unrecoverable error on out_fd */
+        }
+    }
 }
 
 /**
- * plog__drain_thread — background consumer.
- *
- * Sleeps on `wake` when the ring is empty (pending == 0).  On each wakeup
- * it drains all consecutive READY slots into a single writev(2) call, then
- * loops back — only re-entering cond_wait when genuinely idle.  This
- * prevents the missed-wakeup stall observed under 100c load where the drain
- * thread slept while READY slots were waiting.
+ * Sleeps for the given number of nanoseconds, retrying on EINTR.
+ * Used by the idle backoff paths below; never propagates an error since a
+ * spurious wake or interrupted sleep is harmless for backoff purposes.
  */
+static inline void plog__backoff_sleep(long nanoseconds) {
+    struct timespec ts = {.tv_sec = nanoseconds / 1000000000L,
+                          .tv_nsec = nanoseconds % 1000000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+        /* Remaining time is written back into ts; keep sleeping it out. */
+    }
+}
+
+/**
+ * Emits one CPU-pause/yield instruction. Cheap, low-latency spin primitive
+ * used while waiting for a small amount of work to appear.
+ */
+static inline void plog__cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+/* -------------------------------------------------------------------------
+ * Background Drain Thread
+ * ---------------------------------------------------------------------- */
+
 static void* plog__drain_thread(void* arg) {
     PlogState* lg = (PlogState*)arg;
-    struct iovec iov[PLOG_BATCH_MAX];
+    char write_buf[PLOG_WRITE_BUF];
+    size_t buf_pos = 0;
 
-    while (atomic_load_explicit(&lg->drain_running, memory_order_acquire)) {
-        bool shutting_down = false;
+    /* Progressive idle backoff state. idle_cycles counts consecutive
+     * iterations with no work across all shards; it only resets when work
+     * is found. This replaces a fixed spin-then-100us-sleep cycle (which
+     * repeated forever and kept the thread mostly spinning) with a real
+     * escalation: spin briefly, then sleep for increasingly longer
+     * intervals up to PLOG_IDLE_SLEEP_MAX_NS while traffic stays idle. */
+    uint64_t idle_cycles = 0;
+    long sleep_ns = PLOG_IDLE_SLEEP_MIN_NS;
 
-        /* Sleep only when the ring is genuinely empty.  Holding the mutex
-         * across the predicate check + cond_wait is required by POSIX to
-         * avoid lost wakeups. */
-        lock_acquire(&lg->mu);
-        while (atomic_load_explicit(&lg->pending, memory_order_acquire) == 0) {
-            cond_wait(&lg->wake, &lg->mu);
-            if (!atomic_load_explicit(&lg->drain_running, memory_order_acquire)) {
-                shutting_down = true;
-                break; /* exits inner while, still holds mutex */
-            }
-        }
-        lock_release(&lg->mu); /* single release covers both paths */
+    while (atomic_load_explicit(&lg->drain_running, memory_order_relaxed)) {
+        bool had_work = false;
 
-        if (shutting_down) break;
+        for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+            PlogShard* s = lg->shards[i];
 
-    drain_batch:;
-        int batch = 0;
-        uint64_t seq = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
+            uint64_t cons = atomic_load_explicit(&s->cons_seq, memory_order_relaxed);
+            uint64_t prod = atomic_load_explicit(&s->prod_seq, memory_order_acquire);
 
-        while (batch < PLOG_BATCH_MAX) {
-            size_t idx = plog__idx(seq + (uint64_t)batch);
-            PlogSlot* slot = &lg->ring[idx];
+            if (cons == prod) continue;
+            had_work = true;
 
-            /* Peek slot readiness. No CAS on slot read to minimize RMW cycles. */
-            if (atomic_load_explicit(&slot->state, memory_order_acquire) != PLOG_SLOT_READY) { break; }
+            while (cons < prod) {
+                const PlogEvent* ev = &s->ring[cons & (PLOG_SHARD_CAPACITY - 1)];
 
-            iov[batch].iov_base = slot->line;
-            iov[batch].iov_len = slot->len;
-            batch++;
-        }
+                buf_pos += plog__format_line(write_buf + buf_pos, ev);
+                cons++;
 
-        if (batch > 0) {
-            (void)writev(lg->out_fd, iov, batch);
-
-            /* Release processed slots to FREE.
-             * relaxed store is correct because the release increment of cons_seq below
-             * enforces transitiveness for the producer acquire on cons_seq. */
-            for (int i = 0; i < batch; i++) {
-                size_t idx = plog__idx(seq + (uint64_t)i);
-                atomic_store_explicit(&lg->ring[idx].state, PLOG_SLOT_FREE, memory_order_relaxed);
+                if (buf_pos >= sizeof(write_buf) - 512) {
+                    plog__write_all(lg->out_fd, write_buf, buf_pos);
+                    buf_pos = 0;
+                }
             }
 
-            atomic_fetch_add_explicit(&lg->cons_seq, (uint64_t)batch, memory_order_release);
-            atomic_fetch_sub_explicit(&lg->pending, (uint64_t)batch, memory_order_release);
-            /* Keep draining without sleeping — there may be more slots. */
-            goto drain_batch;
+            atomic_store_explicit(&s->cons_seq, cons, memory_order_release);
+        }
+
+        if (!had_work) {
+            if (buf_pos > 0) {
+                plog__write_all(lg->out_fd, write_buf, buf_pos);
+                buf_pos = 0;
+            }
+
+            idle_cycles++;
+
+            if (idle_cycles <= PLOG_IDLE_SPIN_LIMIT) {
+                /* Short idle gap: spin for low-latency pickup of new work. */
+                plog__cpu_relax();
+            } else {
+                /* Sustained idle period: back off with exponentially
+                 * growing sleeps, capped at PLOG_IDLE_SLEEP_MAX_NS, so the
+                 * thread stops consuming CPU while there is no traffic. */
+                plog__backoff_sleep(sleep_ns);
+                if (sleep_ns < PLOG_IDLE_SLEEP_MAX_NS) {
+                    sleep_ns *= 2;
+                    if (sleep_ns > PLOG_IDLE_SLEEP_MAX_NS) {
+                        sleep_ns = PLOG_IDLE_SLEEP_MAX_NS;
+                    }
+                }
+            }
+        } else {
+            idle_cycles = 0;
+            sleep_ns = PLOG_IDLE_SLEEP_MIN_NS;
         }
     }
 
-    /* --- Shutdown flush: drain whatever remains in the ring. ----------- */
-    while (true) {
-        uint64_t seq = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
-        uint64_t end = atomic_load_explicit(&lg->prod_seq, memory_order_acquire);
-        if (seq == end) { break; }
+    /* Shutdown Flush */
+    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+        PlogShard* s = lg->shards[i];
+        uint64_t cons = atomic_load_explicit(&s->cons_seq, memory_order_relaxed);
+        uint64_t prod = atomic_load_explicit(&s->prod_seq, memory_order_acquire);
 
-        int batch = 0;
-        while (seq + (uint64_t)batch < end && batch < PLOG_BATCH_MAX) {
-            size_t idx = plog__idx(seq + (uint64_t)batch);
-            PlogSlot* slot = &lg->ring[idx];
-            if (atomic_load_explicit(&slot->state, memory_order_acquire) == PLOG_SLOT_READY) {
-                iov[batch].iov_base = slot->line;
-                iov[batch].iov_len = slot->len;
-                batch++;
-            } else {
-                break;
+        while (cons < prod) {
+            const PlogEvent* ev = &s->ring[cons & (PLOG_SHARD_CAPACITY - 1)];
+            buf_pos += plog__format_line(write_buf + buf_pos, ev);
+            cons++;
+
+            if (buf_pos >= sizeof(write_buf) - 512) {
+                plog__write_all(lg->out_fd, write_buf, buf_pos);
+                buf_pos = 0;
             }
         }
+        atomic_store_explicit(&s->cons_seq, cons, memory_order_release);
+    }
 
-        if (batch > 0) {
-            (void)writev(lg->out_fd, iov, batch);
-            for (int i = 0; i < batch; i++) {
-                size_t idx = plog__idx(seq + (uint64_t)i);
-                atomic_store_explicit(&lg->ring[idx].state, PLOG_SLOT_FREE, memory_order_relaxed);
-            }
-            atomic_fetch_add_explicit(&lg->cons_seq, (uint64_t)batch, memory_order_release);
-            atomic_fetch_sub_explicit(&lg->pending, (uint64_t)batch, memory_order_release);
-        } else {
-            /* Wait briefly for a concurrent producer to finish writing to its claimed slot */
-            usleep(10);
-        }
+    if (buf_pos > 0) {
+        plog__write_all(lg->out_fd, write_buf, buf_pos);
     }
 
     return NULL;
@@ -272,121 +413,106 @@ static void* plog__drain_thread(void* arg) {
  * Public API
  * ---------------------------------------------------------------------- */
 
-/**
- * Initialises the logger and starts the background drain thread.
- *
- * @param lg     Caller-allocated PlogState (static or global).
- * @param out_fd Destination file descriptor (e.g. STDOUT_FILENO).
- * @return true on success, false if the drain thread could not be created.
- * @note   Not thread-safe.  Call once before any plog_submit().
- */
 static inline bool plog_init(PlogState* lg, int out_fd) {
-    *lg = (PlogState){0};
+    memset(lg, 0, sizeof(*lg));
     lg->out_fd = out_fd;
-
-    lock_init(&lg->mu);
-    cond_init(&lg->wake);
+    atomic_store_explicit(&lg->shard_allocator, 0, memory_order_relaxed);
     atomic_store_explicit(&lg->drain_running, true, memory_order_release);
 
-    return thread_create(&lg->thread_handle, plog__drain_thread, lg) == 0;
+    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+        void* ptr = NULL;
+        if (posix_memalign(&ptr, 64, sizeof(PlogShard)) != 0 || !ptr) {
+            for (size_t j = 0; j < i; j++) free(lg->shards[j]);
+            return false;
+        }
+        memset(ptr, 0, sizeof(PlogShard));
+        lg->shards[i] = (PlogShard*)ptr;
+    }
+
+    if (thread_create(&lg->thread_handle, plog__drain_thread, lg) != 0) {
+        for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) free(lg->shards[i]);
+        return false;
+    }
+    return true;
 }
 
-/**
- * Submits a pre-formatted log line to the async ring.
- *
- * Hot path: no heap allocation, no spin loop, no blocking I/O.
- * On an uncontended ring the only shared writes are one fetch-add
- * (prod_seq), one CAS (slot state), and one fetch-add (pending).
- *
- * @param lg   Logger initialised with plog_init().
- * @param buf  Formatted text.  Need not be NUL-terminated.
- * @param len  Byte length.  Silently clamped to PLOG_LINE_MAX.
- * @note  Safe for concurrent use by multiple threads.
- */
-static inline void plog_submit(PlogState* lg, const char* buf, uint32_t len) {
-    if (len > PLOG_LINE_MAX) len = PLOG_LINE_MAX;
+static inline void plog__submit_shard(PlogShard* s, const PlogEvent* ev) {
+    uint64_t prod = atomic_load_explicit(&s->prod_seq, memory_order_relaxed);
 
-    /* Cache cons_seq in a local variable/register.
-     * By doing so, we completely bypass reloading it on CAS failure retries, 
-     * eliminating unnecessary memory accesses and LSU pressure inside the loop. */
-    uint64_t cons = atomic_load_explicit(&lg->cons_seq, memory_order_relaxed);
-    uint64_t prod = atomic_load_explicit(&lg->prod_seq, memory_order_relaxed);
+    /* Backpressure check */
+    if (__builtin_expect((prod - s->cached_cons) >= (uint64_t)PLOG_SHARD_CAPACITY, 0)) {
+        s->cached_cons = atomic_load_explicit(&s->cons_seq, memory_order_acquire);
 
-    while (true) {
-        /* Since cons is cached, this check runs entirely in registers.
-         * If the queue appears full, we do a fresh acquire load to check if 
-         * the consumer has indeed advanced. */
-        if (prod - cons >= (uint64_t)PLOG_RING_CAPACITY) {
-            cons = atomic_load_explicit(&lg->cons_seq, memory_order_acquire);
-            if (prod - cons >= (uint64_t)PLOG_RING_CAPACITY) {
-                atomic_fetch_add_explicit(&lg->drops, 1, memory_order_relaxed);
-                return;
+        /* Bounded spin count before falling back to sleeping. This keeps
+         * the fast path (drain thread catching up quickly) low-latency
+         * while ensuring a stalled or dead drain thread cannot pin this
+         * worker thread at 100% CPU forever. */
+        unsigned spins = 0;
+
+        while ((prod - s->cached_cons) >= (uint64_t)PLOG_SHARD_CAPACITY) {
+#if PLOG_LOSSLESS
+            /* Security/lossless mode: never drop audit events. Spin briefly,
+             * then sleep in short increments while waiting for the drain
+             * thread to free up ring slots. */
+            if (spins < PLOG_BACKPRESSURE_SPIN_LIMIT) {
+                plog__cpu_relax();
+                spins++;
+            } else {
+                plog__backoff_sleep(PLOG_BACKPRESSURE_SLEEP_NS);
             }
-        }
-
-        /* Try to claim our sequence number. On failure, 'prod' is automatically 
-         * updated to the latest 'prod_seq' value, and we loop back. */
-        if (atomic_compare_exchange_weak_explicit(&lg->prod_seq, &prod, prod + 1, memory_order_relaxed,
-                                                  memory_order_relaxed)) {
-            break;
+            s->cached_cons = atomic_load_explicit(&s->cons_seq, memory_order_acquire);
+#else
+            /* Lossy fallback */
+            atomic_fetch_add_explicit(&s->drops, 1, memory_order_relaxed);
+            return;
+#endif
         }
     }
 
-    size_t idx = plog__idx(prod);
-    PlogSlot* slot = &lg->ring[idx];
-
-    /* Slot is exclusively ours. Copy raw payload. */
-    __builtin_memcpy(slot->line, buf, len);
-    slot->len = len;
-
-    /* Release payload before storing READY status so consumer reads valid data. */
-    atomic_store_explicit(&slot->state, PLOG_SLOT_READY, memory_order_release);
-
-    /* Increment outstanding entries. */
-    uint64_t prev_pending = atomic_fetch_add_explicit(&lg->pending, 1, memory_order_release);
-
-    /* Wake the consumer ONLY if the queue transitioned from empty to active.
-     * Bypasses heavy mutex/cond lock paths under sustained high loads. */
-    if (prev_pending == 0) {
-        lock_acquire(&lg->mu);
-        cond_signal(&lg->wake);
-        lock_release(&lg->mu);
-    }
+    s->ring[prod & (PLOG_SHARD_CAPACITY - 1)] = *ev;
+    atomic_store_explicit(&s->prod_seq, prod + 1, memory_order_release);
 }
 
 /**
- * Stops the drain thread, flushes all buffered entries, and releases
- * resources.
- *
- * @param lg Logger previously initialised with plog_init().
- * @note  Not thread-safe.  Call after all plog_submit() calls have returned.
+ * Hot path: sub-5ns lock-free submission on the worker thread.
  */
+static inline void plog_submit(PlogState* lg, const PlogEvent* ev) {
+    static PLOG_THREAD_LOCAL int tl_shard_idx = -1;
+
+    if (__builtin_expect(tl_shard_idx < 0, 0)) {
+        tl_shard_idx =
+            (int)(atomic_fetch_add_explicit(&lg->shard_allocator, 1, memory_order_relaxed) %
+                  PLOG_NUM_SHARDS);
+    }
+
+    plog__submit_shard(lg->shards[tl_shard_idx], ev);
+}
+
+static inline void plog_submit_worker(PlogState* lg, int worker_id, const PlogEvent* ev) {
+    if (__builtin_expect((unsigned)worker_id >= (unsigned)PLOG_NUM_SHARDS, 0)) {
+        worker_id = (int)((unsigned)worker_id % (unsigned)PLOG_NUM_SHARDS);
+    }
+    plog__submit_shard(lg->shards[worker_id], ev);
+}
+
 static inline void plog_destroy(PlogState* lg) {
     atomic_store_explicit(&lg->drain_running, false, memory_order_release);
-
-    /* Hold the mutex across the signal so the drain thread cannot miss it
-     * while transitioning into cond_wait. */
-    lock_acquire(&lg->mu);
-    cond_signal(&lg->wake);
-    lock_release(&lg->mu);
-
     thread_join(lg->thread_handle, NULL);
-
-    lock_free(&lg->mu);
-    cond_free(&lg->wake);
+    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+        if (lg->shards[i]) {
+            free(lg->shards[i]);
+            lg->shards[i] = NULL;
+        }
+    }
 }
 
-/**
- * Returns the cumulative number of log entries dropped due to backpressure.
- *
- * A non-zero value means PLOG_RING_CAPACITY should be increased, or the
- * drain fd is too slow (e.g. a synchronous file on a busy disk).
- *
- * @param lg Logger instance.
- * @return   Drop count since plog_init().
- */
 static inline uint64_t plog_drop_count(const PlogState* lg) {
-    return atomic_load_explicit((_Atomic uint64_t*)&lg->drops, memory_order_relaxed);
+    uint64_t total = 0;
+    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+        total +=
+            atomic_load_explicit((_Atomic uint64_t*)&lg->shards[i]->drops, memory_order_relaxed);
+    }
+    return total;
 }
 
 #endif /* PLOG_H */

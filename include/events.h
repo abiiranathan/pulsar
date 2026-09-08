@@ -61,7 +61,8 @@ static inline int event_add_read(event_queue_t* queue, int fd, void* data) {
  * @return 0 on success, -1 on failure (errno set).
  */
 static inline int event_add_server(event_queue_t* queue, int server_fd) {
-    return poller_add(queue, server_fd, (int)POLLER_READ | (int)POLLER_EDGE | (int)POLLER_EXCLUSIVE, NULL);
+    return poller_add(queue, server_fd, (int)POLLER_READ | (int)POLLER_EDGE | (int)POLLER_EXCLUSIVE,
+                      NULL);
 }
 
 /**
@@ -106,7 +107,8 @@ static inline int event_mod_read(event_queue_t* queue, int fd, void* data) {
  * @return Number of events written to @p events (>= 0), or -1 on
  *         error (errno set).
  */
-static inline int event_wait(event_queue_t* queue, event_t* events, int max_events, int timeout_ms) {
+static inline int event_wait(event_queue_t* queue, event_t* events, int max_events,
+                             int timeout_ms) {
     return poller_wait(queue, events, max_events, timeout_ms);
 }
 

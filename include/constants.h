@@ -7,7 +7,7 @@
 
 // Enable logging callback.
 #ifndef ENABLE_LOGGING
-    #define ENABLE_LOGGING 0
+#define ENABLE_LOGGING 0
 #endif
 
 // Number of workers. Should be ideally == ncpus.
@@ -30,7 +30,7 @@
 
 // Buffer size for incoming request excluding body.
 #ifndef READ_BUFFER_SIZE
-    #define READ_BUFFER_SIZE 2048
+#define READ_BUFFER_SIZE 4096
 #endif
 
 // Default buffer to allocate for the response if the response size exceeds STACK_BUFFER_SIZE.
@@ -42,6 +42,13 @@
 // WRITE_BUFFER_SIZE.
 #ifndef STACK_BUFFER_SIZE
     #define STACK_BUFFER_SIZE 512
+#endif
+
+// How often the background thread refreshes the preformatted
+// Date header, in seconds. The hot path then pays a single relaxed
+// load + memcpy per request with no time syscalls or retries.
+#ifndef PULSAR_DATE_REFRESH_SEC
+#define PULSAR_DATE_REFRESH_SEC 1
 #endif
 
 // Keep-Alive connection timeout in seconds.

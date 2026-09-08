@@ -3,8 +3,7 @@
         "**/*.mp4": true,
         "**/*.out": true,
         "**/perf.data*": true,
+        "**/.cache": true,
         "**/build": true,
-        "**/CMakeFiles": true,
-        ".cache": true,
     }
 }

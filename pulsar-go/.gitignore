@@ -1,0 +1,7 @@
+bench-results/
+.env
+.env.*
+*.log
+perf.data.*
+stdlib
+server
