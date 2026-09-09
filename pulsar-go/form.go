@@ -3,8 +3,8 @@ package pulsar
 /*
 #include <stdlib.h>
 #include "bridge.h"
-#include "../include/forms.h"
-#include "../include/pulsar.h"
+#include "third_party/pulsar/include/forms.h"
+#include "third_party/pulsar/include/pulsar.h"
 */
 import "C"
 import (

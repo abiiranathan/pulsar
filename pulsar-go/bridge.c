@@ -6,9 +6,9 @@
 #include <stdlib.h>  // for malloc, free, strdup
 #include <string.h>  // for strlen, strcmp, memcpy, memcmp
 
-#include "../include/headers.h"
-#include "../include/pulsar.h"
-#include "../include/routing.h"
+#include "third_party/pulsar/include/headers.h"
+#include "third_party/pulsar/include/pulsar.h"
+#include "third_party/pulsar/include/routing.h"
 
 /** Magic value tagging a route_t::pattern as owned by a GoBinding, so the
  *  trampoline can recover the enclosing struct safely instead of assuming

@@ -3,5 +3,10 @@ bench-results/
 .env.*
 *.log
 perf.data.*
-stdlib
-server
+# Compiled example binaries (narrow paths: bare `server`/`stdlib` patterns
+# would ignore the cmd/server and cmd/stdlib source directories themselves).
+cmd/server/server
+cmd/stdlib/stdlib
+# Build outputs of the vendored musl flow (rebuilt via `make libs`/`make static`).
+/bin/
+/lib/

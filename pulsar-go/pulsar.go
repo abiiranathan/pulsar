@@ -1,14 +1,13 @@
 package pulsar
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../include -D_GNU_SOURCE -O3
-#cgo LDFLAGS: -L${SRCDIR}/../build/lib -L${SRCDIR}/../build/bin -lpulsar -lsolidc -lpthread -lm
-#cgo LDFLAGS: -Wl,--disable-new-dtags -Wl,-rpath,${SRCDIR}/../build/lib
+#cgo CFLAGS: -I${SRCDIR}/third_party/pulsar/include -I${SRCDIR}/third_party/solidc/include -D_GNU_SOURCE -O3
+#cgo LDFLAGS: -L${SRCDIR}/lib -lpulsar -lsolidc -lpthread -lm
 #include <stdlib.h>
 #include "bridge.h"
-#include "../include/pulsar.h"
-#include "../include/status.h"
-#include "../include/method.h"
+#include "third_party/pulsar/include/pulsar.h"
+#include "third_party/pulsar/include/status.h"
+#include "third_party/pulsar/include/method.h"
 */
 import "C"
 import (
@@ -391,22 +390,31 @@ func (c *Context) Params() map[string]string {
 // Values are already percent-decoded by the C engine (with '+' as space).
 // The returned string is an owned copy safe to retain; QueryView is the
 // zero-copy variant valid only for the current request.
-func (c *Context) Query(name string) string {
-	if name == "" {
-		return ""
+func (c *Context) Query(name string, defaultValue ...string) string {
+	var defValue string
+	if len(defaultValue) > 0 {
+		defValue = defaultValue[0]
 	}
+
+	if name == "" {
+		return defValue
+	}
+
 	if c.conn == nil {
 		if c.queryVals == nil {
-			return ""
+			return defValue
 		}
 		vals := c.queryVals[name]
 		if len(vals) == 0 {
-			return ""
+			return defValue
 		}
 		return vals[0]
 	}
+
 	var cData *C.char
 	var cLen C.size_t
+	// name is guaranteed non-empty here (checked above), so
+	// unsafe.StringData is safe to call.
 	if C.bridge_query_get(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
@@ -414,7 +422,7 @@ func (c *Context) Query(name string) string {
 		&cData,
 		&cLen,
 	) == 0 {
-		return ""
+		return defValue
 	}
 	return C.GoStringN(cData, C.int(cLen))
 }

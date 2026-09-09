@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/forms.h"
-#include "../include/pulsar.h"
+#include "third_party/pulsar/include/forms.h"
+#include "third_party/pulsar/include/pulsar.h"
 
 #ifdef __cplusplus
 extern "C" {
