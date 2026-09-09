@@ -1,6 +1,7 @@
 #include "bridge.h"
 
 #include <ctype.h>   // for isalnum
+#include <stdbool.h> // for bool, true, false
 #include <stddef.h>  // for offsetof, size_t
 #include <stdint.h>  // for uint32_t
 #include <stdlib.h>  // for malloc, free, strdup
@@ -353,10 +354,10 @@ int pulsar_bridge_add_static(const char* pattern, const char* dirname) {
  * Context.Abort on the Go side).
  *
  * @param conn Connection to check. NULL is treated as not aborted.
- * @return 1 if aborted, 0 otherwise.
+ * @return true if aborted, false otherwise.
  * @note Safe for concurrent use: performs a single read of conn->abort.
  */
-int bridge_is_aborted(PulsarConn* conn) { return (conn && conn->abort) ? 1 : 0; }
+bool bridge_is_aborted(PulsarConn* conn) { return (conn && conn->abort) ? true : false; }
 
 /**
  * Installs the process-wide request logger, writing to file descriptor fd.
@@ -390,24 +391,24 @@ int pulsar_bridge_set_logger(int fd) {
  *                       for the lifetime of the current request.
  * @param[out] out_len Set to the length of the parameter value on success;
  *                      left unmodified on failure.
- * @return 1 if found, 0 if conn/name is invalid, the matched route takes no
+ * @return true if found, false if conn/name is invalid, the matched route takes no
  *         path parameters, or no parameter named `name` is present.
  * @note Safe for concurrent use across distinct connections; not
  *       re-entrant for the same conn from multiple threads.
  */
-int bridge_get_path_param(PulsarConn* conn, const char* name, size_t name_len,
-                          const char** out_data, size_t* out_len) {
+bool bridge_get_path_param(PulsarConn* conn, const char* name, size_t name_len,
+                           const char** out_data, size_t* out_len) {
     if (!conn || !name || name_len == 0) {
-        return 0;
+        return false;
     }
     route_t* route = conn->request.route;
     if (!route || route->route_type != ROUTE_TYPE_PARAM) {
-        return 0;
+        return false;
     }
 
     PathParams* pp = route->state.path_params;
     if (!pp || !pp->items) {
-        return 0;
+        return false;
     }
     for (size_t i = 0; i < pp->match_count; i++) {
         const PathParam* p = &pp->items[i];
@@ -415,10 +416,10 @@ int bridge_get_path_param(PulsarConn* conn, const char* name, size_t name_len,
             memcmp(p->name, name, name_len) == 0) {
             *out_data = p->value;
             *out_len = p->value_len;
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 /**
@@ -493,14 +494,14 @@ void bridge_get_path_param_at(PulsarConn* conn, size_t idx, const char** name, s
  *                       storage on success; valid only for the lifetime of
  *                       the current request.
  * @param[out] out_len Set to the length of the parameter value on success.
- * @return 1 if found, 0 if conn/name is invalid, the request has no query
+ * @return true if found, false if conn/name is invalid, the request has no query
  *         parameters, or none is named `name`.
  * @note Safe for concurrent use across distinct connections.
  */
-int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
-                     size_t* out_len) {
+bool bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
+                      size_t* out_len) {
     if (!conn || !name || name_len == 0 || !out_data || !out_len) {
-        return 0;
+        return false;
     }
     /* request.query_params is now an inline struct (not a pointer); Go
      * strings are not NUL-terminated, so scan with the explicit length
@@ -511,10 +512,10 @@ int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const 
         if (ss_equal_nocase(q->entries[i].name, target)) {
             *out_data = q->entries[i].value.data;
             *out_len = q->entries[i].value.len;
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 /**
@@ -528,14 +529,14 @@ int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const 
  *                       storage on success; valid only for the lifetime of
  *                       the current request.
  * @param[out] out_len Set to the length of the header value on success.
- * @return 1 if found, 0 if conn/name is invalid, the request has no
+ * @return true if found, false if conn/name is invalid, the request has no
  *         headers, or none is named `name`.
  * @note Safe for concurrent use across distinct connections.
  */
-int bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
-                          const char** out_data, size_t* out_len) {
+bool bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
+                           const char** out_data, size_t* out_len) {
     if (!conn || !name || name_len == 0 || !out_data || !out_len) {
-        return 0;
+        return false;
     }
     /* Same as above: inline struct + non-NUL-terminated Go name. */
     const headers_t* h = &conn->request.headers;
@@ -544,10 +545,10 @@ int bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
         if (ss_equal_nocase(h->entries[i].name, target)) {
             *out_data = h->entries[i].value.data;
             *out_len = h->entries[i].value.len;
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 /**
@@ -566,23 +567,23 @@ size_t bridge_query_count(PulsarConn* conn) {
 /**
  * Retrieves the idx-th query parameter as request-scoped views.
  *
- * @return 1 on success, 0 when idx is out of range.
+ * @return true on success, false when idx is out of range.
  */
-int bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
-                    const char** val, size_t* val_len) {
+bool bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
+                     const char** val, size_t* val_len) {
     if (!conn || !name || !name_len || !val || !val_len) {
-        return 0;
+        return false;
     }
     const headers_t* q = &conn->request.query_params;
     if (idx >= q->count) {
-        return 0;
+        return false;
     }
 
     *name = q->entries[idx].name.data;
     *name_len = q->entries[idx].name.len;
     *val = q->entries[idx].value.data;
     *val_len = q->entries[idx].value.len;
-    return 1;
+    return true;
 }
 
 /**
@@ -598,40 +599,40 @@ size_t bridge_req_headers_count(PulsarConn* conn) {
 /**
  * Retrieves the idx-th request header as request-scoped views.
  *
- * @return 1 on success, 0 when idx is out of range.
+ * @return true on success, false when idx is out of range.
  */
-int bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
-                         const char** val, size_t* val_len) {
+bool bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
+                          const char** val, size_t* val_len) {
     if (!conn || !name || !name_len || !val || !val_len) {
-        return 0;
+        return false;
     }
     const headers_t* h = &conn->request.headers;
     if (idx >= h->count) {
-        return 0;
+        return false;
     }
     *name = h->entries[idx].name.data;
     *name_len = h->entries[idx].name.len;
     *val = h->entries[idx].value.data;
     *val_len = h->entries[idx].value.len;
-    return 1;
+    return true;
 }
 
 /**
  * Returns the matched route's pattern as a request-scoped view.
  *
- * @return 1 on success, 0 when the connection has no matched route.
+ * @return true on success, false when the connection has no matched route.
  */
-int bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_len) {
+bool bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_len) {
     if (!conn || !out_data || !out_len) {
-        return 0;
+        return false;
     }
     route_t* route = conn->request.route;
     if (!route || !route->pattern) {
-        return 0;
+        return false;
     }
     *out_data = route->pattern;
     *out_len = route->pattern_len;
-    return 1;
+    return true;
 }
 
 /**
@@ -653,11 +654,11 @@ size_t bridge_content_length(PulsarConn* conn) {
  * re-scanned). Body is a direct view into the receive buffer. Counts let
  * the caller size enumeration loops without extra count calls.
  *
- * Returns 1 on success, 0 when conn/out is NULL.
+ * Returns true on success, false when conn/out is NULL.
  */
-int bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out) {
+bool bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out) {
     if (!conn || !out) {
-        return 0;
+        return false;
     }
     const char* method = conn->request.method;
     const char* path = conn->request.path;
@@ -682,13 +683,13 @@ int bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out) {
     out->nparams = bridge_get_path_params_count(conn);
     out->nquery = bridge_query_count(conn);
     out->nheaders = bridge_req_headers_count(conn);
-    return 1;
+    return true;
 }
 
 /**
  * Appends a pre-formatted header block and optionally marks Content-Type.
  */
-void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, int content_type_set) {
+void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, bool content_type_set) {
     if (!conn) {
         return;
     }
@@ -787,20 +788,20 @@ size_t bridge_form_num_files(MultipartForm* form) { return form ? form->num_file
  * form's arena (NUL-terminated) and stay valid until
  * bridge_free_multipart().
  */
-int bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, size_t* name_len,
-                         const char** val, size_t* val_len) {
+bool bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, size_t* name_len,
+                          const char** val, size_t* val_len) {
     if (!form || !name || !name_len || !val || !val_len || idx >= form->num_fields) {
-        return 0;
+        return false;
     }
     const FormField* f = &form->fields[idx];
     if (!f->name || !f->value) {
-        return 0;
+        return false;
     }
     *name = f->name;
     *name_len = f->name_len;
     *val = f->value;
     *val_len = f->value_len;
-    return 1;
+    return true;
 }
 
 /**
@@ -808,15 +809,15 @@ int bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, siz
  * into the form's arena; offset/size describe a window into the request
  * body (body[offset:offset+size]) that is NOT copied.
  */
-int bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, size_t* field_len,
+bool bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, size_t* field_len,
                         const char** filename, size_t* filename_len, const char** mimetype,
                         size_t* mimetype_len, size_t* offset, size_t* size) {
     if (!form || idx >= form->num_files) {
-        return 0;
+        return false;
     }
     const FileHeader* fh = form->files[idx];
     if (!fh) {
-        return 0;
+        return false;
     }
     if (field) *field = fh->field_name;
     if (field_len) *field_len = fh->field_name ? fh->field_name_len : 0;
@@ -826,7 +827,7 @@ int bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, siz
     if (mimetype_len) *mimetype_len = fh->mimetype ? fh->mimetype_len : 0;
     if (offset) *offset = fh->offset;
     if (size) *size = fh->size;
-    return 1;
+    return true;
 }
 
 /**

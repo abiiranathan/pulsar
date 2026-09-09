@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "third_party/pulsar/include/forms.h"
 #include "third_party/pulsar/include/pulsar.h"
 
@@ -20,15 +21,15 @@ void pulsar_c_trampoline(PulsarCtx* ctx);
 int pulsar_bridge_add_route(int method, const char* pattern, int route_id);
 int pulsar_bridge_add_static(const char* pattern, const char* dirname);
 
-/* Returns non-zero if conn_abort() was called on this connection. */
-int bridge_is_aborted(PulsarConn* conn);
+/* Returns true if conn_abort() was called on this connection. */
+bool bridge_is_aborted(PulsarConn* conn);
 
 /* Access logger: installs the builtin pulsar_logger */
 int pulsar_bridge_set_logger(int fd);
 
 /* Zero-allocation Path Parameter helpers */
-int bridge_get_path_param(PulsarConn* conn, const char* name, size_t name_len,
-                          const char** out_data, size_t* out_len);
+bool bridge_get_path_param(PulsarConn* conn, const char* name, size_t name_len,
+                           const char** out_data, size_t* out_len);
 
 size_t bridge_get_path_params_count(PulsarConn* conn);
 
@@ -37,23 +38,23 @@ void bridge_get_path_param_at(PulsarConn* conn, size_t idx, const char** name, s
 
 /* Zero-allocation Query & Header slice helpers.
  * name is NOT NUL-terminated (Go string data); length given by name_len. */
-int bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
+bool bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
                      size_t* out_len);
-int bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
+bool bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
                           const char** out_data, size_t* out_len);
 
 /* Enumeration helpers for query params and request headers.
  * Each entry is returned as a (pointer, length) view into the connection's
  * request-scoped storage. Views are valid only for the current request. */
 size_t bridge_query_count(PulsarConn* conn);
-int bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
+bool bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
                     const char** val, size_t* val_len);
 size_t bridge_req_headers_count(PulsarConn* conn);
-int bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
+bool bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
                          const char** val, size_t* val_len);
 
 /* Request metadata views. Returned pointers are request-scoped. */
-int bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_len);
+bool bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_len);
 size_t bridge_content_length(PulsarConn* conn);
 
 /* Single-call snapshot of scalar request metadata plus collection counts.
@@ -80,16 +81,16 @@ typedef struct {
     size_t nheaders;
 } BridgeReqSnapshot;
 
-int bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out);
+bool bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out);
 
 /* Commits a pre-formatted "Name: value\r\n" block to the response header
  * buffer in a single call, so the Go side can stage H headers in pure Go
  * and flush them with one transition instead of H conn_writeheader calls.
- * When content_type_set is non-zero the response CONTENT_TYPE flag is
+ * When content_type_set is true the response CONTENT_TYPE flag is
  * marked as well, keeping conn_servefile's "don't override an explicit
  * Content-Type" check correct for headers staged before ServeFile.
  */
-void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, int content_type_set);
+void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, bool content_type_set);
 
 /* Multipart form support (see forms.h).
  *
@@ -106,9 +107,9 @@ int bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_
                            const char** out_msg);
 size_t bridge_form_num_fields(MultipartForm* form);
 size_t bridge_form_num_files(MultipartForm* form);
-int bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, size_t* name_len,
+bool bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, size_t* name_len,
                          const char** val, size_t* val_len);
-int bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, size_t* field_len,
+bool bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, size_t* field_len,
                         const char** filename, size_t* filename_len, const char** mimetype,
                         size_t* mimetype_len, size_t* offset, size_t* size);
 void bridge_free_multipart(MultipartForm* form);

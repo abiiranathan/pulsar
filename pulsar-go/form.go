@@ -193,7 +193,7 @@ func (c *Context) MultipartForm() (*Form, error) {
 		for i := range n {
 			var cn, cv *C.char
 			var nl, vl C.size_t
-			if C.bridge_form_field_at(raw, C.size_t(i), &cn, &nl, &cv, &vl) == 0 {
+			if !C.bridge_form_field_at(raw, C.size_t(i), &cn, &nl, &cv, &vl) {
 				continue
 			}
 			f.fields = append(f.fields, formField{
@@ -209,9 +209,9 @@ func (c *Context) MultipartForm() (*Form, error) {
 			var cField, cName, cType *C.char
 			var fieldLen, nameLen, typeLen C.size_t
 			var off, sz C.size_t
-			if C.bridge_form_file_at(raw, C.size_t(i),
+			if !C.bridge_form_file_at(raw, C.size_t(i),
 				&cField, &fieldLen, &cName, &nameLen, &cType, &typeLen,
-				&off, &sz) == 0 {
+				&off, &sz) {
 				continue
 			}
 			o, s := int(off), int(sz)

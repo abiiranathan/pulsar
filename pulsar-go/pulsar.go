@@ -269,7 +269,7 @@ func (c *Context) snapshot() bool {
 		return c.conn != nil
 	}
 	var snap C.BridgeReqSnapshot
-	if C.bridge_req_snapshot(c.conn, &snap) == 0 {
+	if !C.bridge_req_snapshot(c.conn, &snap) {
 		return false
 	}
 	c.snapDone = true
@@ -345,13 +345,13 @@ func (c *Context) Param(name string) string {
 	}
 	var cData *C.char
 	var cLen C.size_t
-	if C.bridge_get_path_param(
+	if !C.bridge_get_path_param(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
 		C.size_t(len(name)),
 		&cData,
 		&cLen,
-	) == 0 {
+	) {
 		return ""
 	}
 	return C.GoStringN(cData, C.int(cLen))
@@ -415,13 +415,13 @@ func (c *Context) Query(name string, defaultValue ...string) string {
 	var cLen C.size_t
 	// name is guaranteed non-empty here (checked above), so
 	// unsafe.StringData is safe to call.
-	if C.bridge_query_get(
+	if !C.bridge_query_get(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
 		C.size_t(len(name)),
 		&cData,
 		&cLen,
-	) == 0 {
+	) {
 		return defValue
 	}
 	return C.GoStringN(cData, C.int(cLen))
@@ -444,13 +444,13 @@ func (c *Context) Header(name string) string {
 	}
 	var cData *C.char
 	var cLen C.size_t
-	if C.bridge_req_header_get(
+	if !C.bridge_req_header_get(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
 		C.size_t(len(name)),
 		&cData,
 		&cLen,
-	) == 0 {
+	) {
 		return ""
 	}
 	return C.GoStringN(cData, C.int(cLen))
@@ -480,13 +480,13 @@ func (c *Context) ParamView(name string) string {
 	}
 	var cData *C.char
 	var cLen C.size_t
-	if C.bridge_get_path_param(
+	if !C.bridge_get_path_param(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
 		C.size_t(len(name)),
 		&cData,
 		&cLen,
-	) == 0 {
+	) {
 		return ""
 	}
 	return unsafeView(cData, cLen)
@@ -505,13 +505,13 @@ func (c *Context) QueryView(name string) string {
 	}
 	var cData *C.char
 	var cLen C.size_t
-	if C.bridge_query_get(
+	if !C.bridge_query_get(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
 		C.size_t(len(name)),
 		&cData,
 		&cLen,
-	) == 0 {
+	) {
 		return ""
 	}
 	return unsafeView(cData, cLen)
@@ -529,13 +529,13 @@ func (c *Context) HeaderView(name string) string {
 	}
 	var cData *C.char
 	var cLen C.size_t
-	if C.bridge_req_header_get(
+	if !C.bridge_req_header_get(
 		c.conn,
 		(*C.char)(unsafe.Pointer(unsafe.StringData(name))),
 		C.size_t(len(name)),
 		&cData,
 		&cLen,
-	) == 0 {
+	) {
 		return ""
 	}
 	return unsafeView(cData, cLen)
@@ -572,7 +572,7 @@ func (c *Context) Queries() map[string]string {
 	for i := 0; i < c.snapNquery; i++ {
 		var cName, cVal *C.char
 		var nameLen, valLen C.size_t
-		if C.bridge_query_at(c.conn, C.size_t(i), &cName, &nameLen, &cVal, &valLen) == 0 {
+		if !C.bridge_query_at(c.conn, C.size_t(i), &cName, &nameLen, &cVal, &valLen) {
 			continue
 		}
 		out[unsafeView(cName, nameLen)] = unsafeView(cVal, valLen)
@@ -610,7 +610,7 @@ func (c *Context) Headers() map[string]string {
 	for i := 0; i < c.snapNheaders; i++ {
 		var cName, cVal *C.char
 		var nameLen, valLen C.size_t
-		if C.bridge_req_header_at(c.conn, C.size_t(i), &cName, &nameLen, &cVal, &valLen) == 0 {
+		if !C.bridge_req_header_at(c.conn, C.size_t(i), &cName, &nameLen, &cVal, &valLen) {
 			continue
 		}
 		out[unsafeView(cName, nameLen)] = unsafeView(cVal, valLen)
@@ -773,11 +773,7 @@ func (c *Context) commitStagedHeaders() {
 			buf = append(buf, '\r', '\n')
 		}
 	}
-	var ct C.int
-	if hasCT {
-		ct = 1
-	}
-	C.bridge_commit_headers(c.conn, (*C.char)(bytesPtr(buf)), C.size_t(len(buf)), ct)
+	C.bridge_commit_headers(c.conn, (*C.char)(bytesPtr(buf)), C.size_t(len(buf)), C.bool(hasCT))
 	clear(c.respHeaders)
 }
 

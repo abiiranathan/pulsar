@@ -138,7 +138,7 @@ func (c *Context) buildHTTPRequest() *http.Request {
 			for i := range count {
 				var cName, cVal *C.char
 				var nLen, vLen C.size_t
-				if C.bridge_query_at(c.conn, C.size_t(i), &cName, &nLen, &cVal, &vLen) == 0 {
+				if !C.bridge_query_at(c.conn, C.size_t(i), &cName, &nLen, &cVal, &vLen) {
 					continue
 				}
 				if b.Len() > 0 {
@@ -164,7 +164,7 @@ func (c *Context) buildHTTPRequest() *http.Request {
 			for i := range count {
 				var cName, cVal *C.char
 				var nLen, vLen C.size_t
-				if C.bridge_req_header_at(c.conn, C.size_t(i), &cName, &nLen, &cVal, &vLen) != 0 {
+				if C.bridge_req_header_at(c.conn, C.size_t(i), &cName, &nLen, &cVal, &vLen) {
 					name := unsafeView(cName, nLen)
 					val := C.GoStringN(cVal, C.int(vLen))
 					header.Add(name, val)
