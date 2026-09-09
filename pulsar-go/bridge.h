@@ -1,9 +1,9 @@
 #ifndef PULSAR_GO_BRIDGE_H
 #define PULSAR_GO_BRIDGE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 #include "third_party/pulsar/include/forms.h"
 #include "third_party/pulsar/include/pulsar.h"
 
@@ -39,19 +39,19 @@ void bridge_get_path_param_at(PulsarConn* conn, size_t idx, const char** name, s
 /* Zero-allocation Query & Header slice helpers.
  * name is NOT NUL-terminated (Go string data); length given by name_len. */
 bool bridge_query_get(PulsarConn* conn, const char* name, size_t name_len, const char** out_data,
-                     size_t* out_len);
+                      size_t* out_len);
 bool bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
-                          const char** out_data, size_t* out_len);
+                           const char** out_data, size_t* out_len);
 
 /* Enumeration helpers for query params and request headers.
  * Each entry is returned as a (pointer, length) view into the connection's
  * request-scoped storage. Views are valid only for the current request. */
 size_t bridge_query_count(PulsarConn* conn);
 bool bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
-                    const char** val, size_t* val_len);
+                     const char** val, size_t* val_len);
 size_t bridge_req_headers_count(PulsarConn* conn);
 bool bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_t* name_len,
-                         const char** val, size_t* val_len);
+                          const char** val, size_t* val_len);
 
 /* Request metadata views. Returned pointers are request-scoped. */
 bool bridge_route_pattern(PulsarConn* conn, const char** out_data, size_t* out_len);
@@ -92,26 +92,34 @@ bool bridge_req_snapshot(PulsarConn* conn, BridgeReqSnapshot* out);
  */
 void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, bool content_type_set);
 
-/* Multipart form support (see forms.h).
+/**
+ * Parses the current request as multipart/form-data (RFC 7578).
  *
- * bridge_parse_multipart() heap-allocates a MultipartForm, parses the
- * current request body into it, and returns it via out_form. The caller
- * owns the result and must release it with bridge_free_multipart().
- * File payloads are NOT copied: each FileHeader records an offset/size
- * window into the request body (see bridge_form_file_at()).
+ * The request's Content-Type header supplies the boundary; the request
+ * body supplies the payload. Field names/values and file metadata are
+ * copied into a private arena owned by the returned form, while file
+ * payloads stay in place as offset/size windows into the request body
+ * (see bridge_form_file_at()) — no file bytes are copied here.
  *
- * Returns 0 on success. On failure returns -1 with out_code/out_msg
- * describing the MultipartCode failure (out_msg points at a static string).
+ * @param conn      Active connection with a parsed request. Required,
+ *                  must not be NULL.
+ * @param out_form  Receives the parsed form on success. Required, must
+ *                  not be NULL; set to NULL on failure.
+ * @param out_code  Receives a MultipartCode describing the outcome.
+ *                  Required, must not be NULL.
+ * @param out_msg   Receives a static, human-readable message for
+ *                  *out_code. Required, must not be NULL.
+ * @return 0 on success, -1 on failure (see *out_code / *out_msg).
  */
-int bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_code,
-                           const char** out_msg);
+bool bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_code,
+                            const char** out_msg);
 size_t bridge_form_num_fields(MultipartForm* form);
 size_t bridge_form_num_files(MultipartForm* form);
 bool bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, size_t* name_len,
-                         const char** val, size_t* val_len);
+                          const char** val, size_t* val_len);
 bool bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, size_t* field_len,
-                        const char** filename, size_t* filename_len, const char** mimetype,
-                        size_t* mimetype_len, size_t* offset, size_t* size);
+                         const char** filename, size_t* filename_len, const char** mimetype,
+                         size_t* mimetype_len, size_t* offset, size_t* size);
 void bridge_free_multipart(MultipartForm* form);
 const char* bridge_multipart_error(int code);
 

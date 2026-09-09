@@ -175,7 +175,8 @@ func (c *Context) MultipartForm() (*Form, error) {
 	var raw *C.MultipartForm
 	var code C.int
 	var cmsg *C.char
-	if C.bridge_parse_multipart(c.conn, &raw, &code, &cmsg) != 0 || raw == nil {
+
+	if !C.bridge_parse_multipart(c.conn, &raw, &code, &cmsg) || raw == nil {
 		msg := "invalid multipart form"
 		if cmsg != nil {
 			msg = C.GoString(cmsg)

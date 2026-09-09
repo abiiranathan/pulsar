@@ -1,11 +1,12 @@
 #include "bridge.h"
 
-#include <ctype.h>   // for isalnum
-#include <stdbool.h> // for bool, true, false
-#include <stddef.h>  // for offsetof, size_t
-#include <stdint.h>  // for uint32_t
-#include <stdlib.h>  // for malloc, free, strdup
-#include <string.h>  // for strlen, strcmp, memcpy, memcmp
+#include <assert.h>
+#include <ctype.h>    // for isalnum
+#include <stdbool.h>  // for bool, true, false
+#include <stddef.h>   // for offsetof, size_t
+#include <stdint.h>   // for uint32_t
+#include <stdlib.h>   // for malloc, free, strdup
+#include <string.h>   // for strlen, strcmp, memcpy, memcmp
 
 #include "third_party/pulsar/include/headers.h"
 #include "third_party/pulsar/include/pulsar.h"
@@ -15,6 +16,9 @@
  *  trampoline can recover the enclosing struct safely instead of assuming
  *  every matched route was registered from Go. */
 #define GO_BINDING_MAGIC 0x47424E44u /* 'GBND' */
+
+/* Buffer for content type value */
+#define CT_BUF_SIZE 512
 
 /**
  * Out-of-line storage for a Go-registered route's pattern, alongside the
@@ -709,56 +713,54 @@ void bridge_commit_headers(PulsarConn* conn, const char* data, size_t len, bool 
  * copied into a private arena owned by the returned form, while file
  * payloads stay in place as offset/size windows into the request body
  * (see bridge_form_file_at()) — no file bytes are copied here.
+ *
+ * @param conn      Active connection with a parsed request. Required,
+ *                  must not be NULL.
+ * @param out_form  Receives the parsed form on success. Required, must
+ *                  not be NULL; set to NULL on failure.
+ * @param out_code  Receives a MultipartCode describing the outcome.
+ *                  Required, must not be NULL.
+ * @param out_msg   Receives a static, human-readable message for
+ *                  *out_code. Required, must not be NULL.
+ * @return 0 on success, -1 on failure (see *out_code / *out_msg).
  */
-int bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_code,
-                           const char** out_msg) {
-    if (out_form) *out_form = NULL;
-    if (out_code) *out_code = (int)INVALID_FORM_BOUNDARY;
-    if (out_msg) *out_msg = multipart_error(INVALID_FORM_BOUNDARY);
-    if (!conn || !out_form) {
-        return -1;
-    }
+bool bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_code,
+                            const char** out_msg) {
+    assert(conn && out_form && out_code && out_msg);
 
-    /* Content-Type is stored as a non-NUL-terminated slice; make a
-     * NUL-terminated stack copy for parse_boundary(). */
-    StrSlice ct = {.data = NULL, .len = 0};
-    {
-        const headers_t* h = &conn->request.headers;
-        StrSlice target = {.data = "Content-Type", .len = 12};
-        for (size_t i = 0; i < h->count; ++i) {
-            if (ss_equal_nocase(h->entries[i].name, target)) {
-                ct = h->entries[i].value;
-                break;
-            }
-        }
+    *out_form = NULL;
+
+    const char* content_type = req_header_get(conn, "Content-Type");
+    if (!content_type) {
+        *out_code = (int)INVALID_FORM_BOUNDARY;
+        *out_msg = "Invalid form content type header";
+        return false;
     }
-    if (!ct.data || ct.len == 0 || ct.len >= 512) {
-        return -1;
-    }
-    char ct_buf[512];
-    memcpy(ct_buf, ct.data, ct.len);
-    ct_buf[ct.len] = '\0';
 
     char boundary[256];
-    if (!parse_boundary(ct_buf, boundary, sizeof(boundary))) {
-        return -1;
+    if (!parse_boundary(content_type, boundary, sizeof(boundary))) {
+        *out_code = (int)INVALID_FORM_BOUNDARY;
+        *out_msg = multipart_error(INVALID_FORM_BOUNDARY);
+        return false;
     }
 
     if (!conn->request.body || conn->request.content_length == 0) {
-        return -1;
+        *out_code = (int)EMPTY_FILE_CONTENT;
+        *out_msg = multipart_error(EMPTY_FILE_CONTENT);
+        return false;
     }
 
     MultipartForm* form = (MultipartForm*)malloc(sizeof(*form));
     if (!form) {
-        if (out_code) *out_code = (int)MEMORY_ALLOC_ERROR;
-        if (out_msg) *out_msg = multipart_error(MEMORY_ALLOC_ERROR);
+        *out_code = (int)MEMORY_ALLOC_ERROR;
+        *out_msg = multipart_error(MEMORY_ALLOC_ERROR);
         return -1;
     }
 
     MultipartCode mc = multipart_init(form);
     if (mc != MULTIPART_OK) {
-        if (out_code) *out_code = (int)mc;
-        if (out_msg) *out_msg = multipart_error(mc);
+        *out_code = (int)mc;
+        *out_msg = multipart_error(mc);
         free(form);
         return -1;
     }
@@ -767,16 +769,16 @@ int bridge_parse_multipart(PulsarConn* conn, MultipartForm** out_form, int* out_
     if (mc != MULTIPART_OK) {
         /* multipart_parse() already ran multipart_cleanup() on failure,
          * which destroyed the arena; only the struct itself is left. */
-        if (out_code) *out_code = (int)mc;
-        if (out_msg) *out_msg = multipart_error(mc);
+        *out_code = (int)mc;
+        *out_msg = multipart_error(mc);
         free(form);
-        return -1;
+        return false;
     }
 
     *out_form = form;
-    if (out_code) *out_code = (int)MULTIPART_OK;
-    if (out_msg) *out_msg = multipart_error(MULTIPART_OK);
-    return 0;
+    *out_code = (int)MULTIPART_OK;
+    *out_msg = multipart_error(MULTIPART_OK);
+    return true;
 }
 
 size_t bridge_form_num_fields(MultipartForm* form) { return form ? form->num_fields : 0; }
@@ -810,8 +812,8 @@ bool bridge_form_field_at(MultipartForm* form, size_t idx, const char** name, si
  * body (body[offset:offset+size]) that is NOT copied.
  */
 bool bridge_form_file_at(MultipartForm* form, size_t idx, const char** field, size_t* field_len,
-                        const char** filename, size_t* filename_len, const char** mimetype,
-                        size_t* mimetype_len, size_t* offset, size_t* size) {
+                         const char** filename, size_t* filename_len, const char** mimetype,
+                         size_t* mimetype_len, size_t* offset, size_t* size) {
     if (!form || idx >= form->num_files) {
         return false;
     }
