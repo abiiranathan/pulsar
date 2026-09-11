@@ -42,6 +42,7 @@ void echo_handler(PulsarCtx* ctx) {
     }
 }
 
+#if ENABLE_SLOW_WORKERS
 /* =========================================================================
  * Server-Sent Events (SSE) - Offloaded Implementation
  *
@@ -123,6 +124,8 @@ void sse_page(PulsarCtx* ctx) {
         "}</script></body></html>");
     conn_send_html(ctx->conn, StatusOK, html.data, html.len);
 }
+
+#endif
 
 /* =========================================================================
  * Chunked transfer encoding
@@ -314,8 +317,12 @@ int main(int argc, char* argv[]) {
     use_route_middleware(hello, mw, 2);
 
     route_get("/json", json_handler);
+
+#if ENABLE_SLOW_WORKERS
     route_get("/sse", sse_handler);
     route_get("/sse-page", sse_page);
+#endif
+
     route_get("/chunked", chunked_handler);
     route_get("/echo", echo_handler);
     route_post("/echo", echo_handler);

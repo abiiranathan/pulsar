@@ -15,8 +15,23 @@
 #define NUM_WORKERS 4
 #endif
 
+#ifndef WORKER_POOL_SIZE
+#define WORKER_POOL_SIZE 1024  // 512 entries
+#endif
+
+#ifndef CONNECTION_ARENA_SIZE
+#define CONNECTION_ARENA_SIZE (1 << 14)  // 16 KB
+#endif
+
+// Background threads to handle SSE or slow requests via pulsar handoff mechanism.
+#ifndef ENABLE_SLOW_WORKERS
+#define ENABLE_SLOW_WORKERS 0
+#endif
+
 // Number of slow workers processing SSE or websocket requests.
+#ifndef NUM_SLOW_WORKERS
 #define NUM_SLOW_WORKERS 2
+#endif
 
 // maximum path length
 #ifndef MAX_PATH_LEN

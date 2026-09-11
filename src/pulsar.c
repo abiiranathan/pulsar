@@ -24,9 +24,6 @@
     ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
 #define ALIGNED ALIGN(64)
 
-#define WORKER_POOL_SIZE      512
-#define CONNECTION_ARENA_SIZE (1 << 14)
-
 ALIGN(64) volatile sig_atomic_t server_running = 1;
 static int worker_listen_fds[NUM_WORKERS];
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
@@ -116,6 +113,8 @@ INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState*
 INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
                              int worker_id);
 
+#if ENABLE_SLOW_WORKERS
+#define SLOW_KEEPALIVE_CHECK_S 5
 /* ================================================================
  * Slow Worker Pool
  * ================================================================ */
@@ -142,10 +141,6 @@ static void slow_close_offloaded(event_queue_t* queue, PulsarConn* conn) {
     arena_destroy(conn->arena);
     free(conn);
 }
-
-#ifndef SLOW_KEEPALIVE_CHECK_S
-#define SLOW_KEEPALIVE_CHECK_S 5
-#endif
 
 static void* slow_worker_thread(void* arg) {
     SlowWorker* worker = (SlowWorker*)arg;
@@ -256,6 +251,7 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
 
     return true;
 }
+#endif
 
 static void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state) {
     if (unlikely(!conn->in_keep_alive)) return;
@@ -1935,7 +1931,9 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     execute_all_middleware(&ctx, route);
     if (!conn->abort) route->handler(&ctx);
 
+#if ENABLE_SLOW_WORKERS
     if (conn->offloaded) return StatusOK;
+#endif
 
     if (HAS_CHUNKED_TRANSFER(conn->response.flags)) {
         request_complete(conn);
@@ -2086,7 +2084,10 @@ static void add_connection_to_worker(event_queue_t* queue, int client_fd, int wo
 
     conn->owner_queue = queue;
     conn->owner_ka_state = ka_state;
+
+#if ENABLE_SLOW_WORKERS
     conn->offloaded = false;
+#endif
 
     if (event_add_read(queue, client_fd, conn) < 0) {
         perror("event_add_read");
@@ -2150,7 +2151,9 @@ INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
             write_error(conn, status);
         }
 
+#if ENABLE_SLOW_WORKERS
         if (conn->offloaded) return;
+#endif
 
         // Only trigger write if a response was actually produced
         if (conn->response.out_len > 0 || conn->response.file_fd > 0) {
@@ -2526,6 +2529,7 @@ int pulsar_run(const char* addr, int port) {
         date_thread_started = true;
     }
 
+#if ENABLE_SLOW_WORKERS
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         slow_workers[i].id = i;
         slow_workers[i].queue = event_queue_create();
@@ -2541,6 +2545,7 @@ int pulsar_run(const char* addr, int port) {
             exit(EXIT_FAILURE);
         }
     }
+#endif
 
     pthread_t workers[NUM_WORKERS] = {0};
     WorkerData worker_data[NUM_WORKERS] = {0};
@@ -2569,16 +2574,21 @@ int pulsar_run(const char* addr, int port) {
         pthread_setaffinity_np(workers[i], sizeof(cpu_set_t), &cpuset);
     }
 
+#if ENABLE_SLOW_WORKERS
     printf("\nStarting server with %d workers (%d slow)\n", NUM_WORKERS, NUM_SLOW_WORKERS);
+#else
+    printf("\nStarting server with %d workers\n", NUM_WORKERS);
+#endif
     printf("Listening on http://%s:%d\n", addr ? addr : "0.0.0.0", port);
 
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }
-
+#if ENABLE_SLOW_WORKERS
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         pthread_join(slow_workers[i].thread, NULL);
     }
+#endif
 
     if (date_thread_started) {
         pthread_join(date_thread, NULL);

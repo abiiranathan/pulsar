@@ -115,18 +115,20 @@ struct pulsar_conn {
     Locals locals;
     struct request_t request;
     struct response_t response;
-
 #if ENABLE_LOGGING
     uint64_t start;
 #endif
-
     struct pulsar_conn *next, *prev;
     struct Poller* owner_queue;
     void* owner_ka_state;
+#if ENABLE_SLOW_WORKERS
     struct PulsarOffloadHandler offload_hooks;
     bool offloaded;
+#endif
 };
 
+#if ENABLE_SLOW_WORKERS
 bool pulsar_handoff(struct pulsar_conn* conn, PulsarOffloadHandler handlers);
+#endif
 
 #endif /* __PULSAR_TYPES_H__ */
