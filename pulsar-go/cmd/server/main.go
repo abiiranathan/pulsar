@@ -33,7 +33,11 @@ func main() {
 
 	// Root endpoint
 	app.Get("/", func(c *pulsar.Context) error {
-		return c.String(http.StatusOK, "Welcome to Pulsar Go!")
+		u := User{
+			ID: "1",
+			Name: "Abiira Nathan",
+		}
+		return c.JSON(http.StatusOK, u)
 	})
 
 	// JSON response handler returning clean error

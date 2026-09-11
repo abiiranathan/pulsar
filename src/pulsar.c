@@ -27,8 +27,8 @@
 #define WORKER_POOL_SIZE      512
 #define CONNECTION_ARENA_SIZE (1 << 14)
 
+ALIGN(64) volatile sig_atomic_t server_running = 1;
 static int worker_listen_fds[NUM_WORKERS];
-volatile sig_atomic_t server_running = 1;
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 static size_t global_mw_count = 0;
 static void* GLOBAL_HANDLER_USERDATA = NULL;
@@ -80,9 +80,9 @@ static PulsarConn* worker_pool_acquire(int worker_id, Arena** arena) {
 
 static void worker_pool_release(int worker_id, PulsarConn* conn, Arena* arena) {
     WorkerPool* pool = &worker_pools[worker_id];
-    arena_reset(arena);
 
     if (pool->top < WORKER_POOL_SIZE) {
+        arena_reset(arena);
         pool->conns[pool->top] = conn;
         pool->arenas[pool->top] = arena;
         pool->top++;
@@ -102,7 +102,7 @@ static void worker_pool_cleanup(int worker_id) {
     }
 }
 
-typedef struct ALIGN(64) KeepAliveState {
+typedef struct KeepAliveState {
     PulsarConn* head;
     PulsarConn* tail;
     size_t count;
@@ -119,7 +119,7 @@ INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveSt
 /* ================================================================
  * Slow Worker Pool
  * ================================================================ */
-typedef struct ALIGN(64) SlowWorker {
+typedef struct SlowWorker {
     pthread_t thread;
     event_queue_t* queue;
     int id;
@@ -2415,7 +2415,7 @@ handle_error:
 /* ================================================================
  * Worker Thread
  * ================================================================ */
-typedef struct ALIGN(64) {
+typedef struct {
     event_queue_t* queue;
     int id;
     int listen_fd;
