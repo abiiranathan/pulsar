@@ -25,7 +25,7 @@
 
 // Background threads to handle SSE or slow requests via pulsar handoff mechanism.
 #ifndef ENABLE_SLOW_WORKERS
-#define ENABLE_SLOW_WORKERS 0
+#define ENABLE_SLOW_WORKERS 1
 #endif
 
 // Number of slow workers processing SSE or websocket requests.
@@ -40,7 +40,7 @@
 
 // Maximum events for epoll->ready queue
 #ifndef MAX_EVENTS
-#define MAX_EVENTS 4096
+#define MAX_EVENTS 8192
 #endif
 
 // Buffer size for incoming request excluding body.

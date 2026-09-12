@@ -8,21 +8,16 @@
 #include "../include/pulsar_syscall.h"
 #include "../include/workerpool.h"
 
-#if defined(__x86_64__) || defined(__SSE2__) || defined(__AVX2__)
-#include <immintrin.h>
-#endif
-
 #define SERVER_NAME "PULSAR/1.0 (Unix)"
 
 #define ensure_headers_capacity(res, required) \
     ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
-#define ALIGNED ALIGN(64)
 
 ALIGN(64) volatile sig_atomic_t server_running = 1;
 static int worker_listen_fds[NUM_WORKERS];
 static HttpHandler global_middleware[MAX_GLOBAL_MIDDLEWARE] = {0};
 static size_t global_mw_count = 0;
-static void* GLOBAL_HANDLER_USERDATA = NULL;
+static void* g_handler_userdata = NULL;
 
 ALIGN(64) uint64_t g_tsc_mult = 0;
 ALIGN(64) uint64_t g_tsc_base_cycles = 0;
@@ -33,6 +28,8 @@ ALIGN(64) uint64_t g_wall_base_ns = 0;
 INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
 INLINE void free_response_body(response_t* resp);
 INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
+
+// Not inline as is required by keepalive.h
 void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
                       int worker_id);
 
@@ -1391,8 +1388,8 @@ void use_route_middleware(route_t* route, HttpHandler* mw, size_t count) {
     }
 }
 
-void pulsar_set_handler_userdata(void* userdata) { GLOBAL_HANDLER_USERDATA = userdata; }
-void* pulsar_get_handler_userdata(void) { return GLOBAL_HANDLER_USERDATA; }
+void pulsar_set_handler_userdata(void* userdata) { g_handler_userdata = userdata; }
+void* pulsar_get_handler_userdata(void) { return g_handler_userdata; }
 
 Request conn_get_request_metadata(PulsarConn* conn) {
     return (Request){
@@ -1606,7 +1603,7 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     res->status_code = StatusOK;
     res->headers_len = prefix_len;
 
-    PulsarCtx ctx = {.conn = conn, .userdata = GLOBAL_HANDLER_USERDATA};
+    PulsarCtx ctx = {.conn = conn, .userdata = g_handler_userdata};
     execute_all_middleware(&ctx, route);
     if (!conn->abort) route->handler(&ctx);
 
@@ -1832,10 +1829,7 @@ INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
                                              state, queue, batch_date_gen);
         if (unlikely(status != StatusOK)) {
             /* Error responses must not keep a potentially desynchronized
-             * stream alive: send the error, then close. Combined with
-             * process_request always advancing *consumed past the offending
-             * headers, this guarantees the same bytes are never re-parsed
-             * in a loop (the previous 6.3% write_error burn). */
+             * stream alive: send the error, then close */
             conn->keep_alive = false;
             write_error(conn, status);
         }
@@ -2120,13 +2114,9 @@ void* worker_thread(void* arg) {
     int worker_id = worker->id;
     int listen_fd = worker->listen_fd;
     KeepAliveState* ka_state = worker->keep_alive_state;
+    ALIGN(64) char read_buf[READ_BUFFER_SIZE] = {0};
 
     worker_pool_init(worker_id);
-
-    /* Stack-resident read buffer: plain RSP-relative addressing, no %fs
-     * segment loads on the hot path. 64-byte aligned to keep the
-     * request-line loads off cacheline splits. */
-    ALIGN(64) char read_buf[READ_BUFFER_SIZE];
 
     if (event_add_server(queue, listen_fd) < 0) {
         perror("event_add_server");
