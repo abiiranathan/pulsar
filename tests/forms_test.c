@@ -1,35 +1,8 @@
 #include "../include/forms.h"
+#include <solidc/file.h>
 #include <solidc/macros.h>
 #include <stdio.h>
 #include <sys/stat.h>
-
-// Helper function to read a file into memory
-char* read_file(const char* filename, size_t* size) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        fprintf(stderr, "Failed to open file: %s\n", filename);
-        return NULL;
-    }
-
-    fseek(file, 0, SEEK_END);
-    *size = (size_t)ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    char* buffer = (char*)malloc(*size);
-    if (!buffer) {
-        fclose(file);
-        return NULL;
-    }
-
-    if (fread(buffer, 1, *size, file) != *size) {
-        free(buffer);
-        fclose(file);
-        return NULL;
-    }
-
-    fclose(file);
-    return buffer;
-}
 
 // Helper function to create a test directory
 void create_test_dir() {
@@ -64,7 +37,7 @@ int main() {
 
         // Verify fields
         const char* username = multipart_field_value(&form, "username");
-        const char* email    = multipart_field_value(&form, "email");
+        const char* email = multipart_field_value(&form, "email");
 
         printf("Username: %s\n", username);
         printf("Email: %s\n", email);
@@ -125,8 +98,13 @@ int main() {
         printf("File saved successfully to build/saved_test.txt\n");
 
         // Verify file content
-        size_t file_size   = 0;
-        char* file_content = read_file("build/saved_test.txt", &file_size);
+        file_t f;
+        file_result_t result;
+        result = file_open(&f, "build/saved_test.txt", "r");
+        ASSERT(result == FILE_SUCCESS);
+
+        size_t file_size = 0;
+        char* file_content = (char*)file_readall(&f, &file_size);
         ASSERT(file_content != NULL && "Failed to read saved file");
         printf("File content:\n%.*s\n", (int)file_size, file_content);
         free(file_content);
