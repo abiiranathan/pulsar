@@ -1,29 +1,9 @@
-/**
- * @file headers.h
- * @brief Ultra-fast HTTP header storage with O(1) static header lookups
- *
- * This implementation uses a bitmask for O(1) presence checking of common headers,
- * combined with hash-based identification for fast operations. Custom headers fall
- * back to hash table semantics with linear probing.
- *
- * Features:
- * - O(1) presence check for standard headers via bitmask
- * - Pre-computed hash table for header name resolution
- * - Arena-based memory management for zero-fragmentation
- * - Support for multi-value headers (Set-Cookie)
- * - Case-insensitive header name matching
- *
- * @copyright Copyright (c) 2024
- */
-
 #ifndef SOLIDC_HEADERS_H
 #define SOLIDC_HEADERS_H
 
 #include <solidc/arena.h>
 #include <solidc/str_slice.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <strings.h>
+
 #include "macros.h"
 
 #ifdef __cplusplus
@@ -32,7 +12,7 @@ extern "C" {
 
 /* Configuration */
 #ifndef HEADERS_CAPACITY
-#define HEADERS_CAPACITY 64
+#define HEADERS_CAPACITY 48
 #endif
 
 /**
