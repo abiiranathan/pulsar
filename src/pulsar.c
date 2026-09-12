@@ -6,7 +6,7 @@
 #include "../include/pulsar_syscall.h"
 #include "../include/pulsar_time.h"
 
-#if defined(__AVX2__)
+#if defined(__x86_64__) || defined(__SSE2__) || defined(__AVX2__)
 #include <immintrin.h>
 #endif
 
@@ -335,6 +335,7 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     conn->in_keep_alive = false;
     conn->abort = false;
     conn->arena = arena;
+    conn->arena_dirty = false; /* pool_release / arena_create leave it clean */
     conn->last_activity = pulsar_mono_sec();
     conn->pending_len = 0;
     conn->next = NULL;
@@ -382,7 +383,18 @@ static bool reset_connection(PulsarConn* conn) {
     conn->request.hdr_len_raw = 0;
     conn->request.headers_parsed = true;
 
-    arena_reset(conn->arena);
+    /* Only reset when the request actually allocated from the arena. The
+     * flag is set by every arena_alloc site (parse_request_body, route
+     * matching for param routes, and the arena-backed API accessors).
+     * Skipping a reset when nothing was allocated is safe: all
+     * request-scoped pointers live in request/response fields that are
+     * cleared below, so nothing can ever reference stale arena data. A
+     * missed allocation site would only delay reclamation until the next
+     * dirty request, never dangle. */
+    if (unlikely(conn->arena_dirty)) {
+        arena_reset(conn->arena);
+        conn->arena_dirty = false;
+    }
     headers_init(&conn->request.headers);
     headers_init(&conn->request.query_params);
 
@@ -436,19 +448,42 @@ INLINE void write_error(PulsarConn* conn, http_status status) {
 /*
  * Finds the FIRST occurrence of "\r\n\r\n" (0x0a0d0a0d in LE).
  * Returns pointer to the start of "\r\n\r\n", or NULL if not found.
- * Do not INLINE to avoid SIMD register spills in the caller.
+ * Uses inlined vector operations (SSE2) to eliminate libc memchr call
+ * overhead and PLT dispatch on small HTTP header blocks.
  */
 INLINE const char* find_headers_end(const char* buf, size_t len) {
     if (unlikely(len < 4)) return NULL;
     const char* const end = buf + len - 3;
+    const char* p = buf;
 
-    for (const char* p = buf; p < end; p++) {
-        p = (const char*)memchr(p, '\r', (size_t)(end - p));
-        if (!p) return NULL;
+#if defined(__SSE2__) || defined(__x86_64__)
+    const __m128i cr = _mm_set1_epi8('\r');
+    while (p + 16 <= buf + len) {
+        __m128i chunk = _mm_loadu_si128((const __m128i*)p);
+        __m128i cmp = _mm_cmpeq_epi8(chunk, cr);
+        unsigned int mask = (unsigned int)_mm_movemask_epi8(cmp);
 
-        uint32_t v;
-        memcpy(&v, p, 4);
-        if (v == UINT32_C(0x0a0d0a0d)) return p;
+        while (mask) {
+            int idx = __builtin_ctz(mask);
+            const char* cand = p + idx;
+            if (cand < end) {
+                uint32_t v;
+                memcpy(&v, cand, 4);
+                if (v == UINT32_C(0x0a0d0a0d)) return cand;
+            }
+            mask &= mask - 1;
+        }
+        p += 16;
+    }
+#endif
+
+    while (p < end) {
+        if (*p == '\r') {
+            uint32_t v;
+            memcpy(&v, p, 4);
+            if (v == UINT32_C(0x0a0d0a0d)) return p;
+        }
+        p++;
     }
 
     return NULL;
@@ -800,6 +835,7 @@ static http_status parse_request_body(PulsarConn* conn, const char* buf, size_t 
         perror("arena_alloc failed to allocate body");
         return StatusInternalServerError;
     }
+    conn->arena_dirty = true;
 
     memcpy(req->body, buf + headers_len, body_available);
     req->body[body_available] = '\0';
@@ -844,6 +880,7 @@ const char* req_path(PulsarConn* conn) { return conn->request.path; }
 const char* query_get(PulsarConn* conn, const char* name) {
     StrSlice h = headers_get(&conn->request.query_params, name);
     const char* dup = arena_strdupn(conn->arena, h.data, h.len);
+    conn->arena_dirty = true; /* dup may be NULL, but the arena may still advance */
     return dup;
 }
 
@@ -857,6 +894,7 @@ const char* req_header_get(PulsarConn* conn, const char* name) {
     ensure_headers_parsed(conn);
     StrSlice h = headers_get(&conn->request.headers, name);
     const char* dup = arena_strdupn(conn->arena, h.data, h.len);
+    conn->arena_dirty = true;
     return dup;
 }
 
@@ -1918,6 +1956,7 @@ Arena* pulsar_get_arena(PulsarConn* conn) { return conn->arena; }
 
 void* pulsar_alloc(PulsarConn* conn, size_t sz) {
     void* p = arena_alloc(conn->arena, sz);
+    conn->arena_dirty = true;
     return p;
 }
 
@@ -2121,7 +2160,10 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
         route = g_cached_root_get;
         if (unlikely(!route)) {
             route = route_match(req->path, path_len, req->method_type, conn->arena);
-            if (likely(route)) g_cached_root_get = route;
+            if (likely(route)) {
+                g_cached_root_get = route;
+                /* Root is exact/static; match_method_tree never allocated. */
+            }
         }
     } else {
         path_len = decode_path_fast(url_ptr, url_len, req->path, sizeof(req->path));
@@ -2132,6 +2174,13 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
             return qs;
         }
         route = route_match(req->path, path_len, req->method_type, conn->arena);
+        /* match_method_tree allocates a request-local route_t + param
+         * copies ONLY for param routes (exact/static return the template).
+         * A mid-match allocation failure returns NULL and leaves
+         * unreferenced garbage, which is safe to skip resetting. */
+        if (likely(route != NULL) && route->route_type == ROUTE_TYPE_PARAM) {
+            conn->arena_dirty = true;
+        }
     }
 
     /* Route is resolved before headers: matching needs only path + method.
@@ -2155,6 +2204,7 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     req->headers_parsed = false;
     /* content_length/range_hdr already cleared by reset_connection. */
 
+    bool safe_fast_path = false;
     if (likely(SAFE_METHOD(req->method_type) && route->route_type != ROUTE_TYPE_STATIC)) {
         http_status ks = scan_keepalive_only(conn, req->hdr_data, req->hdr_len_raw);
         if (unlikely(ks != StatusOK)) {
@@ -2162,6 +2212,7 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
             return ks;
         }
         *consumed = headers_len; /* no body on safe methods */
+        safe_fast_path = true;
     } else {
         http_status hs =
             parse_request_headers(conn, req->hdr_data, req->method_type, req->hdr_len_raw);
@@ -2173,8 +2224,15 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
         *consumed = headers_len + req->content_length;
     }
 
-    http_status status = parse_request_body(conn, buf, headers_len, read_bytes);
-    if (status != StatusOK) return status;
+    /* On the safe fast path content_length is definitionally 0 (cleared by
+     * reset_connection, never set by scan_keepalive_only), so the body
+     * parse below is a no-op — and its very first check would cost a
+     * cold-cache load of req->content_length (perf: it showed ~6% self
+     * on keep-alive microbenchmarks). Skip the call entirely. */
+    if (!safe_fast_path) {
+        http_status status = parse_request_body(conn, buf, headers_len, read_bytes);
+        if (status != StatusOK) return status;
+    }
 
     uint16_t prefix_len = snapshot_date_header(res->buf, &res->date_gen, batch_date_gen);
     res->status_len = 17;
@@ -2749,7 +2807,8 @@ void* worker_thread(void* arg) {
 
         for (int i = 0; i < n; i++) {
             if (i + 1 < n && events[i + 1].data) {
-                __builtin_prefetch(events[i + 1].data, 0, 3);
+                __builtin_prefetch((const char*)events[i + 1].data, 0, 3);
+                __builtin_prefetch((const char*)events[i + 1].data + 64, 0, 3);
             }
 
             event_t* ev = &events[i];

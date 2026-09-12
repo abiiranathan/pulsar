@@ -47,8 +47,8 @@ typedef struct {
  * @brief HTTP headers collection with fast static header lookups
  */
 typedef struct {
-    header_entry entries[HEADERS_CAPACITY];
     size_t count;
+    header_entry entries[HEADERS_CAPACITY];
 } headers_t;
 
 /**

@@ -54,10 +54,7 @@ typedef enum {
 
 /* Unified HTTP Response Structure */
 struct response_t {
-    /* Single buffer: status, headers and inline small body */
-    char buf[RESP_BUFFER_SIZE];
-
-    /* Offsets & lengths */
+    /* Offsets & lengths (hot) */
     uint32_t out_len;     /* Total bytes to send */
     uint32_t out_sent;    /* Bytes sent so far */
     uint32_t headers_len; /* Current end of headers in buf */
@@ -73,6 +70,12 @@ struct response_t {
      * memcpy entirely when the Date second hasn't rolled over. */
     uint32_t date_gen;
 
+    /* File sending support */
+    int file_fd;
+    uint32_t file_size;
+    int64_t file_offset;
+    uint32_t range_end;
+
     /* Heap fallback for large bodies (> RESP_BODY_CAPACITY) */
     uint32_t body_capacity;
     uint32_t body_sent;
@@ -80,24 +83,16 @@ struct response_t {
         uint8_t* heap;
     } body;
 
-    /* File sending support */
-    int file_fd;
-    uint32_t file_size;
-    int64_t file_offset;
-    uint32_t range_end;
+    /* Single buffer: status, headers and inline small body (4KB cold tail) */
+    char buf[RESP_BUFFER_SIZE];
 };
 
 /* HTTP Request Structure */
 struct request_t {
-    char path[MAX_PATH_LEN];
-    char method[8];
+    /* Hot scalar metadata placed first */
     HttpMethod method_type;
-    char* body;
     size_t content_length;
-    headers_t headers;
-    headers_t query_params;
     struct route_t* route;
-    StrSlice range_hdr;
     /* Raw header block for lazy parsing. The hot path (safe method,
      * non-static route) skips table fill + Content-Length/Range scans and
      * only extracts keep-alive; the full parse is materialized on first
@@ -106,6 +101,13 @@ struct request_t {
     const char* hdr_data;
     size_t hdr_len_raw;
     bool headers_parsed;
+    char method[8];
+    char* body;
+    StrSlice range_hdr;
+
+    headers_t headers;
+    headers_t query_params;
+    char path[MAX_PATH_LEN];
 };
 
 struct pulsar_conn;
@@ -118,23 +120,37 @@ typedef struct PulsarOffloadHandler {
 
 /* Connection State Structure */
 struct pulsar_conn {
-    char* read_buf;                     /* Points to static_read_buf during processing */
-    char pending_buf[READ_BUFFER_SIZE]; /* Dedicated partial read buffer */
-    Arena* arena;
-    size_t pending_len;
+    /* ---- CACHE LINE 0 (0..63): Extremely hot per-event / per-request state ---- */
     int client_fd;
     int worker_id;
-    bool closing, keep_alive, abort, in_keep_alive;
+    uint32_t pending_len;
+    bool closing;
+    bool keep_alive;
+    bool abort;
+    bool in_keep_alive;
+    /* Set by every request-scoped arena allocation site; reset_connection
+     * only pays arena_reset's two dependent header loads when the request
+     * actually allocated (perf: the dirty-check itself was the #1 hot spot
+     * on keep-alive microbenchmarks where most requests never allocate). */
+    bool arena_dirty;
+    uint8_t _pad[3];
     time_t last_activity;
-    Locals locals;
-    struct request_t request;
-    struct response_t response;
+    struct pulsar_conn *next, *prev; /* Keep-alive list head / tail links */
+    Arena* arena;
+    char* read_buf;                     /* Points to static_read_buf during processing */
+    struct event_queue* owner_queue;
+    void* owner_ka_state;
 #if ENABLE_LOGGING
     uint64_t start;
 #endif
-    struct pulsar_conn *next, *prev;
-    struct event_queue* owner_queue;
-    void* owner_ka_state;
+
+    /* ---- Hot Request and Response structures ---- */
+    struct request_t request;
+    struct response_t response;
+
+    /* ---- Cold state at the end ---- */
+    Locals locals;
+    char pending_buf[READ_BUFFER_SIZE]; /* Dedicated partial read buffer (cold) */
 #if ENABLE_SLOW_WORKERS
     struct PulsarOffloadHandler offload_hooks;
     bool offloaded;
