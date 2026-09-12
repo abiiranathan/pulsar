@@ -1,19 +1,11 @@
-#include <errno.h>
-#include <pthread.h>
-#include <signal.h>
-#include <solidc/file.h>
-#include <stdarg.h>
-#include <stdatomic.h>
-#include <sys/uio.h>
-#include <unistd.h>
-
+#include "../include/pulsar.h"
 #include "../include/events.h"
 #include "../include/mimetypes.h"
 #include "../include/plog.h"
-#include "../include/pulsar.h"
 #include "../include/pulsar_itoa.h"
 #include "../include/pulsar_syscall.h"
 #include "../include/pulsar_time.h"
+
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -112,6 +104,7 @@ INLINE void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state)
 INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
 INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
                              int worker_id);
+INLINE void ensure_headers_parsed(PulsarConn* conn);
 
 #if ENABLE_SLOW_WORKERS
 #define SLOW_KEEPALIVE_CHECK_S 5
@@ -120,7 +113,7 @@ INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveSt
  * ================================================================ */
 typedef struct SlowWorker {
     pthread_t thread;
-    event_queue_t* queue;
+    event_queue_t queue;
     int id;
     KeepAliveState ka_state;
 } SlowWorker;
@@ -144,13 +137,14 @@ static void slow_close_offloaded(event_queue_t* queue, PulsarConn* conn) {
 
 static void* slow_worker_thread(void* arg) {
     SlowWorker* worker = (SlowWorker*)arg;
-    event_queue_t* queue = worker->queue;
+    event_queue_t* queue = &worker->queue;
     KeepAliveState* ka = &worker->ka_state;
     event_t events[MAX_EVENTS] = {0};
+    struct epoll_event raw_events[MAX_EVENTS] = {0};
     time_t last_timeout_check = 0;
 
     while (server_running) {
-        int n = event_wait(queue, events, MAX_EVENTS, 2000);
+        int n = event_wait(queue, raw_events, events, MAX_EVENTS, 500);
         if (n < 0) {
             if (errno == EINTR) continue;
             perror("slow_worker event_wait");
@@ -212,11 +206,17 @@ static void* slow_worker_thread(void* arg) {
         }
     }
 
-    event_queue_free(queue);
+    event_queue_close(queue);
     return NULL;
 }
 
 bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
+    /* Offloaded handlers may run long after the worker read buffer is
+     * reused: materialize the header table now, while the raw span is
+     * guaranteed valid (handoff is always called synchronously from a
+     * route handler). Cold path, correctness only. */
+    ensure_headers_parsed(conn);
+
     if (event_delete(conn->owner_queue, conn->client_fd) < 0) return false;
 
     if (conn->in_keep_alive && conn->owner_ka_state) {
@@ -230,12 +230,12 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
         atomic_fetch_add_explicit(&next_slow_worker, 1, memory_order_relaxed) % NUM_SLOW_WORKERS;
     SlowWorker* target = &slow_workers[idx];
 
-    conn->owner_queue = target->queue;
+    conn->owner_queue = &target->queue;
     conn->owner_ka_state = &target->ka_state;
 
-    int ret = event_add_read(target->queue, conn->client_fd, conn);
+    int ret = event_add_read(&target->queue, conn->client_fd, conn);
     if (ret >= 0 && handlers.on_write) {
-        ret = event_mod_write(target->queue, conn->client_fd, conn);
+        ret = event_mod_write(&target->queue, conn->client_fd, conn);
     }
 
     if (ret < 0) {
@@ -343,6 +343,9 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     locals_init(&conn->locals, 64);
     headers_init(&req->headers);
     headers_init(&req->query_params);
+    req->hdr_data = NULL;
+    req->hdr_len_raw = 0;
+    req->headers_parsed = true; /* nothing pending; process_request sets it per request */
 
     res->file_fd = -1;
     res->status_code = StatusOK;
@@ -355,6 +358,9 @@ static bool init_connection(PulsarConn* conn, Arena* arena, int client_fd, int w
     res->body_capacity = 0;
     res->body_sent = 0;
     res->body.heap = NULL;
+    /* Force the first request on a (new or pooled) connection to stage the
+     * Date prefix: buf contents are garbage or belong to an older Date. */
+    res->date_gen = 0;
 
     return true;
 }
@@ -372,6 +378,9 @@ static bool reset_connection(PulsarConn* conn) {
     conn->request.content_length = 0;
     conn->request.body = NULL;
     conn->request.range_hdr = (StrSlice){.data = NULL, .len = 0};
+    conn->request.hdr_data = NULL;
+    conn->request.hdr_len_raw = 0;
+    conn->request.headers_parsed = true;
 
     arena_reset(conn->arena);
     headers_init(&conn->request.headers);
@@ -389,6 +398,10 @@ static bool reset_connection(PulsarConn* conn) {
     res->file_size = 0;
     res->file_offset = 0;
     res->range_end = 0;
+    /* Deliberately preserve res->date_gen + buf[0..prefix): when the Date
+     * second hasn't rolled over the next request reuses the staged prefix
+     * with zero copies. finalize_response() already invalidated it (0) if
+     * the previous response overwrote the 200 OK prefix. */
 
     if (!conn->in_keep_alive) {
         conn->next = NULL;
@@ -441,8 +454,9 @@ INLINE const char* find_headers_end(const char* buf, size_t len) {
     return NULL;
 }
 
-static const uint64_t POW10[9] = {1ULL,      10ULL,      100ULL,      1000ULL,     10000ULL,
-                                  100000ULL, 1000000ULL, 10000000ULL, 100000000ULL};
+static const uint64_t POW10[9] = {
+    1ULL, 10ULL, 100ULL, 1000ULL, 10000ULL, 100000ULL, 1000000ULL, 10000000ULL, 100000000ULL,
+};
 
 /*
  * Parses between 1 and 8 ASCII digits simultaneously in GPR registers.
@@ -513,7 +527,7 @@ INLINE bool match_connection(const char* s) {
 }
 
 INLINE bool match_content_length(const char* s) {
-    uint64_t a, b;
+    uint64_t a, b = 0;
     memcpy(&a, s, 8);
     memcpy(&b, s + 8, 6);
     return ((a | UINT64_C(0x2020202020202020)) == UINT64_C(0x2d746e65746e6f63)) &&
@@ -521,30 +535,46 @@ INLINE bool match_content_length(const char* s) {
             UINT64_C(0x00006874676e656c));
 }
 
-INLINE bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod method,
-                                  size_t headers_len) {
+INLINE http_status parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod method,
+                                         size_t headers_len) {
     const char* ptr = hdrs;
-    const char* end = ptr + headers_len;
+    const char* const end = ptr + headers_len;
     const bool is_safe = SAFE_METHOD(method);
     request_t* req = &conn->request;
     conn->keep_alive = true;
     uint8_t flags = 0;
 
-    headers_init(&req->headers);
-
     while (ptr < end) {
-        const char* const eol = memchr(ptr, '\r', (size_t)(end - ptr));
-        if (!eol || eol + 1 >= end || eol[1] != '\n') break;
+        /* Instant check for final empty line (\r\n) */
+        if (unlikely(ptr[0] == '\r')) {
+            if (likely(ptr + 1 < end && ptr[1] == '\n')) ptr += 2;
+            break;
+        }
 
-        const char* const colon = memchr(ptr, ':', (size_t)(eol - ptr));
-        if (unlikely(!colon)) {
+        /* Fast inline scan for ':'
+         * HTTP header names cannot contain whitespace or control chars.
+         * Almost all header names finish in under 16 bytes. */
+        const char* colon = ptr;
+        while (colon < end && (unsigned char)*colon > ' ' && *colon != ':') {
+            colon++;
+        }
+
+        if (unlikely(colon >= end || *colon != ':')) {
+            /* Malformed header line: skip using memchr */
+            const char* eol = (const char*)memchr(ptr, '\r', (size_t)(end - ptr));
+            if (!eol || eol + 1 >= end || eol[1] != '\n') break;
             ptr = eol + 2;
             continue;
         }
 
         const size_t name_len = (size_t)(colon - ptr);
-        if (unlikely(name_len == 0)) return false;
+        if (unlikely(name_len == 0)) return StatusBadRequest;
 
+        /* ONLY ONE memchr per line: scan for \r in the value */
+        const char* const eol = (const char*)memchr(colon + 1, '\r', (size_t)(end - (colon + 1)));
+        if (unlikely(!eol || eol + 1 >= end || eol[1] != '\n')) break;
+
+        /* Value extraction & trimming */
         const char* value_start = colon + 1;
         while (value_start < eol && (*value_start == ' ' || *value_start == '\t')) value_start++;
 
@@ -553,12 +583,14 @@ INLINE bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
             value_end--;
         const size_t value_len = (size_t)(value_end - value_start);
 
-        const char fc = (char)(ptr[0] | 0x20);
-
+        /* Push header */
         if (!headers_push(&req->headers, (StrSlice){.data = ptr, .len = name_len},
                           (StrSlice){.data = value_start, .len = value_len})) {
-            return false;
+            return StatusRequestHeaderFieldsTooLarge;
         }
+
+        /* Header matching (unchanged) */
+        const char fc = (char)(ptr[0] | 0x20);
 
         if (fc == 'r' && name_len == 5 && req->range_hdr.data == NULL) {
             uint64_t w = 0;
@@ -590,13 +622,14 @@ INLINE bool parse_request_headers(PulsarConn* conn, const char* hdrs, HttpMethod
 
         ptr = eol + 2;
     }
-    return true;
+
+    return StatusOK;
 }
 
-INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
+INLINE http_status parse_query_params(PulsarConn* conn, size_t* path_len) {
     char* const path = conn->request.path;
     const char* query = memchr(path, '?', *path_len);
-    if (!query) return true;  // No Query Params (not an error)
+    if (!query) return StatusOK;  // No Query Params (not an error)
 
     path[query - path] = '\0';
     *path_len = (size_t)(query - path);
@@ -627,10 +660,85 @@ INLINE bool parse_query_params(PulsarConn* conn, size_t* path_len) {
         if (key.len == 0) continue;
 
         if (!headers_push(&conn->request.query_params, key, value)) {
-            return false;
+            return StatusRequestHeaderFieldsTooLarge;
         }
     }
-    return true;
+    return StatusOK;
+}
+
+/* Minimal header scan for the hot path (safe method, non-static route).
+ * Extracts ONLY keep-alive — the single header field the hot path needs —
+ * skipping table fill, value trimming (except on a Connection line),
+ * Content-Length and Range scans. Semantics mirror parse_request_headers
+ * exactly: default keep-alive, first Connection header wins, only a
+ * 5-byte "close" value (case-insensitive, OWS-trimmed) disables it.
+ * Header COUNT is enforced (>HEADERS_CAPACITY → 431) and empty names
+ * rejected (400) so over-limit/malformed requests behave identically to
+ * the full parse; the table itself is just filled lazily on first access.
+ * Benchmark traffic (few headers, no Connection: close) costs ~2 memchrs
+ * per line and zero stores. */
+INLINE http_status scan_keepalive_only(PulsarConn* conn, const char* hdrs, size_t headers_len) {
+    conn->keep_alive = true;
+    const char* ptr = hdrs;
+    const char* end = ptr + headers_len;
+    size_t count = 0;
+    bool saw_connection = false;
+
+    while (ptr < end) {
+        const char* const eol = memchr(ptr, '\r', (size_t)(end - ptr));
+        if (!eol || eol + 1 >= end || eol[1] != '\n') break;
+
+        const char* const colon = memchr(ptr, ':', (size_t)(eol - ptr));
+        if (unlikely(!colon)) {
+            ptr = eol + 2;
+            continue;
+        }
+
+        size_t name_len = (size_t)(colon - ptr);
+        if (unlikely(name_len == 0)) return StatusBadRequest;
+        if (unlikely(++count > HEADERS_CAPACITY)) return StatusRequestHeaderFieldsTooLarge;
+
+        if (!saw_connection && name_len == 10 && ((ptr[0] | 0x20) == 'c')) {
+            uint64_t a;
+            uint16_t b;
+            memcpy(&a, ptr, 8);
+            memcpy(&b, ptr + 8, 2);
+            if (((a | UINT64_C(0x2020202020202020)) == UINT64_C(0x697463656e6e6f63)) &&
+                ((uint16_t)(b | UINT16_C(0x2020)) == UINT16_C(0x6e6f))) {
+                const char* vs = colon + 1;
+                while (vs < eol && (*vs == ' ' || *vs == '\t')) vs++;
+                const char* ve = eol;
+                while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+                uint64_t w = 0;
+                size_t vlen = (size_t)(ve - vs);
+                if (vlen == 5) memcpy(&w, vs, 5);
+                conn->keep_alive =
+                    !((vlen == 5) &&
+                      (((w | UINT64_C(0x2020202020202020)) & UINT64_C(0x000000ffffffffff)) ==
+                       UINT64_C(0x00000065736f6c63)));
+                saw_connection = true; /* first Connection header wins, as in the full parse */
+            }
+        }
+
+        ptr = eol + 2;
+    }
+    return StatusOK;
+}
+
+/* Materialize the full header table + Content-Length + Range on first header
+ * access for requests that took the minimal scan. Runs at most once per
+ * request (headers_parsed flag); cold path — handler is already running, so
+ * best-effort: a capacity overflow here only truncates the table, it cannot
+ * fail the in-flight request. */
+INLINE void ensure_headers_parsed(PulsarConn* conn) {
+    request_t* req = &conn->request;
+    if (likely(req->headers_parsed)) return;
+    req->headers_parsed = true;
+    if (req->hdr_len_raw == 0 || !req->hdr_data) return;
+    headers_init(&req->headers);
+    /* Recomputes keep_alive/Content-Length/Range identically to the eager
+     * path; return status is best-effort (see above). */
+    (void)parse_request_headers(conn, req->hdr_data, req->method_type, req->hdr_len_raw);
 }
 
 static http_status parse_request_body(PulsarConn* conn, const char* buf, size_t headers_len,
@@ -700,10 +808,12 @@ const char* query_get(PulsarConn* conn, const char* name) {
 
 headers_t* query_params(PulsarConn* conn) { return &conn->request.query_params; }
 const headers_t* req_headers(PulsarConn* conn) {
+    ensure_headers_parsed(conn);
     return (const headers_t*)(&conn->request.headers);
 }
 
 const char* req_header_get(PulsarConn* conn, const char* name) {
+    ensure_headers_parsed(conn);
     StrSlice h = headers_get(&conn->request.headers, name);
     const char* dup = arena_strdupn(conn->arena, h.data, h.len);
     return dup;
@@ -1010,6 +1120,7 @@ typedef struct __attribute__((aligned(64))) {
 
 alignas(64) static DateSlot g_date_slots[2];
 alignas(64) static _Atomic int g_date_cur = 0;
+alignas(64) static _Atomic uint32_t g_date_gen = 0;
 alignas(64) static _Atomic unsigned g_date_refresh_sec = PULSAR_DATE_REFRESH_SEC;
 
 /* Cached exact "/" GET route. Populated on first hot-path hit; routes are
@@ -1049,7 +1160,9 @@ static int format_date_header(time_t t, char* buf, size_t cap) {
 
 /* Single-writer publish: format into the inactive slot, then flip the
  * active index with a release store. Called only by the date thread
- * (and once synchronously at startup). */
+ * (and once synchronously at startup). Bumps g_date_gen last so readers
+ * that observe the new generation are guaranteed to observe the new
+ * index + slot contents. */
 static void publish_date_header(time_t t) {
     int cur = atomic_load_explicit(&g_date_cur, memory_order_relaxed);
     if ((unsigned)cur > 1u) cur = 0;
@@ -1062,6 +1175,7 @@ static void publish_date_header(time_t t) {
     memcpy(g_date_slots[inactive].data, buf, (size_t)n);
     g_date_slots[inactive].len = (uint16_t)n;
     atomic_store_explicit(&g_date_cur, inactive, memory_order_release);
+    atomic_fetch_add_explicit(&g_date_gen, 1u, memory_order_release);
 }
 
 static void refresh_date_header_now(void) {
@@ -1075,6 +1189,8 @@ static void refresh_date_header_now(void) {
     memcpy(g_date_slots[1].data, buf, (size_t)n);
     g_date_slots[1].len = (uint16_t)n;
     atomic_store_explicit(&g_date_cur, 0, memory_order_release);
+    /* Start at 1; per-connection date_gen == 0 means "nothing staged". */
+    atomic_store_explicit(&g_date_gen, 1u, memory_order_release);
 }
 
 /* Background thread: refresh the cached header every N seconds.
@@ -1103,15 +1219,36 @@ static void* date_updater_thread(void* arg) {
     return NULL;
 }
 
-/* Request hot path: PURE COPY, never formats. All gmtime_r/snprintf
- * work happens in date_updater_thread() (and refresh_date_header_now()
- * at startup).*/
-INLINE uint16_t snapshot_date_header(char* dst) {
-    int idx = atomic_load_explicit(&g_date_cur, memory_order_acquire);
+/* Request hot path: COPY ONCE PER DATE-SECOND PER CONNECTION, never
+ * formats. All gmtime_r/snprintf work happens in date_updater_thread()
+ * (and refresh_date_header_now() at startup).
+ *
+ * Keep-alive reuse: res->buf already starts with the prefix staged by the
+ * previous request on this connection. The caller passes the Date
+ * generation sampled once per epoll batch, so the common case is two
+ * register compares and a return: zero atomic loads, zero stores, zero
+ * touches of the shared date slots on the request path. Only the first
+ * request per connection and the first request after each Date rollover
+ * pay the ~81 B copy (of exactly len bytes, not DATE_HDR_MAX).
+ *
+ * Staleness is bounded by the epoll-batch delay plus the 1 s refresh
+ * interval — immaterial for a 1-second-granularity header — and the copy
+ * itself is never torn (single-writer index, atomic slot switch). */
+INLINE uint16_t snapshot_date_header(char* dst, uint32_t* cached_gen, uint32_t batch_gen) {
+    uint16_t len = g_date_hdr_len; /* read-only after startup, stays in L1 */
+    if (likely(batch_gen != 0 && batch_gen == *cached_gen)) {
+        return len;
+    }
+    if (unlikely(len == 0 || batch_gen == 0)) {
+        if (unlikely(len == 0)) return 0;
+        /* Pre-init batch: copy from slot 0 without advancing the cache. */
+        memcpy(dst, g_date_slots[0].data, len);
+        return len;
+    }
+    int idx = atomic_load_explicit(&g_date_cur, memory_order_relaxed);
     if (unlikely((unsigned)idx > 1u)) idx = 0;
-    uint16_t len = g_date_hdr_len; /* compile-time-invariant after startup */
-    if (unlikely(len == 0)) return 0;
-    memcpy(dst, g_date_slots[idx].data, DATE_HDR_MAX); /* fixed-size, always inlines */
+    memcpy(dst, g_date_slots[idx].data, len);
+    *cached_gen = batch_gen;
     return len;
 }
 
@@ -1355,6 +1492,9 @@ INLINE void send_range_headers(PulsarConn* conn, ssize_t start, ssize_t end, off
 
 bool conn_servefile(PulsarConn* conn, const char* filename) {
     if (!filename) return false;
+    /* Exact-route handlers may call this after the minimal header scan:
+     * materialize Range (and the table) before reading range_hdr. */
+    ensure_headers_parsed(conn);
     int fd = open(filename, O_RDONLY);
     if (fd == -1) {
         perror("open");
@@ -1425,16 +1565,19 @@ INLINE size_t fmt_cl_small(char* dst, size_t cl) {
         return 1;
     }
     if (cl < 100) {
-        dst[0] = (char)('0' + cl / 10);
-        dst[1] = (char)('0' + cl % 10);
+        /* Two-digit table lookup: no division (even constant-folded) at all. */
+        dst[0] = DIGIT_PAIRS[cl * 2];
+        dst[1] = DIGIT_PAIRS[cl * 2 + 1];
         return 2;
     }
     if (cl < 1000) {
-        size_t h = cl / 100;
-        size_t r = cl - h * 100;
-        dst[0] = (char)('0' + h);
-        dst[1] = (char)('0' + r / 10);
-        dst[2] = (char)('0' + r % 10);
+        /* Reciprocal multiply for /100 (same magic as put4), remainder from
+         * the table. Covers the entire inline-body Content-Length range. */
+        uint32_t q = (uint32_t)(((uint64_t)(uint32_t)cl * 1374389535ULL) >> 37);
+        uint32_t r = (uint32_t)cl - q * 100u;
+        dst[0] = (char)('0' + q);
+        dst[1] = DIGIT_PAIRS[r * 2];
+        dst[2] = DIGIT_PAIRS[r * 2 + 1];
         return 3;
     }
     return pulsar_itoa((uint64_t)cl, dst);
@@ -1461,6 +1604,9 @@ __attribute__((no_stack_protector)) INLINE void finalize_response(PulsarConn* co
             resp->headers_len = (uint32_t)(st.len + rest);
         }
         resp->status_len = (uint8_t)st.len;
+        /* The 200 OK prefix staged in buf[0..) is gone: force the next
+         * request on this connection to re-stage it. */
+        resp->date_gen = 0;
     }
 
     /* Content-Length */
@@ -1489,11 +1635,45 @@ __attribute__((no_stack_protector)) INLINE void finalize_response(PulsarConn* co
     }
 
     /* Fast Path: close the gap between headers and the inline body staging
-     * area. Regions never overlap (dest < RESP_BODY_OFFSET <= src), so memcpy
-     * lets the compiler inline small bodies instead of calling libc memmove. */
+     * area. Regions never overlap (dest < RESP_BODY_OFFSET <= src).
+     * Small bodies (the entire benchmark profile: 13–20 B hello/json) are
+     * moved with fixed-size 8/4/2/1 stores that always inline — no libc
+     * memcpy PLT call, no register spill. Larger inline bodies fall back
+     * to libc memcpy, which wins once SIMD setup amortizes (~128 B+). */
     size_t b_len = resp->body_len;
     if (b_len > 0) {
-        memcpy(resp->buf + resp->headers_len, resp->buf + RESP_BODY_OFFSET, b_len);
+        char* d = resp->buf + resp->headers_len;
+        const char* s = resp->buf + RESP_BODY_OFFSET;
+        if (b_len <= 128) {
+            size_t n = b_len;
+            while (n >= 8) {
+                uint64_t w;
+                memcpy(&w, s, 8);
+                memcpy(d, &w, 8);
+                d += 8;
+                s += 8;
+                n -= 8;
+            }
+            if (n >= 4) {
+                uint32_t w;
+                memcpy(&w, s, 4);
+                memcpy(d, &w, 4);
+                d += 4;
+                s += 4;
+                n -= 4;
+            }
+            if (n >= 2) {
+                uint16_t w;
+                memcpy(&w, s, 2);
+                memcpy(d, &w, 2);
+                d += 2;
+                s += 2;
+                n -= 2;
+            }
+            if (n) *d = *s;
+        } else {
+            memcpy(d, s, b_len);
+        }
     }
     resp->out_len = resp->headers_len + (uint32_t)b_len;
     resp->out_sent = 0;
@@ -1866,7 +2046,8 @@ INLINE size_t decode_path_fast(const char* url, size_t url_len, char* dest, size
  * ================================================================ */
 INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t read_bytes,
                                    const char* end_of_headers, size_t* consumed,
-                                   KeepAliveState* state, event_queue_t* queue) {
+                                   KeepAliveState* state, event_queue_t* queue,
+                                   uint32_t batch_date_gen) {
     *consumed = 0;
     if (!end_of_headers) return StatusBadRequest;
 
@@ -1880,6 +2061,10 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
 
     int prl = parse_request_line(buf, read_bytes, req, &url_ptr, &url_len, &line_end);
     if (unlikely(prl < 0)) {
+        /* Malformed request line: skip past these headers so handle_read
+         * never re-parses the same bytes (error-loop), and let the caller
+         * close the connection after the error response. */
+        *consumed = headers_len;
         return StatusBadRequest;
     }
 
@@ -1900,29 +2085,57 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
     } else {
         path_len = decode_path_fast(url_ptr, url_len, req->path, sizeof(req->path));
 
-        if (!parse_query_params(conn, &path_len)) {
-            return StatusInternalServerError;
+        http_status qs = parse_query_params(conn, &path_len);
+        if (unlikely(qs != StatusOK)) {
+            *consumed = headers_len;
+            return qs;
         }
-        route = NULL; /* resolved below after headers */
-    }
-
-    const size_t hdr_off = (size_t)(line_end - buf);
-    if (!parse_request_headers(conn, line_end, req->method_type, headers_len - hdr_off)) {
-        return StatusInternalServerError;
-    }
-
-    *consumed = headers_len + req->content_length;
-
-    if (unlikely(!route)) {
         route = route_match(req->path, path_len, req->method_type, conn->arena);
     }
-    if (!route) return StatusNotFound;
+
+    /* Route is resolved before headers: matching needs only path + method.
+     * Unknown paths 404 here, before any header work. *consumed covers the
+     * header block; a possible body is irrelevant because the caller closes
+     * the connection after any error response. */
+    if (unlikely(!route)) {
+        *consumed = headers_len;
+        return StatusNotFound;
+    }
     req->route = route;
+
+    /* Stash the raw header block for lazy parsing, then take the minimal
+     * scan on the hot path: safe method to a non-static route needs only
+     * keep-alive (Content-Length is definitionally unused, Range is only
+     * read by conn_servefile which materializes on demand). Everything
+     * else (unsafe methods, static routes) takes the full parse. */
+    const size_t hdr_off = (size_t)(line_end - buf);
+    req->hdr_data = line_end;
+    req->hdr_len_raw = headers_len - hdr_off;
+    req->headers_parsed = false;
+    /* content_length/range_hdr already cleared by reset_connection. */
+
+    if (likely(SAFE_METHOD(req->method_type) && route->route_type != ROUTE_TYPE_STATIC)) {
+        http_status ks = scan_keepalive_only(conn, req->hdr_data, req->hdr_len_raw);
+        if (unlikely(ks != StatusOK)) {
+            *consumed = headers_len;
+            return ks;
+        }
+        *consumed = headers_len; /* no body on safe methods */
+    } else {
+        http_status hs =
+            parse_request_headers(conn, req->hdr_data, req->method_type, req->hdr_len_raw);
+        if (unlikely(hs != StatusOK)) {
+            *consumed = headers_len;
+            return hs;
+        }
+        req->headers_parsed = true;
+        *consumed = headers_len + req->content_length;
+    }
 
     http_status status = parse_request_body(conn, buf, headers_len, read_bytes);
     if (status != StatusOK) return status;
 
-    uint16_t prefix_len = snapshot_date_header(res->buf);
+    uint16_t prefix_len = snapshot_date_header(res->buf, &res->date_gen, batch_date_gen);
     res->status_len = 17;
     res->status_code = StatusOK;
     res->headers_len = prefix_len;
@@ -2101,9 +2314,11 @@ static void add_connection_to_worker(event_queue_t* queue, int client_fd, int wo
 
 /* ================================================================
  * handle_read (Zero-TLS Lookup via base_buf parameter)
+ * batch_date_gen is sampled once per epoll batch by the worker loop:
+ * no TSC reads and no atomic loads on the request path.
  * ================================================================ */
 INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state,
-                        char* base_buf) {
+                        char* base_buf, uint32_t batch_date_gen) {
 #if ENABLE_LOGGING
     if (LOGGER_CALLBACK) {
         conn->start = pulsar_now_ns();
@@ -2132,6 +2347,8 @@ INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
     size_t total = pending + (size_t)bytes_read;
     conn->read_buf = base_buf;
 
+    /* Liveness is stamped by the worker loop (batch_mono); nothing to do. */
+
     // Pipelining loop: process all back-to-back requests in base_buf
     size_t offset = 0;
     while (offset < total) {
@@ -2145,9 +2362,15 @@ INLINE void handle_read(event_queue_t* queue, PulsarConn* conn, KeepAliveState* 
         }
 
         size_t consumed = 0;
-        http_status status =
-            process_request(conn, cur_buf, available, end_of_headers, &consumed, state, queue);
-        if (status != StatusOK) {
+        http_status status = process_request(conn, cur_buf, available, end_of_headers, &consumed,
+                                             state, queue, batch_date_gen);
+        if (unlikely(status != StatusOK)) {
+            /* Error responses must not keep a potentially desynchronized
+             * stream alive: send the error, then close. Combined with
+             * process_request always advancing *consumed past the offending
+             * headers, this guarantees the same bytes are never re-parsed
+             * in a loop (the previous 6.3% write_error burn). */
+            conn->keep_alive = false;
             write_error(conn, status);
         }
 
@@ -2446,22 +2669,36 @@ void* worker_thread(void* arg) {
     }
 
     event_t events[MAX_EVENTS] = {0};
+    struct epoll_event raw_events[MAX_EVENTS] = {0};
+
     time_t last_timeout_check = 0;
     int loop_counter = 0;
 
     while (server_running) {
-        int n = event_wait(queue, events, MAX_EVENTS, 500);
+        int n = event_wait(queue, raw_events, events, MAX_EVENTS, 500);
         if (n == -1) {
             if (errno == EINTR) continue;
             perror("event_wait");
             continue;
         }
 
+        /* Per-batch sampling: ONE monotonic read + ONE relaxed Date load per
+         * epoll return, amortized over all events in the batch. The request
+         * path itself performs no TSC reads and no atomic loads. */
+        time_t batch_mono = 0;
+        uint32_t batch_date_gen = 0;
+        if (likely(n > 0)) {
+            batch_mono = pulsar_mono_sec();
+            batch_date_gen = atomic_load_explicit(&g_date_gen, memory_order_relaxed);
+        }
+
         /* Date header is refreshed by the background date thread;
          * workers only handle keep-alive timeouts here. */
         if (unlikely(++loop_counter >= 128)) {
             loop_counter = 0;
-            time_t mono_now = pulsar_mono_sec();
+            /* Reuse the batch timestamp when available to avoid a second TSC
+             * read; fall back to a fresh read on empty batches. */
+            time_t mono_now = (n > 0) ? batch_mono : pulsar_mono_sec();
 
             if (mono_now - last_timeout_check >= 5) {
                 CheckKeepAliveTimeouts(ka_state, queue, worker_id);
@@ -2483,8 +2720,11 @@ void* worker_thread(void* arg) {
                     add_connection_to_worker(queue, client_fd, worker_id, ka_state);
                 }
             } else {
+                /* Any event proves the peer is alive (one store, no TSC).
+                 * This also covers writable-only events for pending sends. */
+                conn->last_activity = batch_mono;
                 if (likely(ev->readable))
-                    handle_read(queue, conn, ka_state, read_buf);
+                    handle_read(queue, conn, ka_state, read_buf, batch_date_gen);
                 else if (ev->writable)
                     handle_write(queue, conn, ka_state);
                 else if (ev->error)
@@ -2497,7 +2737,7 @@ void* worker_thread(void* arg) {
 
     event_delete(queue, listen_fd);
     sys_close_direct(listen_fd);
-    event_queue_free(queue);
+    event_queue_close(queue);
     worker_pool_cleanup(worker_id);
     return NULL;
 }
@@ -2532,9 +2772,11 @@ int pulsar_run(const char* addr, int port) {
 #if ENABLE_SLOW_WORKERS
     for (int i = 0; i < NUM_SLOW_WORKERS; i++) {
         slow_workers[i].id = i;
-        slow_workers[i].queue = event_queue_create();
-        if (!slow_workers[i].queue) {
+        if (event_queue_create(&slow_workers[i].queue) != 0) {
             perror("slow event_queue_create");
+            for (int j = 0; j < i; j++) {
+                event_queue_close(&slow_workers[j].queue);
+            }
             exit(EXIT_FAILURE);
         }
         memset(&slow_workers[i].ka_state, 0, sizeof(KeepAliveState));
@@ -2550,15 +2792,18 @@ int pulsar_run(const char* addr, int port) {
     pthread_t workers[NUM_WORKERS] = {0};
     WorkerData worker_data[NUM_WORKERS] = {0};
     KeepAliveState keep_alive_states[NUM_WORKERS] = {0};
+    event_queue_t queues[NUM_WORKERS];
 
     for (int i = 0; i < NUM_WORKERS; i++) {
-        event_queue_t* queue = event_queue_create();
-        if (!queue) {
+        if (event_queue_create(&queues[i]) != 0) {
             perror("event_queue_create");
+            for (int j = 0; j < i; j++) {
+                event_queue_close(&queues[j]);
+            }
             exit(EXIT_FAILURE);
         }
 
-        worker_data[i].queue = queue;
+        worker_data[i].queue = &queues[i];
         worker_data[i].id = i;
         worker_data[i].listen_fd = worker_listen_fds[i];
         worker_data[i].keep_alive_state = &keep_alive_states[i];

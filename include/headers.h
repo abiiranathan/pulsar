@@ -32,7 +32,7 @@ extern "C" {
 
 /* Configuration */
 #ifndef HEADERS_CAPACITY
-    #define HEADERS_CAPACITY 64
+#define HEADERS_CAPACITY 64
 #endif
 
 /**
