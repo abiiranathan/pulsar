@@ -627,101 +627,140 @@ INLINE http_status parse_request_headers(PulsarConn* conn, const char* hdrs, Htt
 }
 
 INLINE http_status parse_query_params(PulsarConn* conn, size_t* path_len) {
-    char* const path = conn->request.path;
-    const char* query = memchr(path, '?', *path_len);
-    if (!query) return StatusOK;  // No Query Params (not an error)
+    ASSERT(conn && path_len);
 
-    path[query - path] = '\0';
+    char* const path = conn->request.path;
+    const size_t orig_len = *path_len;
+    char* const query = memchr(path, '?', orig_len);
+
+    // No Query Params (not an error)
+    if (!query) {
+        return StatusOK;
+    }
+
+    // Trim '?' from URL to get clean path and update path_len
+    *query = '\0';
     *path_len = (size_t)(query - path);
 
     const char* ptr = query + 1;
-    const char* end = ptr + strlen(ptr);
-
-    headers_init(&conn->request.query_params);
+    const char* const end = path + orig_len;
 
     while (ptr < end) {
-        const char* eq = memchr(ptr, '=', (size_t)(end - ptr));
-        const char* amp = memchr(ptr, '&', (size_t)(end - ptr));
+        // Scan Key (stops at '=' or '&' or end)
+        const char* const key_start = ptr;
+        while (ptr < end && *ptr != '=' && *ptr != '&') {
+            ptr++;
+        }
+        StrSlice key = {.data = key_start, .len = (size_t)(ptr - key_start)};
+        StrSlice value = {.data = ptr, .len = 0};
 
-        const char* key_end = eq && (!amp || eq < amp) ? eq : (amp ? amp : end);
-        StrSlice key = {.data = ptr, .len = (size_t)(key_end - ptr)};
-        StrSlice value = {.data = key_end, .len = 0};
-
-        if (eq && (!amp || eq < amp)) {
-            const char* val_start = eq + 1;
-            const char* val_end = amp ? amp : end;
-            value = (StrSlice){.data = val_start, .len = (size_t)(val_end - val_start)};
-            ptr = val_end;
-        } else {
-            ptr = key_end;
+        // Scan Value (if '=' is present)
+        if (ptr < end && *ptr == '=') {
+            ptr++;  // Skip '='
+            const char* const val_start = ptr;
+            while (ptr < end && *ptr != '&') {
+                ptr++;
+            }
+            value = (StrSlice){.data = val_start, .len = (size_t)(ptr - val_start)};
         }
 
-        if (ptr < end && *ptr == '&') ptr++;
-        if (key.len == 0) continue;
+        // Skip '&' delimiter if we stopped at one
+        if (ptr < end) {
+            ptr++;
+        }
+
+        // Ignore empty keys (e.g. "?&", "&&", or "?=val")
+        if (key.len == 0) {
+            continue;
+        }
 
         if (!headers_push(&conn->request.query_params, key, value)) {
             return StatusRequestHeaderFieldsTooLarge;
         }
     }
+
     return StatusOK;
 }
 
-/* Minimal header scan for the hot path (safe method, non-static route).
- * Extracts ONLY keep-alive — the single header field the hot path needs —
- * skipping table fill, value trimming (except on a Connection line),
- * Content-Length and Range scans. Semantics mirror parse_request_headers
- * exactly: default keep-alive, first Connection header wins, only a
- * 5-byte "close" value (case-insensitive, OWS-trimmed) disables it.
- * Header COUNT is enforced (>HEADERS_CAPACITY → 431) and empty names
- * rejected (400) so over-limit/malformed requests behave identically to
- * the full parse; the table itself is just filled lazily on first access.
- * Benchmark traffic (few headers, no Connection: close) costs ~2 memchrs
- * per line and zero stores. */
+static inline bool is_connection_header(const char* s) {
+    uint64_t a;
+    uint16_t b;
+    memcpy(&a, s, sizeof(a));
+    memcpy(&b, s + sizeof(a), sizeof(b));
+
+    return ((a | UINT64_C(0x2020202020202020)) == UINT64_C(0x697463656e6e6f63)) &&
+           ((uint16_t)(b | UINT16_C(0x2020)) == UINT16_C(0x6e6f));
+}
+
+static inline bool is_close_value(const char* s, size_t len) {
+    if (len != 5) return false;
+    uint64_t w = 0;
+    memcpy(&w, s, 5);
+    return (w | UINT64_C(0x2020202020)) == UINT64_C(0x65736f6c63);
+}
+
+/**
+ * Minimal fast-path header scanner for safe methods / non-static routes.
+ *
+ * Extracts ONLY the keep-alive state without populating header tables, parsing
+ * Content-Length/Range, or trimming non-Connection lines.
+ *
+ * Validation mirrors parse_request_headers exactly:
+ *  - Defaults to keep-alive enabled (HTTP/1.1).
+ *  - First 'Connection' header takes precedence.
+ *  - Disabled ONLY if the OWS-trimmed value is case-insensitively "close" (5 bytes).
+ *  - Empty header field names return 400 (StatusBadRequest).
+ *  - Enforces max header count (HEADERS_CAPACITY) returning 431
+ * (StatusRequestHeaderFieldsTooLarge).
+ */
 INLINE http_status scan_keepalive_only(PulsarConn* conn, const char* hdrs, size_t headers_len) {
     conn->keep_alive = true;
     const char* ptr = hdrs;
-    const char* end = ptr + headers_len;
+    const char* const end = ptr + headers_len;
     size_t count = 0;
-    bool saw_connection = false;
 
     while (ptr < end) {
-        const char* const eol = memchr(ptr, '\r', (size_t)(end - ptr));
-        if (!eol || eol + 1 >= end || eol[1] != '\n') break;
-
-        const char* const colon = memchr(ptr, ':', (size_t)(eol - ptr));
-        if (unlikely(!colon)) {
-            ptr = eol + 2;
-            continue;
+        // Fast-exit at terminating empty line ("\r\n") without calling memchr
+        if (unlikely(ptr[0] == '\r')) {
+            if (likely(ptr + 1 < end && ptr[1] == '\n')) break;
         }
 
-        size_t name_len = (size_t)(colon - ptr);
-        if (unlikely(name_len == 0)) return StatusBadRequest;
-        if (unlikely(++count > HEADERS_CAPACITY)) return StatusRequestHeaderFieldsTooLarge;
+        // O(1) empty name check (replaces memchr for colon)
+        if (unlikely(*ptr == ':')) {
+            return StatusBadRequest;
+        }
 
-        if (!saw_connection && name_len == 10 && ((ptr[0] | 0x20) == 'c')) {
-            uint64_t a;
-            uint16_t b;
-            memcpy(&a, ptr, 8);
-            memcpy(&b, ptr + 8, 2);
-            if (((a | UINT64_C(0x2020202020202020)) == UINT64_C(0x697463656e6e6f63)) &&
-                ((uint16_t)(b | UINT16_C(0x2020)) == UINT16_C(0x6e6f))) {
-                const char* vs = colon + 1;
+        // Find end of line (the ONLY memchr in the loop)
+        const char* const eol = (const char*)memchr(ptr, '\r', (size_t)(end - ptr));
+        if (unlikely(!eol || eol + 1 >= end || eol[1] != '\n')) {
+            break;
+        }
+
+        if (unlikely(++count > HEADERS_CAPACITY)) {
+            return StatusRequestHeaderFieldsTooLarge;
+        }
+
+        // Inspect line ONLY if it starts with 'c' or 'C'
+        if (((ptr[0] | 0x20) == 'c')) {
+            // "Connection:" is 11 chars. Colon MUST be at index 10.
+            if ((size_t)(eol - ptr) >= 11 && ptr[10] == ':' && is_connection_header(ptr)) {
+                // Trim OWS around value
+                const char* vs = ptr + 11;
                 while (vs < eol && (*vs == ' ' || *vs == '\t')) vs++;
+
                 const char* ve = eol;
                 while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
-                uint64_t w = 0;
-                size_t vlen = (size_t)(ve - vs);
-                if (vlen == 5) memcpy(&w, vs, 5);
-                conn->keep_alive =
-                    !((vlen == 5) &&
-                      (((w | UINT64_C(0x2020202020202020)) & UINT64_C(0x000000ffffffffff)) ==
-                       UINT64_C(0x00000065736f6c63)));
-                saw_connection = true; /* first Connection header wins, as in the full parse */
+
+                if (is_close_value(vs, (size_t)(ve - vs))) {
+                    conn->keep_alive = false;
+                }
+                return StatusOK;
             }
         }
 
         ptr = eol + 2;
     }
+
     return StatusOK;
 }
 
@@ -733,8 +772,10 @@ INLINE http_status scan_keepalive_only(PulsarConn* conn, const char* hdrs, size_
 INLINE void ensure_headers_parsed(PulsarConn* conn) {
     request_t* req = &conn->request;
     if (likely(req->headers_parsed)) return;
+
     req->headers_parsed = true;
     if (req->hdr_len_raw == 0 || !req->hdr_data) return;
+
     headers_init(&req->headers);
     /* Recomputes keep_alive/Content-Length/Range identically to the eager
      * path; return status is best-effort (see above). */
