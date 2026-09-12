@@ -542,8 +542,12 @@ bool bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
     if (!conn || !name || name_len == 0 || !out_data || !out_len) {
         return false;
     }
-    /* Same as above: inline struct + non-NUL-terminated Go name. */
-    const headers_t* h = &conn->request.headers;
+    /* Headers are parsed lazily on the hot path (see scan_keepalive_only /
+     * ensure_headers_parsed in pulsar.c): the table is empty until first
+     * access. req_headers() materializes it on demand and returns it, so
+     * this stays zero-cost for handlers that never read headers. Go
+     * strings are not NUL-terminated, so scan with the explicit length. */
+    const headers_t* h = req_headers(conn);
     StrSlice target = {.data = (char*)name, .len = name_len};
     for (size_t i = 0; i < h->count; ++i) {
         if (ss_equal_nocase(h->entries[i].name, target)) {
@@ -591,13 +595,14 @@ bool bridge_query_at(PulsarConn* conn, size_t idx, const char** name, size_t* na
 }
 
 /**
- * Returns the number of request headers.
+ * Returns the number of request headers, materializing the lazily parsed
+ * table on first access (see bridge_req_header_get).
  */
 size_t bridge_req_headers_count(PulsarConn* conn) {
     if (!conn) {
         return 0;
     }
-    return conn->request.headers.count;
+    return req_headers(conn)->count;
 }
 
 /**
@@ -610,7 +615,8 @@ bool bridge_req_header_at(PulsarConn* conn, size_t idx, const char** name, size_
     if (!conn || !name || !name_len || !val || !val_len) {
         return false;
     }
-    const headers_t* h = &conn->request.headers;
+    /* Materializes the lazily parsed table on first access (see above). */
+    const headers_t* h = req_headers(conn);
     if (idx >= h->count) {
         return false;
     }
@@ -656,7 +662,10 @@ size_t bridge_content_length(PulsarConn* conn) {
  * measured once here so the caller can use length-bounded copies instead of
  * paying strlen again. Route pattern uses the stored pattern_len (never
  * re-scanned). Body is a direct view into the receive buffer. Counts let
- * the caller size enumeration loops without extra count calls.
+ * the caller size enumeration loops without extra count calls. nheaders
+ * materializes the lazily parsed header table (see bridge_req_header_get),
+ * so snapshotting pays the header parse exactly once per request; handlers
+ * that never snapshot (e.g. Param-only) skip it entirely.
  *
  * Returns true on success, false when conn/out is NULL.
  */

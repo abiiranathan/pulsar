@@ -7,6 +7,10 @@ perf.data.*
 # would ignore the cmd/server and cmd/stdlib source directories themselves).
 cmd/server/server
 cmd/stdlib/stdlib
-# Build outputs of the vendored musl flow (rebuilt via `make libs`/`make static`).
+# Build outputs of the example binaries (rebuilt via `make static`).
 /bin/
-/lib/
+# NOTE: lib/libsolidc.a and lib/libpulsar.a are prebuilt musl archives and
+# are intentionally tracked (see lib/.version). Only ignore transient
+# rebuild byproducts.
+/lib/*.o
+/lib/*.tmp

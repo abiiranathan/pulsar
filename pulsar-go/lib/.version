@@ -1,0 +1,8 @@
+pulsar_commit: af8d313bb94887f1070f5ca7cef6ab973326e328
+solidc_repo: https://github.com/abiiranathan/solidc.git
+solidc_commit: bd515462132886b1be21ea9bca28832f191355e4
+CC: musl-gcc
+OPT: -O3
+NUM_WORKERS: 4
+built: 2026-09-12T12:14:25Z
+target: x86_64-linux-musl (static)

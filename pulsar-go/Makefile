@@ -1,19 +1,27 @@
 # pulsar-go — Go bindings for the Pulsar HTTP engine.
 #
-# Self-contained flow: solidc is vendored under third_party/, compiled with
-# $(CC) (default musl-gcc) into lib/*.a, and linked by cgo. No system
-# libpulsar/libsolidc required.
+# Self-contained flow: lib/libsolidc.a and lib/libpulsar.a are prebuilt
+# musl static archives checked into this repo (see lib/.version), and
+# third_party/ holds only the minimal C header snapshots cgo needs to
+# compile bridge.c against them (pulsar public headers + the solidc
+# headers they include). No system libpulsar/libsolidc required, and no
+# C sources are shipped — `go build` works straight after `go get`.
 #
-#   make vendor   # fetch + prune solidc at the pinned commit
-#   make libs     # build lib/libsolidc.a lib/libpulsar.a with $(CC)
-#   make build    # go build ./...
-#   make static   # fully static musl binary at bin/server
-#   make test     # go vet + go test
-#   make smoke    # run bin/server, exercise endpoints, shut down
-#   make install  # install static binary to $(PREFIX)/bin (PREFIX=/usr/local)
+#   make libs          # verify the checked-in archives + headers are present
+#   make libs-rebuild  # maintainer-only: rebuild lib/*.a from live sources
+#                      # (needs the monorepo checkout, musl-gcc, x86_64 Linux)
+#   make build         # go build ./...
+#   make static        # fully static musl binary at bin/server
+#   make test          # go vet + go test
+#   make smoke         # run bin/server, exercise endpoints, shut down
+#   make install       # install static binary to $(PREFIX)/bin (PREFIX=/usr/local)
 #
-# Overrides: CC=gcc (glibc dev loop), OPT=-O2, NUM_WORKERS=8, PREFIX=...,
-# VERSION=x.y.z (for `make tag`).
+# Overrides: CC=musl-gcc (default, must match the prebuilt archives),
+# OPT=-O2, NUM_WORKERS=8, PREFIX=..., VERSION=x.y.z (for `make tag`).
+#
+# Linux x86_64 only. The checked-in archives are built with musl-gcc;
+# building the Go module with any other CC (e.g. glibc gcc) mixes libcs
+# and is unsupported.
 
 CC          ?= musl-gcc
 OPT         ?= -O3
@@ -27,36 +35,37 @@ export CC
 export CGO_ENABLED := 1
 
 LIBS := $(LIBDIR)/libsolidc.a $(LIBDIR)/libpulsar.a
-LIB_CC_STAMP := $(LIBDIR)/.cc
 
-.PHONY: help vendor libs build static test vet smoke install deploy clean tag
+.PHONY: help libs libs-rebuild build static test vet smoke install deploy clean tag
 
 help:
 	@echo "Targets:"
-	@echo "  vendor   Vendor solidc at the pinned commit (third_party/)"
-	@echo "  libs     Build static C archives with \$$(CC) [$(CC)]"
-	@echo "  build    go build ./..."
-	@echo "  static   Fully static musl binary at $(STATIC_BIN)"
-	@echo "  test     go vet + go test ./..."
-	@echo "  vet      go vet ./..."
-	@echo "  smoke    Boot $(STATIC_BIN), curl endpoints, shut down"
-	@echo "  install  Install binary to \$$(PREFIX)/bin [$(PREFIX)]"
-	@echo "  tag      Create go-gettable tag pulsar-go/v\$$(VERSION)"
-	@echo "  clean    Remove bin/, lib/*.a"
+	@echo "  libs         Verify checked-in prebuilt musl archives + headers"
+	@echo "  libs-rebuild Rebuild lib/*.a from live sources (maintainer, x86_64 Linux + musl-gcc)"
+	@echo "  build        go build ./..."
+	@echo "  static       Fully static musl binary at $(STATIC_BIN)"
+	@echo "  test         go vet + go test ./..."
+	@echo "  vet          go vet ./..."
+	@echo "  smoke        Boot $(STATIC_BIN), curl endpoints, shut down"
+	@echo "  install      Install binary to \$$(PREFIX)/bin [$(PREFIX)]"
+	@echo "  tag          Create go-gettable tag pulsar-go/v\$$(VERSION)"
+	@echo "  clean        Remove bin/ (lib/*.a are checked in, use libs-rebuild to refresh)"
 
-vendor:
-	./scripts/vendor.sh
+# The archives are checked in; this only verifies they (and the header
+# snapshots cgo compiles against) are present. It never recompiles.
+libs:
+	@test -f "$(LIBDIR)/libsolidc.a" -a -f "$(LIBDIR)/libpulsar.a" || \
+		{ echo "error: $(LIBDIR)/*.a missing. This is a full checkout issue — run 'make libs-rebuild' (x86_64 Linux + musl-gcc)."; \
+		  echo "If you arrived via 'go get', re-fetch the module: the archives are checked in upstream."; exit 1; }
+	@test -d third_party/pulsar/include -a -d third_party/solidc/include/solidc || \
+		{ echo "error: third_party/ header snapshots missing. Run 'make libs-rebuild'."; exit 1; }
+	@echo "libs ok (prebuilt musl, see $(LIBDIR)/.version):"
+	@cat $(LIBDIR)/.version 2>/dev/null || true
 
-# Archives must always match the current $(CC): musl-built objects linked by
-# glibc gcc (or vice versa) mix libcs. The stamp forces a rebuild on switch.
-libs: scripts/build-libs.sh third_party/solidc/.pin third_party/pulsar/.sync
-	@if [ ! -f "$(LIBDIR)/libsolidc.a" ] || [ ! -f "$(LIBDIR)/libpulsar.a" ] || \
-	    [ "$$(cat $(LIB_CC_STAMP) 2>/dev/null)" != "$(CC)" ]; then \
-		OPT="$(OPT)" NUM_WORKERS="$(NUM_WORKERS)" ./scripts/build-libs.sh && \
-		echo "$(CC)" > $(LIB_CC_STAMP); \
-	else \
-		echo "libs up to date (built with $$(cat $(LIB_CC_STAMP)))"; \
-	fi
+# Maintainer-only: refresh the header snapshots and rebuild the archives
+# from the live monorepo sources. Not part of the normal `go get` flow.
+libs-rebuild:
+	OPT="$(OPT)" NUM_WORKERS="$(NUM_WORKERS)" ./scripts/build-libs.sh
 
 build: libs
 	go build ./...
@@ -83,7 +92,7 @@ install: static
 deploy: install
 
 clean:
-	rm -rf $(BINDIR) $(LIBDIR)/*.a
+	rm -rf $(BINDIR)
 
 # Usage: make tag VERSION=0.1.0  ->  pulsar-go/v0.1.0 (module-aware tag so
 # `go get github.com/abiiranathan/pulsar/pulsar-go@v0.1.0` resolves).

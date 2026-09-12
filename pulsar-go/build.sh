@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Dev entry point: ensure vendored static libs are built, then run the example.
+# Dev entry point: verify the checked-in prebuilt archives, then run the example.
 # For the full flow (static binary, tests, deploy) use the Makefile targets.
+# To refresh lib/*.a from live sources (maintainer): `make libs-rebuild`.
 # Env: CC (default musl-gcc), PORT (default 8080).
 set -euo pipefail
 

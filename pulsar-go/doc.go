@@ -4,8 +4,10 @@
 // # Architecture
 //
 // Pulsar runs its event loop, HTTP parser, router, and response assembler
-// in C (vendored at third_party/pulsar/src, synced from the monorepo's
-// src/ via scripts/sync-c.sh). Routes registered from Go
+// in C. The Go module links prebuilt musl archives (lib/libpulsar.a,
+// lib/libsolidc.a — see lib/.version) and compiles its cgo glue
+// (bridge.c) against the minimal header snapshots under third_party/.
+// Routes registered from Go
 // are installed in the C router with a small integer route ID; when a
 // request matches, C calls back into Go through goPulsarDispatcher with
 // only that ID (O(1), no string lookup on the hot path). The Go Engine
@@ -50,7 +52,7 @@
 //     zero-copy body; percent-decoding necessarily allocates the decoded
 //     output while the scan itself borrows the body.
 //   - multipart/form-data (RFC 7578, see
-//     third_party/pulsar/include/forms.h and third_party/pulsar/src/forms.c)
+//     third_party/pulsar/include/forms.h)
 //     is parsed by the C engine into a private arena.
 //     File contents are exposed as offset/size windows into the body and
 //     are never copied; use UploadedFile.Data for the zero-copy payload

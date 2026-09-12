@@ -2,6 +2,7 @@
 #define PULSAR_H
 
 #include <signal.h>
+#include <stdarg.h>
 #include <sys/uio.h>
 #include <time.h>
 

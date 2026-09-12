@@ -2,7 +2,7 @@
 
 Go bindings for [Pulsar](../README.md), the HTTP server engine written in C.
 The event loop, HTTP parser, router, and response assembler all live in C
-(`../src/pulsar.c`, `../src/routing.c`); this package wraps that in an
+(linked from the checked-in `lib/` archives); this package wraps that in an
 idiomatic Go API for routing, middleware, and request handling.
 
 Start with `doc.go` for the full architecture, threading, and memory model.
@@ -44,7 +44,7 @@ all := c.PostForm() // map[string][]string, percent-decoded
 ```
 
 Multipart uploads (`multipart/form-data`, RFC 7578) are parsed by the C
-engine (`../src/forms.c`) into a private arena. File bytes are never
+engine (linked from `lib/`) into a private arena. File bytes are never
 copied — `UploadedFile.Data` windows the request body directly.
 
 ```go
@@ -74,15 +74,20 @@ once and return `ErrResponseAlreadyWritten` if you call a second one.
 
 The module path is `github.com/abiiranathan/pulsar/pulsar-go` — note the
 `/pulsar-go` suffix, since it lives inside the `pulsar/` monorepo. No
-system libpulsar or libsolidc is required; solidc is vendored under
-`third_party/` and built into static archives by `make`:
+system libpulsar or libsolidc is required and no C compilation is needed:
+musl static archives (`lib/libpulsar.a`, `lib/libsolidc.a`, see
+`lib/.version`) are checked in, and `third_party/` holds only the minimal
+header snapshots cgo compiles `bridge.c` against:
 
 ```bash
 go get github.com/abiiranathan/pulsar/pulsar-go@latest
-cd $(go env GOMODCACHE)/github.com/abiiranathan/pulsar*/pulsar-go*  # or inside your own module
-make libs     # CC=musl-gcc by default; builds lib/libsolidc.a and lib/libpulsar.a
-make build
+go build ./...
 ```
+
+Linux x86_64 only: the archives are built with `musl-gcc`, so the Go
+module must also be built with `CC=musl-gcc` (the Makefile default).
+Mixing a glibc-built module with the musl archives (or vice versa) is
+unsupported.
 
 Releases are cut as module-aware tags (`pulsar-go/v0.1.0`), so any tagged
 version resolves normally: `go get github.com/abiiranathan/pulsar/pulsar-go@v0.1.0`.
@@ -90,25 +95,34 @@ version resolves normally: `go get github.com/abiiranathan/pulsar/pulsar-go@v0.1
 ## Build
 
 ```bash
-make vendor   # (re-)vendor solidc at the pinned commit, see third_party/solidc/.pin
-make libs     # static C archives with musl-gcc (override: CC=gcc for a glibc dev loop)
+make libs         # verify the checked-in archives + headers are present
+make libs-rebuild # maintainer-only: rebuild lib/*.a from live sources (x86_64 Linux + musl-gcc)
 make build    # go build ./...
 make vet      # go vet ./...
 make test     # vet + go test ./...
 make static   # fully static musl binary at bin/server
 make smoke    # boot bin/server, exercise endpoints, shut down
-./build.sh    # shortcut for local dev: make libs + go run ./cmd/server
+./build.sh    # shortcut for local dev: verify libs + go run ./cmd/server
 ```
 
-`CC` has to match between `libs` and every Go step. The Makefile enforces
-this with a stamp file (`lib/.cc`) and rebuilds the archives automatically
-when it changes, so you can't accidentally link a musl archive against a
-glibc build or vice versa. `OPT` (`-O3`) and `NUM_WORKERS` (`4`) tune the
-C archives.
+`CC` must stay `musl-gcc` to match the checked-in archives.
+`OPT` (`-O3`) and `NUM_WORKERS` (`4`) tune `make libs-rebuild` only.
 
 `src/regex.c` is excluded from `libsolidc.a` because it needs libpcre2 and
 nothing in pulsar uses it. Set `SOLIDC_WITH_REGEX=1` (and point `CFLAGS_EXTRA`
-at your pcre2 headers) if you need it anyway.
+at your pcre2 headers) when running `make libs-rebuild` if you need it
+anyway (the final Go link then also needs `-lpcre2-8`).
+
+## Refreshing the prebuilt archives (maintainers)
+
+`lib/*.a` are built from the live monorepo C sources plus solidc at the
+pinned commit (`third_party/solidc/.pin`). `make libs-rebuild` fetches
+solidc to a temp dir (its sources are never vendored), recompiles both
+archives, refreshes the `third_party/` header snapshots and `lib/.version`,
+and must be committed as one unit. The pulsar header snapshot records its
+source commit in `third_party/pulsar/.sync` — if it drifts from the live
+`../include`, the bindings are linking against stale declarations, so
+always rebuild (never hand-edit `third_party/`).
 
 ## Deploy
 
@@ -123,4 +137,5 @@ The binary reads `PORT` (default `8080`).
 
 The old CMake flow (`cmake -S .. -B ../build && cmake --build ../build`)
 still builds the C library on its own, but the Go bindings don't consume
-it anymore — everything needed for `pulsar-go` comes from `make libs`.
+it — everything needed for `pulsar-go` is the checked-in `lib/*.a`
+plus the `third_party/` header snapshots.

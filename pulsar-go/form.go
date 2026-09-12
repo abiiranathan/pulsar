@@ -23,7 +23,8 @@ import (
 //     over the zero-copy request body (see PostForm). Scanning borrows
 //     the body; only percent-decoded outputs allocate.
 //   - multipart/form-data (RFC 7578) is parsed by the C engine
-//     (src/forms.c) into a private arena (see MultipartForm). Regular
+//     (libpulsar, see third_party/pulsar/include/forms.h) into a private
+//     arena (see MultipartForm). Regular
 //     field names/values and file metadata alias that arena (zero-copy,
 //     request-scoped). File payloads are offset/size windows into the
 //     request body itself and are never copied; UploadedFile.Data is a
@@ -161,7 +162,7 @@ func (c *Context) closeForm() {
 // returns the cached result. A second call returns the same *Form
 // without re-parsing. Parsing fails with an *HTTPError (status 400) when
 // the Content-Type is missing or has no boundary, the body is empty, or
-// the payload is malformed (see src/forms.c limits such as MAX_FILE_SIZE).
+// the payload is malformed (see the C engine limits such as MAX_FILE_SIZE).
 func (c *Context) MultipartForm() (*Form, error) {
 	if c.form != nil {
 		return c.form, nil
@@ -221,7 +222,7 @@ func (c *Context) MultipartForm() (*Form, error) {
 			// expose an empty payload rather than slicing out of bounds.
 			if o >= 0 && s >= 0 && o+s <= len(body) {
 				data = body[o : o+s : o+s]
-				// The C parser (src/forms.c) windows the payload up to
+				// The C parser windows the payload up to
 				// the boundary marker, which includes the CRLF
 				// delimiter preceding it. Strip exactly one trailing
 				// CRLF so Data holds the file bytes the client sent,

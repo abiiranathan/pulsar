@@ -67,6 +67,12 @@ struct response_t {
     uint8_t status_len;   /* Length of status line */
     uint8_t flags;        /* Bit flags */
 
+    /* Generation of the prebuilt Date prefix currently staged in buf[0..).
+     * Matches g_date_gen when buf starts with the current global prefix,
+     * else 0 (invalid). Lets keep-alive requests skip the per-request
+     * memcpy entirely when the Date second hasn't rolled over. */
+    uint32_t date_gen;
+
     /* Heap fallback for large bodies (> RESP_BODY_CAPACITY) */
     uint32_t body_capacity;
     uint32_t body_sent;
@@ -92,6 +98,14 @@ struct request_t {
     headers_t query_params;
     struct route_t* route;
     StrSlice range_hdr;
+    /* Raw header block for lazy parsing. The hot path (safe method,
+     * non-static route) skips table fill + Content-Length/Range scans and
+     * only extracts keep-alive; the full parse is materialized on first
+     * header access via ensure_headers_parsed(). Slices point into the
+     * worker read buffer with the same lifetime as the eager table had. */
+    const char* hdr_data;
+    size_t hdr_len_raw;
+    bool headers_parsed;
 };
 
 struct pulsar_conn;
@@ -115,18 +129,20 @@ struct pulsar_conn {
     Locals locals;
     struct request_t request;
     struct response_t response;
-
 #if ENABLE_LOGGING
     uint64_t start;
 #endif
-
     struct pulsar_conn *next, *prev;
-    struct Poller* owner_queue;
+    struct event_queue* owner_queue;
     void* owner_ka_state;
+#if ENABLE_SLOW_WORKERS
     struct PulsarOffloadHandler offload_hooks;
     bool offloaded;
+#endif
 };
 
+#if ENABLE_SLOW_WORKERS
 bool pulsar_handoff(struct pulsar_conn* conn, PulsarOffloadHandler handlers);
+#endif
 
 #endif /* __PULSAR_TYPES_H__ */
