@@ -1,18 +1,19 @@
 #include "../include/pulsar.h"
 #include "../include/events.h"
 #include "../include/fastparse.h"
+#include "../include/keepalive.h"
 #include "../include/mimetypes.h"
 #include "../include/plog.h"
 #include "../include/pulsar_itoa.h"
 #include "../include/pulsar_syscall.h"
-#include "../include/pulsar_time.h"
+#include "../include/workerpool.h"
 
 #if defined(__x86_64__) || defined(__SSE2__) || defined(__AVX2__)
 #include <immintrin.h>
 #endif
 
-#define SERVER_NAME                       "PULSAR/1.0 (Unix)"
-#define conn_timedout(now, last_activity) ((now) - (last_activity) > CONNECTION_TIMEOUT)
+#define SERVER_NAME "PULSAR/1.0 (Unix)"
+
 #define ensure_headers_capacity(res, required) \
     ASSERT(((size_t)(res)->headers_len) + (required) < RESP_BODY_OFFSET);
 #define ALIGNED ALIGN(64)
@@ -28,83 +29,13 @@ ALIGN(64) uint64_t g_tsc_base_cycles = 0;
 ALIGN(64) uint64_t g_tsc_base_ns = 0;
 ALIGN(64) uint64_t g_wall_base_ns = 0;
 
-typedef struct ALIGN(64) WorkerPool {
-    PulsarConn* conns[WORKER_POOL_SIZE];
-    Arena* arenas[WORKER_POOL_SIZE];
-    size_t top;
-} WorkerPool;
-
-static WorkerPool worker_pools[NUM_WORKERS];
-
-static void worker_pool_init(int worker_id) {
-    WorkerPool* pool = &worker_pools[worker_id];
-    pool->top = 0;
-
-    for (size_t i = 0; i < WORKER_POOL_SIZE; i++) {
-        PulsarConn* conn = malloc(sizeof(*conn));
-        Arena* arena = arena_create(CONNECTION_ARENA_SIZE);
-        if (!conn || !arena) {
-            free(conn);
-            arena_destroy(arena);
-            fprintf(stderr, "worker_pool_init failed for worker %d at slot %zu\n", worker_id, i);
-            return;
-        }
-
-        pool->conns[pool->top] = conn;
-        pool->arenas[pool->top] = arena;
-        pool->top++;
-    }
-}
-
-static PulsarConn* worker_pool_acquire(int worker_id, Arena** arena) {
-    WorkerPool* pool = &worker_pools[worker_id];
-    if (pool->top == 0) {
-        *arena = arena_create(CONNECTION_ARENA_SIZE);
-        return malloc(sizeof(PulsarConn));
-    }
-
-    pool->top--;
-    *arena = pool->arenas[pool->top];
-    return pool->conns[pool->top];
-}
-
-static void worker_pool_release(int worker_id, PulsarConn* conn, Arena* arena) {
-    WorkerPool* pool = &worker_pools[worker_id];
-
-    if (pool->top < WORKER_POOL_SIZE) {
-        arena_reset(arena);
-        pool->conns[pool->top] = conn;
-        pool->arenas[pool->top] = arena;
-        pool->top++;
-        return;
-    }
-
-    arena_destroy(arena);
-    free(conn);
-}
-
-static void worker_pool_cleanup(int worker_id) {
-    WorkerPool* pool = &worker_pools[worker_id];
-    while (pool->top > 0) {
-        pool->top--;
-        arena_destroy(pool->arenas[pool->top]);
-        free(pool->conns[pool->top]);
-    }
-}
-
-typedef struct KeepAliveState {
-    PulsarConn* head;
-    PulsarConn* tail;
-    size_t count;
-} KeepAliveState;
-
 /* Forward Declarations */
 INLINE void finalize_response(PulsarConn* conn, HttpMethod method);
 INLINE void free_response_body(response_t* resp);
-INLINE void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state);
 INLINE void handle_write(event_queue_t* queue, PulsarConn* conn, KeepAliveState* state);
-INLINE void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
-                             int worker_id);
+void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
+                      int worker_id);
+
 INLINE void ensure_headers_parsed(PulsarConn* conn);
 
 #if ENABLE_SLOW_WORKERS
@@ -254,53 +185,6 @@ bool pulsar_handoff(PulsarConn* conn, PulsarOffloadHandler handlers) {
 }
 #endif
 
-static void remove_keepalive_connection(PulsarConn* conn, KeepAliveState* state) {
-    if (unlikely(!conn->in_keep_alive)) return;
-
-    if (conn->prev)
-        conn->prev->next = conn->next;
-    else
-        state->head = conn->next;
-
-    if (conn->next)
-        conn->next->prev = conn->prev;
-    else
-        state->tail = conn->prev;
-
-    conn->prev = NULL;
-    conn->next = NULL;
-    state->count--;
-    conn->in_keep_alive = false;
-}
-
-static void AddKeepAliveConnection(PulsarConn* conn, KeepAliveState* state) {
-    if (unlikely(conn->in_keep_alive)) return;
-
-    conn->next = state->head;
-    conn->prev = NULL;
-
-    if (state->head)
-        state->head->prev = conn;
-    else
-        state->tail = conn;
-
-    state->head = conn;
-    state->count++;
-    conn->in_keep_alive = true;
-}
-
-INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue, int worker_id) {
-    PulsarConn* current = state->head;
-    time_t now = pulsar_mono_sec();
-    while (current) {
-        PulsarConn* next = current->next;
-        if (conn_timedout(now, current->last_activity)) {
-            close_connection(queue, current, state, worker_id);
-        }
-        current = next;
-    }
-}
-
 /* ================================================================
  * Signal Handler
  * ================================================================ */
@@ -410,8 +294,8 @@ static bool reset_connection(PulsarConn* conn) {
     return true;
 }
 
-static void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
-                             int worker_id) {
+void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
+                      int worker_id) {
     if (!conn || conn->client_fd == -1) return;
 
     event_delete(queue, conn->client_fd);
