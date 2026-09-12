@@ -120,7 +120,6 @@ typedef struct PulsarOffloadHandler {
 
 /* Connection State Structure */
 struct pulsar_conn {
-    /* ---- CACHE LINE 0 (0..63): Extremely hot per-event / per-request state ---- */
     int client_fd;
     int worker_id;
     uint32_t pending_len;
@@ -128,29 +127,21 @@ struct pulsar_conn {
     bool keep_alive;
     bool abort;
     bool in_keep_alive;
-    /* Set by every request-scoped arena allocation site; reset_connection
-     * only pays arena_reset's two dependent header loads when the request
-     * actually allocated (perf: the dirty-check itself was the #1 hot spot
-     * on keep-alive microbenchmarks where most requests never allocate). */
-    bool arena_dirty;
-    uint8_t _pad[3];
     time_t last_activity;
-    struct pulsar_conn *next, *prev; /* Keep-alive list head / tail links */
+    struct pulsar_conn *next, *prev;
     Arena* arena;
-    char* read_buf;                     /* Points to static_read_buf during processing */
+    char* read_buf;
     struct event_queue* owner_queue;
     void* owner_ka_state;
 #if ENABLE_LOGGING
     uint64_t start;
 #endif
 
-    /* ---- Hot Request and Response structures ---- */
     struct request_t request;
     struct response_t response;
 
-    /* ---- Cold state at the end ---- */
     Locals locals;
-    char pending_buf[READ_BUFFER_SIZE]; /* Dedicated partial read buffer (cold) */
+    char pending_buf[READ_BUFFER_SIZE];
 #if ENABLE_SLOW_WORKERS
     struct PulsarOffloadHandler offload_hooks;
     bool offloaded;
