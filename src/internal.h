@@ -18,12 +18,12 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "pulsar.h"
-#include "events.h"
+#include "../include/events.h"
+#include "../include/pulsar.h"
+#include "../include/pulsar_syscall.h"
 #include "fastparse.h"
 #include "keepalive.h"
 #include "plog.h"
-#include "pulsar_syscall.h"
 #include "pulsar_time.h"
 
 /* Enforce that the response header block never spills into the inline body

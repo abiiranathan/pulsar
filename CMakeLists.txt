@@ -114,6 +114,7 @@ set(PULSAR_SOURCES
     src/forms.c
     src/logging.c
     src/middleware.c
+    src/mimetypes.c
     src/request.c
     src/response.c
     src/routing.c

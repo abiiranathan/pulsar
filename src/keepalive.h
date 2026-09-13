@@ -1,4 +1,7 @@
-#include "pulsar.h"
+#ifndef PULSAR_KEEPALIVE_H
+#define PULSAR_KEEPALIVE_H
+
+#include "../include/pulsar.h"
 #include "pulsar_time.h"
 
 typedef struct KeepAliveState {
@@ -60,3 +63,5 @@ INLINE void CheckKeepAliveTimeouts(KeepAliveState* state, event_queue_t* queue, 
         current = next;
     }
 }
+
+#endif  // PULSAR_KEEPALIVE_H

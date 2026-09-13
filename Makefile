@@ -146,6 +146,7 @@ BASE_SRC := $(SRC_DIR)/routing.c \
             $(SRC_DIR)/file.c \
             $(SRC_DIR)/logging.c \
             $(SRC_DIR)/middleware.c \
+            $(SRC_DIR)/mimetypes.c \
             $(SRC_DIR)/request.c \
             $(SRC_DIR)/response.c \
             $(SRC_DIR)/server.c \

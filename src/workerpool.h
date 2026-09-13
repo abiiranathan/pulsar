@@ -1,7 +1,7 @@
 #ifndef WORKER_POOL_H
 #define WORKER_POOL_H
 
-#include "pulsar.h"
+#include "../include/pulsar.h"
 
 typedef struct ALIGN(64) WorkerPool {
     PulsarConn* conns[WORKER_POOL_SIZE];

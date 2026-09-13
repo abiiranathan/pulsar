@@ -167,8 +167,8 @@ ranlib "$LIBDIR/libsolidc.a" 2>/dev/null || true
 
 # --- libpulsar.a (live monorepo sources) --------------------------------------
 echo "==> Compiling pulsar (live tree) ..."
-for src in forms routing connection context date file logging middleware request \
-           response server slowworker streaming; do
+for src in forms routing connection context date file logging middleware mimetypes \
+           request response server slowworker streaming; do
     if [[ ! -f "$LIVE_SRC/$src.c" ]]; then
         echo "error: missing $LIVE_SRC/$src.c" >&2
         exit 1
