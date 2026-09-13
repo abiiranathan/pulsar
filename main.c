@@ -301,7 +301,7 @@ void mw2(PulsarCtx* ctx) {
 
 int main(int argc, char* argv[]) {
     // Log to real file. Faster than stdout
-    int log_fd = open("pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int log_fd = open("/tmp/pulsar.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (log_fd == -1) {
         perror("open log file");
         return 1;
