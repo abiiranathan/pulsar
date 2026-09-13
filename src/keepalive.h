@@ -7,7 +7,8 @@ typedef struct KeepAliveState {
     size_t count;
 } KeepAliveState;
 
-// Forward declaration for close_connection declared in pulsar.c
+// close_connection is defined in connection.c and called by the keep-alive
+// timeout sweep below.
 extern void close_connection(event_queue_t* queue, PulsarConn* conn, KeepAliveState* ka_state,
                              int worker_id);
 

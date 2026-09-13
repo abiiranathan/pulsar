@@ -139,8 +139,18 @@ HEADERS_DIR := include
 TEST_DIR := tests
 
 BASE_SRC := $(SRC_DIR)/routing.c \
-            $(SRC_DIR)/pulsar.c \
-            $(SRC_DIR)/forms.c
+            $(SRC_DIR)/forms.c \
+            $(SRC_DIR)/connection.c \
+            $(SRC_DIR)/context.c \
+            $(SRC_DIR)/date.c \
+            $(SRC_DIR)/file.c \
+            $(SRC_DIR)/logging.c \
+            $(SRC_DIR)/middleware.c \
+            $(SRC_DIR)/request.c \
+            $(SRC_DIR)/response.c \
+            $(SRC_DIR)/server.c \
+            $(SRC_DIR)/slowworker.c \
+            $(SRC_DIR)/streaming.c
 
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(BASE_SRC))

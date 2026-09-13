@@ -9,7 +9,10 @@ typedef struct ALIGN(64) WorkerPool {
     size_t top;
 } WorkerPool;
 
-static WorkerPool worker_pools[NUM_WORKERS];
+/* Defined exactly once (server.c). Kept extern so every translation unit
+ * that acquires/releases connections shares the same pool instead of each
+ * getting its own private copy of a header-defined static. */
+extern WorkerPool worker_pools[NUM_WORKERS];
 
 static inline void worker_pool_init(int worker_id) {
     WorkerPool* pool = &worker_pools[worker_id];

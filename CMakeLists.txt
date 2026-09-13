@@ -107,9 +107,19 @@ add_compile_options(
 )
 
 set(PULSAR_SOURCES
+    src/connection.c
+    src/context.c
+    src/date.c
+    src/file.c
     src/forms.c
-    src/pulsar.c
+    src/logging.c
+    src/middleware.c
+    src/request.c
+    src/response.c
     src/routing.c
+    src/server.c
+    src/slowworker.c
+    src/streaming.c
 )
 
 file(GLOB PULSAR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")

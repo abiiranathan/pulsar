@@ -543,7 +543,7 @@ bool bridge_req_header_get(PulsarConn* conn, const char* name, size_t name_len,
         return false;
     }
     /* Headers are parsed lazily on the hot path (see scan_keepalive_only /
-     * ensure_headers_parsed in pulsar.c): the table is empty until first
+     * ensure_headers_parsed in request.c): the table is empty until first
      * access. req_headers() materializes it on demand and returns it, so
      * this stays zero-cost for handlers that never read headers. Go
      * strings are not NUL-terminated, so scan with the explicit length. */

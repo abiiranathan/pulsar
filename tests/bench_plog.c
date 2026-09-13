@@ -45,7 +45,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "plog.h"
+#include "../src/plog.h"
 
 /** Per-thread sample cap. Bounds memory; oldest samples are simply not
  *  overwritten once full (the count kept is used, not clamped away, when

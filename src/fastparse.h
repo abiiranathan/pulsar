@@ -4,10 +4,6 @@
 #include <emmintrin.h>  // for SSE2 intrinsics (__m128i, _mm_cmple_epi8, etc.)
 #include "pulsar.h"
 
-/* ------------------------------------------------------------------
- * Request-line layout constants.
- * ------------------------------------------------------------------ */
-
 /** Minimum bytes required for the smallest valid request line, "GET / HTTP/1.1\r\n". */
 #define MIN_REQUEST_LINE_LEN 16u
 
