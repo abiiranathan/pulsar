@@ -1,6 +1,15 @@
 #ifndef __PULSAR_TYPES_H__
 #define __PULSAR_TYPES_H__
 
+/* types.h is an internal header. PulsarConn, request_t and response_t are
+ * deliberately opaque to users: exposing their concrete layout would let user
+ * code bind to internal state that is free to change between releases. Including
+ * this header directly (instead of through <pulsar.h>) would defeat that, so
+ * reject it the same way the standard library rejects private sub-headers. */
+#if !defined(PULSAR_H)
+#error "types.h is internal to Pulsar and cannot be included directly; include <pulsar.h> instead."
+#endif
+
 #define _FILE_OFFSET_BITS 64
 
 #include <arpa/inet.h>
