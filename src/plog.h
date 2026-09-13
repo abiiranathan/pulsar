@@ -106,31 +106,61 @@ typedef struct {
 } PlogEvent;
 
 /* -------------------------------------------------------------------------
- * SPSC Shard (Zero False-Sharing Layout)
+ * Lock-free MPMC Shard (Zero False-Sharing Layout)
+ *
+ * A shard may be fed by more than one producer thread (plog_submit assigns
+ * shards round-robin, so a burst of threads can collide on one shard). A
+ * single shared prod_seq is unsafe under that mapping: two producers can
+ * load the same position and store prod+1 out of order, moving prod_seq
+ * backwards and making the backpressure check (prod - cons) underflow into
+ * an unbounded spin.
+ *
+ * Instead the ring is a bounded MPMC queue (Vyukov): producers reserve
+ * unique positions with fetch_add, and a per-slot sequence number tells a
+ * producer when its slot is writable and the consumer when it is readable.
  * ---------------------------------------------------------------------- */
 
 typedef struct {
-    /* Producer cache line: written exclusively by worker thread */
-    alignas(64) _Atomic uint64_t prod_seq;
-    uint64_t cached_cons; /* Local copy: avoids reading cons_seq across cores */
+    /* Producer reservation counter: fetch_add gives every producer a unique
+     * position, even when several producer threads share this shard. */
+    alignas(64) _Atomic uint64_t enqueue_pos;
 
-    /* Consumer cache line: written exclusively by drain thread */
-    alignas(64) _Atomic uint64_t cons_seq;
+    /* Consumer position: advanced only by the drain thread. */
+    alignas(64) _Atomic uint64_t dequeue_pos;
 
     /* Metrics */
     alignas(64) _Atomic uint64_t drops;
 
-    /* SPSC Ring buffer */
+    /* Per-slot sequence numbers. Slot i is writable for the producer that
+     * reserved position p (p & mask == i) when seq[i] == p, and readable by
+     * the consumer at position q when seq[i] == q + 1. */
+    alignas(64) _Atomic uint64_t seq[PLOG_SHARD_CAPACITY];
+
+    /* Ring buffer of events. */
     alignas(64) PlogEvent ring[PLOG_SHARD_CAPACITY];
 } PlogShard;
 
+typedef struct PlogState PlogState;
+
+/* Per-drain-thread context. One drain thread is started per shard so
+ * formatting (the real cost) scales with cores instead of being capped by a
+ * single consumer. */
 typedef struct {
+    PlogState* lg;
+    PlogShard* shard;
+} PlogDrainCtx;
+
+struct PlogState {
     PlogShard* shards[PLOG_NUM_SHARDS];
     _Atomic uint32_t shard_allocator;
     _Atomic bool drain_running;
-    Thread thread_handle;
+    Thread thread_handles[PLOG_NUM_SHARDS];
+    /* Serializes the (infrequent, 16 KB-batched) writes from the per-shard
+     * drain threads to the shared out_fd. Formatting happens outside it. */
+    pthread_mutex_t write_lock;
     int out_fd;
-} PlogState;
+    PlogDrainCtx ctx[PLOG_NUM_SHARDS];
+};
 
 /* -------------------------------------------------------------------------
  * Ultra-Fast Direct Serialization (~15ns vs ~1500ns in snprintf)
@@ -313,50 +343,67 @@ static inline void plog__cpu_relax(void) {
  * Background Drain Thread
  * ---------------------------------------------------------------------- */
 
+/* Write a formatted batch to the shared out_fd. Only the actual write is
+ * serialized across the per-shard drain threads; formatting (the dominant
+ * cost) runs concurrently. */
+static inline void plog__locked_write_all(PlogState* lg, const char* buf, size_t count) {
+    pthread_mutex_lock(&lg->write_lock);
+    plog__write_all(lg->out_fd, buf, count);
+    pthread_mutex_unlock(&lg->write_lock);
+}
+
+/* Move every currently-published event out of one shard into write_buf,
+ * flushing full batches. Returns true if it formatted at least one event. */
+static inline bool plog__drain_shard(PlogState* lg, PlogShard* s, char* write_buf,
+                                     size_t* buf_pos) {
+    bool had_work = false;
+
+    for (;;) {
+        uint64_t q = atomic_load_explicit(&s->dequeue_pos, memory_order_relaxed);
+        uint64_t idx = q & (PLOG_SHARD_CAPACITY - 1);
+
+        /* Slot is only readable once the producer that reserved position q
+         * has published it (seq == q + 1). */
+        if (atomic_load_explicit(&s->seq[idx], memory_order_acquire) != q + 1) break;
+
+        had_work = true;
+        *buf_pos += plog__format_line(write_buf + *buf_pos, &s->ring[idx]);
+
+        if (*buf_pos >= PLOG_WRITE_BUF - 512) {
+            plog__locked_write_all(lg, write_buf, *buf_pos);
+            *buf_pos = 0;
+        }
+
+        /* Free the slot for the producer at position q+capacity, then
+         * publish the new dequeue position. */
+        atomic_store_explicit(&s->seq[idx], q + PLOG_SHARD_CAPACITY, memory_order_release);
+        atomic_store_explicit(&s->dequeue_pos, q + 1, memory_order_release);
+    }
+
+    return had_work;
+}
+
 static void* plog__drain_thread(void* arg) {
-    PlogState* lg = (PlogState*)arg;
+    PlogDrainCtx* ctx = (PlogDrainCtx*)arg;
+    PlogState* lg = ctx->lg;
+    PlogShard* s = ctx->shard;
     char write_buf[PLOG_WRITE_BUF];
     size_t buf_pos = 0;
 
     /* Progressive idle backoff state. idle_cycles counts consecutive
-     * iterations with no work across all shards; it only resets when work
-     * is found. This replaces a fixed spin-then-100us-sleep cycle (which
-     * repeated forever and kept the thread mostly spinning) with a real
-     * escalation: spin briefly, then sleep for increasingly longer
-     * intervals up to PLOG_IDLE_SLEEP_MAX_NS while traffic stays idle. */
+     * iterations with no work on this shard; it only resets when work is
+     * found. Spin briefly, then sleep for increasingly longer intervals up
+     * to PLOG_IDLE_SLEEP_MAX_NS while traffic stays idle, so idle shards do
+     * not peg a core. */
     uint64_t idle_cycles = 0;
     long sleep_ns = PLOG_IDLE_SLEEP_MIN_NS;
 
     while (atomic_load_explicit(&lg->drain_running, memory_order_relaxed)) {
-        bool had_work = false;
-
-        for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
-            PlogShard* s = lg->shards[i];
-
-            uint64_t cons = atomic_load_explicit(&s->cons_seq, memory_order_relaxed);
-            uint64_t prod = atomic_load_explicit(&s->prod_seq, memory_order_acquire);
-
-            if (cons == prod) continue;
-            had_work = true;
-
-            while (cons < prod) {
-                const PlogEvent* ev = &s->ring[cons & (PLOG_SHARD_CAPACITY - 1)];
-
-                buf_pos += plog__format_line(write_buf + buf_pos, ev);
-                cons++;
-
-                if (buf_pos >= sizeof(write_buf) - 512) {
-                    plog__write_all(lg->out_fd, write_buf, buf_pos);
-                    buf_pos = 0;
-                }
-            }
-
-            atomic_store_explicit(&s->cons_seq, cons, memory_order_release);
-        }
+        bool had_work = plog__drain_shard(lg, s, write_buf, &buf_pos);
 
         if (!had_work) {
             if (buf_pos > 0) {
-                plog__write_all(lg->out_fd, write_buf, buf_pos);
+                plog__locked_write_all(lg, write_buf, buf_pos);
                 buf_pos = 0;
             }
 
@@ -383,27 +430,10 @@ static void* plog__drain_thread(void* arg) {
         }
     }
 
-    /* Shutdown Flush */
-    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
-        PlogShard* s = lg->shards[i];
-        uint64_t cons = atomic_load_explicit(&s->cons_seq, memory_order_relaxed);
-        uint64_t prod = atomic_load_explicit(&s->prod_seq, memory_order_acquire);
-
-        while (cons < prod) {
-            const PlogEvent* ev = &s->ring[cons & (PLOG_SHARD_CAPACITY - 1)];
-            buf_pos += plog__format_line(write_buf + buf_pos, ev);
-            cons++;
-
-            if (buf_pos >= sizeof(write_buf) - 512) {
-                plog__write_all(lg->out_fd, write_buf, buf_pos);
-                buf_pos = 0;
-            }
-        }
-        atomic_store_explicit(&s->cons_seq, cons, memory_order_release);
-    }
-
+    /* Shutdown flush: drain whatever remains published on this shard. */
+    plog__drain_shard(lg, s, write_buf, &buf_pos);
     if (buf_pos > 0) {
-        plog__write_all(lg->out_fd, write_buf, buf_pos);
+        plog__locked_write_all(lg, write_buf, buf_pos);
     }
 
     return NULL;
@@ -419,58 +449,108 @@ static inline bool plog_init(PlogState* lg, int out_fd) {
     atomic_store_explicit(&lg->shard_allocator, 0, memory_order_relaxed);
     atomic_store_explicit(&lg->drain_running, true, memory_order_release);
 
+    if (pthread_mutex_init(&lg->write_lock, NULL) != 0) {
+        return false;
+    }
+
     for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
         void* ptr = NULL;
         if (posix_memalign(&ptr, 64, sizeof(PlogShard)) != 0 || !ptr) {
             for (size_t j = 0; j < i; j++) free(lg->shards[j]);
+            pthread_mutex_destroy(&lg->write_lock);
             return false;
         }
         memset(ptr, 0, sizeof(PlogShard));
-        lg->shards[i] = (PlogShard*)ptr;
+
+        /* A freshly created ring is empty: slot k is free for the producer
+         * that reserves position k, which is exactly seq[k] == k. */
+        PlogShard* s = (PlogShard*)ptr;
+        for (size_t k = 0; k < PLOG_SHARD_CAPACITY; k++) {
+            atomic_store_explicit(&s->seq[k], (uint64_t)k, memory_order_relaxed);
+        }
+        lg->shards[i] = s;
     }
 
-    if (thread_create(&lg->thread_handle, plog__drain_thread, lg) != 0) {
-        for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) free(lg->shards[i]);
-        return false;
+    /* One drain thread per shard: formatting scales with cores instead of
+     * being capped by a single consumer. */
+    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+        lg->ctx[i].lg = lg;
+        lg->ctx[i].shard = lg->shards[i];
+        if (thread_create(&lg->thread_handles[i], plog__drain_thread, &lg->ctx[i]) != 0) {
+            /* Stop and reap the threads that did start, then release. */
+            atomic_store_explicit(&lg->drain_running, false, memory_order_release);
+            for (size_t j = 0; j < i; j++) {
+                thread_join(lg->thread_handles[j], NULL);
+            }
+            for (size_t j = 0; j < PLOG_NUM_SHARDS; j++) free(lg->shards[j]);
+            pthread_mutex_destroy(&lg->write_lock);
+            return false;
+        }
     }
     return true;
 }
 
 static inline void plog__submit_shard(PlogShard* s, const PlogEvent* ev) {
-    uint64_t prod = atomic_load_explicit(&s->prod_seq, memory_order_relaxed);
+    const uint64_t mask = PLOG_SHARD_CAPACITY - 1;
 
-    /* Backpressure check */
-    if (__builtin_expect((prod - s->cached_cons) >= (uint64_t)PLOG_SHARD_CAPACITY, 0)) {
-        s->cached_cons = atomic_load_explicit(&s->cons_seq, memory_order_acquire);
-
-        /* Bounded spin count before falling back to sleeping. This keeps
-         * the fast path (drain thread catching up quickly) low-latency
-         * while ensuring a stalled or dead drain thread cannot pin this
-         * worker thread at 100% CPU forever. */
-        unsigned spins = 0;
-
-        while ((prod - s->cached_cons) >= (uint64_t)PLOG_SHARD_CAPACITY) {
 #if PLOG_LOSSLESS
-            /* Security/lossless mode: never drop audit events. Spin briefly,
-             * then sleep in short increments while waiting for the drain
-             * thread to free up ring slots. */
+    /* Reserve a unique position. fetch_add is what makes the ring safe with
+     * multiple producers: two threads can never reserve the same slot, so
+     * no producer can observe another's position counter go backwards. */
+    uint64_t pos = atomic_fetch_add_explicit(&s->enqueue_pos, 1, memory_order_relaxed);
+    uint64_t idx = pos & mask;
+
+    /* Wait until the consumer has freed this slot (seq == pos). Producers
+     * can run up to a full ring ahead, so this is the lossless backpressure
+     * path: bounded spin, then short sleeps so a stalled drain thread
+     * cannot pin a worker at 100% CPU indefinitely. */
+    uint64_t seq = atomic_load_explicit(&s->seq[idx], memory_order_acquire);
+    if (__builtin_expect(seq != pos, 0)) {
+        unsigned spins = 0;
+        while (seq != pos) {
             if (spins < PLOG_BACKPRESSURE_SPIN_LIMIT) {
                 plog__cpu_relax();
                 spins++;
             } else {
                 plog__backoff_sleep(PLOG_BACKPRESSURE_SLEEP_NS);
             }
-            s->cached_cons = atomic_load_explicit(&s->cons_seq, memory_order_acquire);
-#else
-            /* Lossy fallback */
-            atomic_fetch_add_explicit(&s->drops, 1, memory_order_relaxed);
-            return;
-#endif
+            seq = atomic_load_explicit(&s->seq[idx], memory_order_acquire);
         }
     }
+#else
+    /* Lossy: reserve only while the ring has space, otherwise drop. The
+     * CAS (rather than a bare fetch_add) is what lets a dropped submit
+     * return without leaving an unpublished hole in the sequence, which
+     * would stall the consumer forever. */
+    uint64_t pos;
+    for (;;) {
+        uint64_t cur = atomic_load_explicit(&s->enqueue_pos, memory_order_relaxed);
+        uint64_t dq = atomic_load_explicit(&s->dequeue_pos, memory_order_acquire);
 
-    s->ring[prod & (PLOG_SHARD_CAPACITY - 1)] = *ev;
-    atomic_store_explicit(&s->prod_seq, prod + 1, memory_order_release);
+        if (__builtin_expect(cur - dq >= (uint64_t)PLOG_SHARD_CAPACITY, 0)) {
+            atomic_fetch_add_explicit(&s->drops, 1, memory_order_relaxed);
+            return;
+        }
+        if (atomic_compare_exchange_weak_explicit(&s->enqueue_pos, &cur, cur + 1,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+            pos = cur;
+            break;
+        }
+    }
+    uint64_t idx = pos & mask;
+
+    /* The slot is already free (cur - dequeue < capacity), but a racing
+     * producer may have reserved an earlier position whose consumer has
+     * strictly less progress than us; wait for ours to be published. */
+    uint64_t seq = atomic_load_explicit(&s->seq[idx], memory_order_acquire);
+    while (seq != pos) {
+        plog__cpu_relax();
+        seq = atomic_load_explicit(&s->seq[idx], memory_order_acquire);
+    }
+#endif
+
+    s->ring[idx] = *ev;
+    atomic_store_explicit(&s->seq[idx], pos + 1, memory_order_release);
 }
 
 /**
@@ -497,13 +577,16 @@ static inline void plog_submit_worker(PlogState* lg, int worker_id, const PlogEv
 
 static inline void plog_destroy(PlogState* lg) {
     atomic_store_explicit(&lg->drain_running, false, memory_order_release);
-    thread_join(lg->thread_handle, NULL);
+    for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
+        thread_join(lg->thread_handles[i], NULL);
+    }
     for (size_t i = 0; i < PLOG_NUM_SHARDS; i++) {
         if (lg->shards[i]) {
             free(lg->shards[i]);
             lg->shards[i] = NULL;
         }
     }
+    pthread_mutex_destroy(&lg->write_lock);
 }
 
 static inline uint64_t plog_drop_count(const PlogState* lg) {

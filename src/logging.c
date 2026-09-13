@@ -17,7 +17,14 @@ bool pulsar_set_callback(PulsarCallback cb, int fd) {
     }
     LOGGER_CALLBACK = cb;
     LOG_FD = fd;
-    return plog_init(&PLOG_STATE, LOG_FD);
+    bool ok = plog_init(&PLOG_STATE, LOG_FD);
+    if (!ok) {
+        /* plog_init released whatever it created; make sure the destructor
+         * does not run plog_destroy() on a partially-initialized state. */
+        LOGGER_CALLBACK = NULL;
+        LOG_FD = -1;
+    }
+    return ok;
 #else
     (void)cb;
     (void)fd;

@@ -116,7 +116,16 @@ static void* producer_thread(void* arg) {
     }
 
     uint32_t iter = 0;
-    PlogEvent ev;
+
+    /* Pre-build a small pool of representative events so the measured loop
+     * does not pay for snprintf()/memset() per iteration — those would
+     * dominate the loop and make plog_submit() throughput look far worse
+     * than it is. The loop only copies one of these into the ring. */
+    enum { BENCH_EVENT_POOL = 16 };
+    PlogEvent samples[BENCH_EVENT_POOL];
+    for (int k = 0; k < BENCH_EVENT_POOL; k++) {
+        make_sample_event(&samples[k], (uint32_t)k);
+    }
 
     /* Every call counts toward throughput regardless of whether it is
      * timed; only a sampled subset is timestamped, since clock_gettime()
@@ -128,15 +137,15 @@ static void* producer_thread(void* arg) {
     uint64_t total_submitted = 0;
 
     while (!atomic_load_explicit(&cfg->stop_flag, memory_order_relaxed)) {
-        make_sample_event(&ev, iter++);
+        const PlogEvent* ev = &samples[iter++ & (BENCH_EVENT_POOL - 1)];
 
         if (iter % SAMPLE_STRIDE_REPORT == 0 && res->count < res->capacity) {
             uint64_t t0 = now_ns();
-            plog_submit(cfg->logger, &ev);
+            plog_submit(cfg->logger, ev);
             uint64_t t1 = now_ns();
             res->latencies_ns[res->count++] = t1 - t0;
         } else {
-            plog_submit(cfg->logger, &ev);
+            plog_submit(cfg->logger, ev);
         }
         total_submitted++;
         /* Latency recording stops once res->capacity sampled entries are
