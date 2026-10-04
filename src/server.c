@@ -397,116 +397,24 @@ INLINE http_status process_request(PulsarConn* conn, const char* buf, size_t rea
 }
 
 /* ================================================================
- * Socket Setup
+ * Socket Setup (delegated to the standalone tcp package)
+ *
+ * pulsar keeps only its server policy here: one SO_REUSEPORT listener per
+ * worker, low-latency accept tuning, and fail-fast startup. The descriptor
+ * mechanics live in tcp_socket.c so the same primitives can back a client.
  * ================================================================ */
-INLINE void set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        perror("fcntl F_GETFL");
-        exit(EXIT_FAILURE);
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
-        perror("fcntl F_SETFL");
-        exit(EXIT_FAILURE);
-    }
-}
 
-static int create_server_socket(const char* host, int port, int worker_cpu_id) {
-    if (port <= 0 || port > 65535) {
-        fprintf(stderr, "Invalid port: %d\n", port);
-        exit(EXIT_FAILURE);
-    }
+static int pulsar_listen(const char* host, int port, int worker_cpu_id) {
+    tcp_listen_opts_t opts = tcp_listen_opts_default();
+    opts.reuse_addr = 1;
+    opts.reuse_port = 1;   /* one listener per worker, kernel load-balances */
+    opts.keepalive = 1;
+    opts.defer_accept = 1; /* do not wake epoll until a request arrives */
+    opts.fastopen_qlen = 1024;
+    opts.incoming_cpu = worker_cpu_id;
+    opts.ipv6_only = 0; /* dual-stack when bound to an IPv6 address */
 
-    struct addrinfo hints = {
-        .ai_family = AF_UNSPEC,
-        .ai_socktype = SOCK_STREAM,
-        .ai_flags = AI_PASSIVE,
-    };
-    struct addrinfo *result, *rp;
-    char port_str[6];
-    snprintf(port_str, sizeof(port_str), "%d", port);
-
-    int ret = getaddrinfo(host, port_str, &hints, &result);
-    if (ret != 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ret));
-        exit(EXIT_FAILURE);
-    }
-
-    int fd = -1;
-    const int opt = 1;
-
-    for (rp = result; rp; rp = rp->ai_next) {
-        // Create non-blocking and close-on-exec atomically (zero fcntl syscalls)
-        fd = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, rp->ai_protocol);
-        if (fd == -1) continue;
-
-        // Separate calls for REUSEADDR and REUSEPORT
-        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0 ||
-            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-            sys_close_direct(fd);
-            fd = -1;
-            continue;
-        }
-
-#ifdef IPV6_V6ONLY
-        if (rp->ai_family == AF_INET6) {
-            int no = 0;
-            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no));
-        }
-#endif
-
-        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
-
-        sys_close_direct(fd);
-        fd = -1;
-    }
-    freeaddrinfo(result);
-
-    if (fd == -1) {
-        fprintf(stderr, "Could not bind to %s:%d\n", host ? host : "*", port);
-        exit(EXIT_FAILURE);
-    }
-
-    // Keepalive on listener
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
-
-    // TCP_DEFER_ACCEPT: Do not wake up epoll until HTTP request data arrives!
-    int defer = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof(defer));
-
-    // TCP_FASTOPEN: Accept data in the SYN packet
-    int fastopen_qlen = 1024;
-    setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &fastopen_qlen, sizeof(fastopen_qlen));
-
-    // Bind kernel packet processing directly to this worker's CPU core
-    if (worker_cpu_id >= 0) {
-        int cpu = worker_cpu_id;
-        setsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, sizeof(cpu));
-    }
-
-    // Maximum backlog.
-    if (listen(fd, 65535) < 0) {
-        perror("listen");
-        sys_close_direct(fd);
-        exit(EXIT_FAILURE);
-    }
-    return fd;
-}
-
-INLINE int conn_accept(int listen_fd) {
-    // Pass NULL, NULL so the kernel skips copying peer address structures.
-    // Set both SOCK_NONBLOCK and SOCK_CLOEXEC atomically.
-    int client_fd = raw_accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
-    if (unlikely(client_fd < 0)) {
-        return -1;
-    }
-
-    // The ONLY socket option that matters for HTTP performance:
-    // Disables Nagle's algorithm so small HTTP responses flush immediately.
-    const int yes = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
-
-    return client_fd;
+    return tcp_listen(host, port, &opts);
 }
 
 static void add_connection_to_worker(event_queue_t* queue, int client_fd, int worker_id,
@@ -944,7 +852,7 @@ void* worker_thread(void* arg) {
 
             if (unlikely(conn == NULL)) {
                 int client_fd;
-                while ((client_fd = conn_accept(listen_fd)) > 0) {
+                while ((client_fd = tcp_accept(listen_fd, NULL, 0)) > 0) {
                     add_connection_to_worker(queue, client_fd, worker_id, ka_state);
                 }
             } else {
@@ -975,12 +883,12 @@ void* worker_thread(void* arg) {
  * ================================================================ */
 int pulsar_run(const char* addr, int port) {
     for (int i = 0; i < NUM_WORKERS; i++) {
-        worker_listen_fds[i] = create_server_socket(addr, port, i);
+        worker_listen_fds[i] = pulsar_listen(addr, port, i);
         if (worker_listen_fds[i] < 0) {
-            fprintf(stderr, "create_server_socket %d failed\n", i);
+            fprintf(stderr, "pulsar_listen failed for worker %d (%s:%d)\n", i,
+                    addr ? addr : "*", port);
             exit(EXIT_FAILURE);
         }
-        set_nonblocking(worker_listen_fds[i]);
     }
 
     install_signal_handler();

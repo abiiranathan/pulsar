@@ -1,5 +1,5 @@
-#ifndef PULSAR_SYSCALL_H
-#define PULSAR_SYSCALL_H
+#ifndef TCP_SYSCALL_H
+#define TCP_SYSCALL_H
 
 #include <errno.h>
 #include <fcntl.h>
@@ -19,17 +19,17 @@
 
 /**
  * ============================================================================
- * PULSAR ZERO-OVERHEAD RAW SYSCALL SUBSYSTEM
+ * TCP ZERO-OVERHEAD RAW SYSCALL SUBSYSTEM
  * ============================================================================
  *
- * @file pulsar_syscall.h
+ * @file tcp_syscall.h
  * @brief Direct Linux x86-64 kernel syscall wrappers bypassing Glibc
  *        cancellation points and thread-local storage overhead.
  *
  * Scope: Linux, x86-64, kernel >= 6.0 only. This header assumes _GNU_SOURCE
  * is defined by the build (see CMakeLists.txt) so accept4() and friends are
  * visible from <sys/socket.h>. There is no portability fallback for other
- * OSes or architectures — pulsar does not target them.
+ * OSes or architectures — the tcp package targets Linux/x86-64 only.
  *
  * ----------------------------------------------------------------------------
  * 1. THE PROBLEM WITH STANDARD GLIBC WRAPPERS
@@ -114,9 +114,9 @@
  * memory passed to read/recv/write/send. ASan builds fall back to the
  * equivalent Glibc call so buffer instrumentation still works. */
 #if defined(__SANITIZE_ADDRESS__)
-#define PULSAR_FAST_SYSCALLS 0
+#define TCP_FAST_SYSCALLS 0
 #else
-#define PULSAR_FAST_SYSCALLS 1
+#define TCP_FAST_SYSCALLS 1
 #endif
 
 /* ============================================================================
@@ -132,7 +132,7 @@
  * @return Number of bytes written on success, or -1 on error (errno set).
  */
 INLINE ssize_t raw_write(int fd, const void* buf, size_t count) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -157,7 +157,7 @@ INLINE ssize_t raw_write(int fd, const void* buf, size_t count) {
  * @return Number of bytes read on success, 0 on EOF, or -1 on error (errno set).
  */
 INLINE ssize_t raw_read(int fd, void* buf, size_t count) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -180,7 +180,7 @@ INLINE ssize_t raw_read(int fd, void* buf, size_t count) {
  * @return 0 on success, or -1 on error (errno set).
  */
 INLINE int raw_close(int fd) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -206,7 +206,7 @@ INLINE int raw_close(int fd) {
  * @return Number of bytes received on success, 0 on EOF, or -1 on error (errno set).
  */
 INLINE ssize_t raw_recv(int fd, void* buf, size_t len, int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = flags;
     register long r8 __asm__("r8") = 0; /* src_addr = NULL */
@@ -239,7 +239,7 @@ INLINE ssize_t raw_recv(int fd, void* buf, size_t len, int flags) {
  *       closed its end of the connection.
  */
 INLINE ssize_t raw_send(int fd, const void* buf, size_t len, int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = flags;
     register long r8 __asm__("r8") = 0; /* dest_addr = NULL */
@@ -269,7 +269,7 @@ INLINE ssize_t raw_send(int fd, const void* buf, size_t len, int flags) {
  * @return Accepted client fd on success, or -1 on error (errno set).
  */
 INLINE int raw_accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = flags;
     __asm__ volatile("syscall"
@@ -315,7 +315,7 @@ INLINE int raw_accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, in
  *         or -1 on error (errno set).
  */
 INLINE int raw_epoll_create(int size) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -338,7 +338,7 @@ INLINE int raw_epoll_create(int size) {
  * @return Epoll fd on success, or -1 on error (errno set).
  */
 INLINE int raw_epoll_create1(int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -366,7 +366,7 @@ INLINE int raw_epoll_create1(int flags) {
  *         registered, EEXIST if ADD duplicates).
  */
 INLINE int raw_epoll_ctl(int epfd, int op, int fd, struct epoll_event* event) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = (long)event;
     __asm__ volatile("syscall"
@@ -400,7 +400,7 @@ INLINE int raw_epoll_ctl(int epfd, int op, int fd, struct epoll_event* event) {
  *         EINTR when a signal arrived before any event).
  */
 INLINE int raw_epoll_wait(int epfd, struct epoll_event* events, int maxevents, int timeout) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = timeout;
     __asm__ volatile("syscall"
@@ -435,7 +435,7 @@ INLINE int raw_epoll_wait(int epfd, struct epoll_event* events, int maxevents, i
  */
 INLINE int raw_epoll_pwait(int epfd, struct epoll_event* events, int maxevents, int timeout,
                            const sigset_t* sigmask) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = timeout;
     register long r8 __asm__("r8") = (long)sigmask;
@@ -473,7 +473,7 @@ INLINE int raw_epoll_pwait(int epfd, struct epoll_event* events, int maxevents, 
  */
 INLINE int raw_epoll_pwait2(int epfd, struct epoll_event* events, int maxevents,
                             const struct timespec* timeout, const sigset_t* sigmask) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = (long)timeout;
     register long r8 __asm__("r8") = (long)sigmask;
@@ -507,7 +507,7 @@ INLINE int raw_epoll_pwait2(int epfd, struct epoll_event* events, int maxevents,
  * @return >= 0: epoll fd. < 0: negative error number (e.g. -EMFILE, -EINVAL).
  */
 INLINE int sys_epoll_create1_direct(int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -525,7 +525,7 @@ INLINE int sys_epoll_create1_direct(int flags) {
  * @return >= 0: epoll fd. < 0: negative error number.
  */
 INLINE int sys_epoll_create_direct(int size) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -543,7 +543,7 @@ INLINE int sys_epoll_create_direct(int size) {
  * @return 0: success. < 0: negative error number (e.g. -ENOENT, -EEXIST).
  */
 INLINE int sys_epoll_ctl_direct(int epfd, int op, int fd, struct epoll_event* event) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = (long)event;
     __asm__ volatile("syscall"
@@ -562,7 +562,7 @@ INLINE int sys_epoll_ctl_direct(int epfd, int op, int fd, struct epoll_event* ev
  * @return >= 0: ready count. < 0: negative error number (e.g. -EINTR, -EBADF).
  */
 INLINE int sys_epoll_wait_direct(int epfd, struct epoll_event* events, int maxevents, int timeout) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = timeout;
     __asm__ volatile("syscall"
@@ -582,7 +582,7 @@ INLINE int sys_epoll_wait_direct(int epfd, struct epoll_event* events, int maxev
  */
 INLINE int sys_epoll_pwait_direct(int epfd, struct epoll_event* events, int maxevents, int timeout,
                                   const sigset_t* sigmask) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = timeout;
     register long r8 __asm__("r8") = (long)sigmask;
@@ -605,7 +605,7 @@ INLINE int sys_epoll_pwait_direct(int epfd, struct epoll_event* events, int maxe
  */
 INLINE int sys_epoll_pwait2_direct(int epfd, struct epoll_event* events, int maxevents,
                                    const struct timespec* timeout, const sigset_t* sigmask) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = (long)timeout;
     register long r8 __asm__("r8") = (long)sigmask;
@@ -633,7 +633,7 @@ INLINE int sys_epoll_pwait2_direct(int epfd, struct epoll_event* events, int max
  *         < 0:  negative error number (e.g. -EAGAIN, -EPIPE, -EBADF).
  */
 INLINE ssize_t sys_write_direct(int fd, const void* buf, size_t count) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -659,7 +659,7 @@ INLINE ssize_t sys_write_direct(int fd, const void* buf, size_t count) {
  *         < 0:  negative error number (e.g. -EAGAIN, -EPIPE).
  */
 INLINE ssize_t sys_writev_direct(int fd, const struct iovec* iov, int iovcnt) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -680,7 +680,7 @@ INLINE ssize_t sys_writev_direct(int fd, const struct iovec* iov, int iovcnt) {
  *         < 0:  negative error number (e.g. -EAGAIN, -ECONNRESET).
  */
 INLINE ssize_t sys_read_direct(int fd, void* buf, size_t count) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -700,7 +700,7 @@ INLINE ssize_t sys_read_direct(int fd, void* buf, size_t count) {
  *         < 0: negative error number (e.g. -EBADF, -EIO).
  */
 INLINE int sys_close_direct(int fd) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
@@ -723,7 +723,7 @@ INLINE int sys_close_direct(int fd) {
  *       closed its end of the connection.
  */
 INLINE ssize_t sys_send_direct(int fd, const void* buf, size_t len, int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = flags;
     register long r8 __asm__("r8") = 0;
@@ -748,7 +748,7 @@ INLINE ssize_t sys_send_direct(int fd, const void* buf, size_t len, int flags) {
  *         < 0:  negative error number (e.g. -EAGAIN, -ECONNRESET).
  */
 INLINE ssize_t sys_recv_direct(int fd, void* buf, size_t len, int flags) {
-#if PULSAR_FAST_SYSCALLS
+#if TCP_FAST_SYSCALLS
     long ret;
     register long r10 __asm__("r10") = flags;
     register long r8 __asm__("r8") = 0;
@@ -765,4 +765,72 @@ INLINE ssize_t sys_recv_direct(int fd, void* buf, size_t len, int flags) {
 #endif
 }
 
-#endif /* PULSAR_SYSCALL_H */
+/**
+ * @brief Raw non-cancelling connect(2) syscall.
+ *
+ * @param sockfd Socket file descriptor.
+ * @param addr   Peer address.
+ * @param addrlen Size of @p addr.
+ * @return 0 on success, or -1 on error (errno set; a non-blocking socket
+ *         returns EINPROGRESS while the handshake is in flight).
+ */
+INLINE int raw_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
+#if TCP_FAST_SYSCALLS
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"((long)SYS_connect), "D"(sockfd), "S"(addr), "d"(addrlen)
+                     : "rcx", "r11", "memory");
+    if (unlikely((unsigned long)ret >= (unsigned long)-4095)) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (int)ret;
+#else
+    return connect(sockfd, addr, addrlen);
+#endif
+}
+
+/**
+ * @brief Direct kernel connect(2) returning -errno on failure.
+ *
+ * @return 0 on success, < 0 negative error number (e.g. -EINPROGRESS for a
+ *         non-blocking socket whose handshake is still in flight).
+ */
+INLINE int sys_connect_direct(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
+#if TCP_FAST_SYSCALLS
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"((long)SYS_connect), "D"(sockfd), "S"(addr), "d"(addrlen)
+                     : "rcx", "r11", "memory");
+    return (int)ret;
+#else
+    int r = connect(sockfd, addr, addrlen);
+    return (r < 0) ? -errno : 0;
+#endif
+}
+
+/**
+ * @brief Raw non-cancelling bind(2) syscall.
+ *
+ * @return 0 on success, or -1 on error (errno set).
+ */
+INLINE int raw_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
+#if TCP_FAST_SYSCALLS
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"((long)SYS_bind), "D"(sockfd), "S"(addr), "d"(addrlen)
+                     : "rcx", "r11", "memory");
+    if (unlikely((unsigned long)ret >= (unsigned long)-4095)) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (int)ret;
+#else
+    return bind(sockfd, addr, addrlen);
+#endif
+}
+
+#endif /* TCP_SYSCALL_H */

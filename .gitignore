@@ -1,5 +1,6 @@
 a.out
 /server
+build/
 test_output
 forms_test
 *.so*

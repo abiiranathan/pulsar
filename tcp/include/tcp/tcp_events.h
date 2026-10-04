@@ -1,13 +1,13 @@
 /**
- * @file events.h
+ * @file tcp_events.h
  * @brief Thin Linux epoll event-loop wrapper over raw syscalls (no libc).
  *
- * This header is the sole event backend for pulsar. It talks to the kernel
- * exclusively through the zero-overhead traps in pulsar_syscall.h
- * (raw_epoll_create1 / raw_epoll_ctl / raw_epoll_wait), so no call here is
- * a pthread cancellation point and no call touches thread-local `errno`
- * storage on the fast path beyond the single write the POSIX-compatible
- * wrappers perform on failure.
+ * This header is the event backend for the tcp package and for pulsar. It
+ * talks to the kernel exclusively through the zero-overhead traps in
+ * tcp_syscall.h (raw_epoll_create1 / raw_epoll_ctl / raw_epoll_wait), so no
+ * call here is a pthread cancellation point and no call touches thread-local
+ * `errno` storage on the fast path beyond the single write the
+ * POSIX-compatible wrappers perform on failure.
  *
  * ----------------------------------------------------------------------------
  * DESIGN
@@ -42,7 +42,7 @@
  * All registrations use EPOLLET. Events fire only on state *transitions*,
  * so after any readable/writable notification the fd MUST be drained
  * (read/write until -EAGAIN) before returning to the loop, or readiness
- * will be lost. pulsar's handle_read/handle_write already obey this.
+ * will be lost. the tcp connection read/write paths already obey this.
  *
  * HUP coalescing: the kernel may report EPOLLRDHUP without EPOLLIN when the
  * last byte was already drained, and EPOLLHUP alone on a full hangup. The
@@ -59,16 +59,16 @@
  * ----------------------------------------------------------------------------
  * SCOPE
  * ----------------------------------------------------------------------------
- * Linux only, via pulsar_syscall.h (Linux/x86-64/kernel >= 6.0). There is no
- * portability fallback; pulsar does not target other platforms.
+ * Linux only, via tcp_syscall.h (Linux/x86-64/kernel >= 6.0). There is no
+ * portability fallback; the tcp package targets Linux/x86-64 only.
  *
- * Threading: one queue per event-loop thread (as pulsar_run() creates).
+ * Threading: one queue per event-loop thread.
  * Concurrent calls on the SAME queue from several threads are not safe;
  * concurrent calls on DIFFERENT queues are.
  */
 
-#ifndef PULSAR_EVENTS_H
-#define PULSAR_EVENTS_H
+#ifndef TCP_EVENTS_H
+#define TCP_EVENTS_H
 
 #include <errno.h>
 #include <stdbool.h>
@@ -77,7 +77,7 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 
-#include "pulsar_syscall.h"
+#include "tcp_syscall.h"
 
 /* ----------------------------------------------------------------
  * Opaque types
@@ -184,7 +184,7 @@ static inline int event_add_read(event_queue_t* queue, int fd, void* data) {
 /**
  * Registers the listening @p server_fd so only one thread is woken per
  * incoming connection (EPOLLEXCLUSIVE) where the kernel supports it — safe
- * because pulsar gives each worker its own listen fd via SO_REUSEPORT.
+ * because a caller may give each worker its own listen fd via SO_REUSEPORT.
  *
  * Unlike event_add_read(), re-registering an already-registered fd is not
  * done via EPOLL_CTL_MOD: the kernel permanently forbids EPOLL_CTL_MOD on
@@ -273,6 +273,27 @@ static inline int event_mod_read(event_queue_t* queue, int fd, void* data) {
     return raw_epoll_ctl(queue->epfd, EPOLL_CTL_MOD, fd, &ev);
 }
 
+/**
+ * ARM both directions at once.
+ *
+ * Used by full-duplex consumers that must keep draining reads while a pending
+ * write is in flight (output backpressure must not pause input). @p fd must
+ * already be registered; the kernel returns -1 with errno == ENOENT otherwise.
+ *
+ * @return 0 on success, -1 on failure (errno set).
+ */
+static inline int event_mod_readwrite(event_queue_t* queue, int fd, void* data) {
+    if (!queue || fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = (uint32_t)(EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET);
+    ev.data.ptr = data;
+    return raw_epoll_ctl(queue->epfd, EPOLL_CTL_MOD, fd, &ev);
+}
+
 /* ----------------------------------------------------------------
  * Waiting
  * ---------------------------------------------------------------- */
@@ -339,4 +360,4 @@ static inline bool event_is_error(const event_t* event) { return event && event-
  *  (a 0-byte read confirms EOF), then close. */
 static inline bool event_is_hup(const event_t* event) { return event && event->hup; }
 
-#endif /* PULSAR_EVENTS_H */
+#endif /* TCP_EVENTS_H */

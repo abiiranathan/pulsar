@@ -20,6 +20,33 @@ Pulsar is a high-performance web server library written in C, designed for build
 - Intuitive API for request/response life-cycle.
 - Customizable through the compiler build options.
 
+## Standalone TCP package
+
+Pulsar's transport layer is extracted into a small, dependency-free library
+under [`tcp/`](tcp/). It provides an edge-triggered epoll loop, a raw syscall
+layer, socket helpers and a generic non-blocking connection/client API, with
+no HTTP dependency. Pulsar itself consumes it, and the same package can be used
+to build high-performance TCP clients for any protocol.
+
+```c
+#include <tcp/tcp.h>
+
+tcp_client_t* cli = tcp_client_create(NULL);
+tcp_client_connect(cli, "example.com", 80, NULL, &my_callbacks);
+tcp_client_run(cli);
+tcp_client_destroy(cli);
+```
+
+See [`tcp/README.md`](tcp/README.md) for the full API and examples. It is built
+as part of the pulsar build and can also be built, tested and installed on its
+own:
+
+```bash
+cmake -S tcp -B tcp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build tcp/build --parallel
+ctest --test-dir tcp/build --output-on-failure
+```
+
 ## Benchmarks
 For a simple Hello World response, 90% of requests return within 2ms and 99% within 10ms.
 

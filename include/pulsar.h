@@ -7,12 +7,12 @@
 #include <time.h>
 
 #include "constants.h"
-#include "events.h"
 #include "locals.h"
 #include "routing.h"
 #include "status.h"
 #include "types.h"
 #include "url.h"
+#include <tcp/tcp_events.h>
 
 extern volatile sig_atomic_t server_running;
 

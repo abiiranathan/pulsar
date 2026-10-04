@@ -1,0 +1,12 @@
+# cmake/TcpConfig.cmake.in
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/TcpTargets.cmake")
+
+if(TARGET Tcp::tcp_static)
+    add_library(Tcp::tcp ALIAS Tcp::tcp_static)
+elseif(TARGET Tcp::tcp_shared)
+    add_library(Tcp::tcp ALIAS Tcp::tcp_shared)
+endif()
+
+check_required_components(Tcp)

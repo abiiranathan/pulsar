@@ -13,8 +13,11 @@ This project is optimized for Linux x86_64 and should preserve that assumption i
 - Routing and route metadata: `include/routing.h`
 - Header handling: `include/headers.h`
 - HTTP methods: `include/method.h`
-- Event loop / epoll integration: `include/events.h`
-- Direct syscall layer: `include/pulsar_syscall.h`
+- Standalone TCP transport package: `tcp/` (headers `tcp/include/tcp/*.h`, impl `tcp/src/*.c`)
+- Event loop / epoll integration: `tcp/include/tcp/tcp_events.h`
+- Direct syscall layer: `tcp/include/tcp/tcp_syscall.h`
+- Socket primitives (listen/accept/connect): `tcp/include/tcp/tcp_socket.h`
+- Generic connection + client loop: `tcp/include/tcp/tcp_connection.h`, `tcp/include/tcp/tcp_client.h`
 - Constants and tuning values: `include/constants.h`
 - Implementation: `src/*.c`
 - Benchmarks and profiling scripts: `scripts/*.sh`
@@ -26,7 +29,7 @@ This project is optimized for Linux x86_64 and should preserve that assumption i
 - `route_t` is defined in `include/routing.h`.
 - `headers_t` is defined in `include/headers.h`.
 - `HttpMethod` is defined in `include/method.h`.
-- `event_queue_t` and `event_t` live in `include/events.h`.
+- `event_queue_t` and `event_t` live in `tcp/include/tcp/tcp_events.h`.
 
 ## Performance requirements
 
@@ -73,7 +76,7 @@ Prefer zero-copy or near-zero-copy behavior wherever practical.
 
 When practical, prefer direct syscall access over libc convenience wrappers in performance-critical code.
 
-- Use the raw syscall layer in `include/pulsar_syscall.h` for Linux kernel interaction.
+- Use the raw syscall layer in `tcp/include/tcp/tcp_syscall.h` for Linux kernel interaction.
 - Prefer direct, minimal wrappers for event handling, I/O, and other hot-path primitives.
 - Keep syscall wrappers small, explicit, and easy to audit.
 - Do not layer extra error handling or logging on the fast path unless it is required and measured.

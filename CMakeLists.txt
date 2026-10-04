@@ -106,6 +106,12 @@ add_compile_options(
     -Wno-unused-result
 )
 
+# ------------------------------------------------------------------------------
+# TCP package (standalone, protocol-agnostic; consumed by pulsar)
+# ------------------------------------------------------------------------------
+
+add_subdirectory(tcp)
+
 set(PULSAR_SOURCES
     src/connection.c
     src/context.c
@@ -147,7 +153,7 @@ target_compile_options(pulsar_objects PRIVATE
     $<$<CONFIG:RelWithDebInfo>: ${PULSAR_RELEASE_OPTS} -g>
 )
 
-target_link_libraries(pulsar_objects PUBLIC solidc::solidc)
+target_link_libraries(pulsar_objects PUBLIC solidc::solidc tcp::tcp)
 
 # ------------------------------------------------------------------------------
 # Static library
@@ -161,7 +167,7 @@ if(BUILD_STATIC_LIBS)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     )
 
-    target_link_libraries(pulsar_static PUBLIC solidc::solidc)
+    target_link_libraries(pulsar_static PUBLIC solidc::solidc tcp::tcp)
 endif()
 
 # ------------------------------------------------------------------------------
@@ -179,7 +185,7 @@ if(BUILD_SHARED_LIBS)
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     )
 
-    target_link_libraries(pulsar_shared PUBLIC solidc::solidc)
+    target_link_libraries(pulsar_shared PUBLIC solidc::solidc tcp::tcp)
 endif()
 
 # ------------------------------------------------------------------------------

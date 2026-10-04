@@ -18,13 +18,15 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "../include/events.h"
 #include "../include/pulsar.h"
-#include "../include/pulsar_syscall.h"
 #include "fastparse.h"
 #include "keepalive.h"
 #include "plog.h"
 #include "pulsar_time.h"
+
+#include <tcp/tcp_events.h>
+#include <tcp/tcp_socket.h>
+#include <tcp/tcp_syscall.h>
 
 /* Enforce that the response header block never spills into the inline body
  * staging area. Kept as a macro so every header writer inlines the check. */
