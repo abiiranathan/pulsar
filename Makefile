@@ -61,7 +61,7 @@ else ifeq ($(BUILD), release)
 	#    sections. 0% runtime overhead, but fixes raw hex addresses in 'perf report'.
 	# 2. -fno-omit-frame-pointer: Keeps RBP for zero-overhead call-graph profiling (-g fp).
 	#    On x86-64 with 16 GPRs, the throughput difference is < 0.2%.
-	# 3. -fvisibility=hidden: Lets LTO devirtualize, inline, and prune symbols aggressively.
+	# 3. Keep the public Pulsar API visible to shared-library consumers.
 	# 4. -fmerge-all-constants: Merges identical strings and constants across compilation units.
 	OPT_FLAGS := -O3 -DNDEBUG -DENABLE_LOGGING=0 \
 				-g1 \
@@ -71,7 +71,6 @@ else ifeq ($(BUILD), release)
 				-fno-math-errno \
 				-fno-trapping-math \
 				-fstrict-aliasing \
-				-fvisibility=hidden \
 				-fmerge-all-constants \
 				-ffunction-sections \
 				-fdata-sections
@@ -189,11 +188,11 @@ $(TARGET): $(MAIN_SRC) $(ALL_OBJS)
 # Build object files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(filter-out $(BIN_FLAGS),$(CFLAGS)) -fPIC -c $< -o $@
 
 $(BUILD_DIR)/tcp_%.o: tcp/src/%.c $(TCP_HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Itcp/include -c $< -o $@
+	$(CC) $(filter-out $(BIN_FLAGS),$(CFLAGS)) -fPIC -Itcp/include -c $< -o $@
 
 # Build static library
 static: $(STATIC_LIB)
@@ -239,6 +238,8 @@ install: lib
 	ln -sf libpulsar.$(LIBEXT).$(LIB_VERSION) $(INSTALL_PREFIX)/lib/$(SONAME)
 	install -d $(INSTALL_PREFIX)/include/pulsar
 	install -m 644 $(HEADERS) $(INSTALL_PREFIX)/include/pulsar/
+	install -d $(INSTALL_PREFIX)/include/tcp
+	install -m 644 $(TCP_HEADERS) $(INSTALL_PREFIX)/include/tcp/
 ifeq ($(UNAME), Linux)
 	ldconfig
 endif
