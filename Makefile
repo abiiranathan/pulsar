@@ -28,8 +28,8 @@ endif
 
 # === Compiler & Linker Flags ===
 
-DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE -DNUM_WORKERS=4
-BASE_CFLAGS := -Wall -Werror -Wextra -std=c11 -Iinclude $(DEFINES) \
+DEFINES := -DDA_IMPLEMENTATION -D_GNU_SOURCE -DNUM_WORKERS=4 -DENABLE_SLOW_WORKERS=0
+BASE_CFLAGS := -Wall -Werror -Wextra -std=c11 -Iinclude -Itcp/include $(DEFINES) \
                -Wno-unused-function -Wno-gnu-zero-variadic-macro-arguments
 BASE_LDFLAGS := -pthread -lsolidc -lm
 
@@ -132,6 +132,8 @@ else
     $(error Invalid BUILD type: $(BUILD). Use 'debug' or 'release')
 endif
 
+SHARED_LDFLAGS := $(filter-out -pie,$(LDFLAGS))
+
 # === Directories and Files ===
 
 SRC_DIR := src
@@ -155,6 +157,10 @@ BASE_SRC := $(SRC_DIR)/routing.c \
 
 HEADERS := $(wildcard $(HEADERS_DIR)/*.h)
 LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(BASE_SRC))
+TCP_SRC := $(wildcard tcp/src/*.c)
+TCP_HEADERS := $(wildcard tcp/include/tcp/*.h)
+TCP_OBJS := $(patsubst tcp/src/%.c,$(BUILD_DIR)/tcp_%.o,$(TCP_SRC))
+ALL_OBJS := $(LIB_OBJS) $(TCP_OBJS)
 
 TEST_SRCS := $(wildcard $(TEST_DIR)/*.c)
 TEST_TARGETS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
@@ -176,19 +182,23 @@ MAIN_SRC := main.c
 all: $(TARGET)
 
 # Build main application
-$(TARGET): $(MAIN_SRC) $(LIB_OBJS)
+$(TARGET): $(MAIN_SRC) $(ALL_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(MAIN_SRC) $(LIB_OBJS) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(MAIN_SRC) $(ALL_OBJS) -o $@ $(LDFLAGS)
 
 # Build object files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/tcp_%.o: tcp/src/%.c $(TCP_HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itcp/include -c $< -o $@
+
 # Build static library
 static: $(STATIC_LIB)
 
-$(STATIC_LIB): $(LIB_OBJS)
+$(STATIC_LIB): $(ALL_OBJS)
 	@mkdir -p $(dir $@)
 	ar rcs $@ $^
 	ranlib $@
@@ -196,18 +206,18 @@ $(STATIC_LIB): $(LIB_OBJS)
 # Build shared library
 shared: $(SHARED_LIB)
 
-$(SHARED_LIB): $(LIB_OBJS)
+$(SHARED_LIB): $(ALL_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_FLAG) -Wl,$(SONAME_FLAG),$(SONAME) -o $@.$(LIB_VERSION) $^ $(LDFLAGS)
+	$(CC) $(SHARED_FLAG) -Wl,$(SONAME_FLAG),$(SONAME) -o $@.$(LIB_VERSION) $^ $(SHARED_LDFLAGS)
 	ln -sf libpulsar.$(LIBEXT).$(LIB_VERSION) $@
 	ln -sf libpulsar.$(LIBEXT).$(LIB_VERSION) $(BUILD_DIR)/$(SONAME)
 
 lib: static shared
 
 # Build test executables
-$(BUILD_DIR)/tests/%: $(TEST_DIR)/%.c $(LIB_OBJS)
+$(BUILD_DIR)/tests/%: $(TEST_DIR)/%.c $(ALL_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) -Itcp/include $< $(ALL_OBJS) -o $@ $(LDFLAGS)
 
 # Run tests
 test: $(TEST_TARGETS)
@@ -244,7 +254,7 @@ endif
 
 # Clean only compilation objects (preserves PGO data)
 clean-objs:
-	rm -f $(LIB_OBJS) $(TARGET) $(STATIC_LIB) $(SHARED_LIB)*
+	rm -f $(ALL_OBJS) $(TARGET) $(STATIC_LIB) $(SHARED_LIB)*
 
 # Full clean
 clean:
