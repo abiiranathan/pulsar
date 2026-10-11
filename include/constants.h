@@ -25,7 +25,7 @@
 
 // Background threads to handle SSE or slow requests via pulsar handoff mechanism.
 #ifndef ENABLE_SLOW_WORKERS
-#define ENABLE_SLOW_WORKERS 1
+#define ENABLE_SLOW_WORKERS 0
 #endif
 
 // Number of slow workers processing SSE or websocket requests.
